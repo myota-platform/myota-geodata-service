@@ -9,14 +9,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 
-MAX_IMPORT_FEATURES = 5_000
+MAX_IMPORT_FEATURES = int(os.environ.get("GEODATA_MAX_IMPORT_FEATURES", "5000"))
 MAX_ATTACHMENTS = 20
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-MAX_COORDINATES = 50_000
+MAX_COORDINATES = int(os.environ.get("GEODATA_MAX_COORDINATES", "50000"))
 SUPPORTED_CRS = {"EPSG:4326", "CRS84", "urn:ogc:def:crs:OGC:1.3:CRS84"}
 
 

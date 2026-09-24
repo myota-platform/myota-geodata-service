@@ -42,6 +42,19 @@ class GeoHandler(JsonHandler):
             raise PermissionError("approver scope does not cover this entity")
 
     @staticmethod
+    def _authorize_import(p: dict[str, str]) -> None:
+        if not p.get("_http"):
+            return
+        authorization = p.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise PermissionError("Bearer authentication is required")
+        claims = verify_token(authorization[7:])
+        scopes = set(claims.get("scp", []))
+        if "*" in scopes or "geodata.import" in scopes:
+            return
+        raise PermissionError("geodata.import scope is required")
+
+    @staticmethod
     def list_entities(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         programme = query.get("programme", [None])[0]
@@ -189,6 +202,7 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
         body = p["_body"]
         require(body, "programmeSlug", "adapter", "source")
         if "features" not in body or not isinstance(body["features"], list):
