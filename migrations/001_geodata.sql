@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS entity_type (
   config jsonb NOT NULL DEFAULT '{}'::jsonb,
   UNIQUE (programme_id, code)
 );
-
 CREATE TABLE IF NOT EXISTS geodata_entity (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   programme_id uuid NOT NULL,
@@ -70,4 +69,3 @@ CREATE TABLE IF NOT EXISTS conflation_candidate (
   reason jsonb NOT NULL DEFAULT '{}'::jsonb,
   resolution text NOT NULL DEFAULT 'OPEN' CHECK (resolution IN ('OPEN','MERGED','KEPT_SEPARATE','IGNORED'))
 );
-
