@@ -55,15 +55,57 @@ class GeoHandler(JsonHandler):
         raise PermissionError("geodata.import scope is required")
 
     @staticmethod
+    def _authorize_gis_admin(p: dict[str, str], entity: dict[str, Any], permission: str) -> None:
+        if not p.get("_http"):
+            return
+        authorization = p.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise PermissionError("Bearer authentication is required")
+        claims = verify_token(authorization[7:])
+        scopes = set(claims.get("scp", []))
+        if "*" in scopes:
+            return
+        roles = claims.get("roles", [])
+        for role in roles:
+            if role.get("role") not in ("GIS_ADMIN", "GLOBAL_OPERATOR"):
+                continue
+            if role.get("programmeSlug") and role["programmeSlug"] != entity.get("programmeSlug"):
+                continue
+            if role.get("jurisdiction") and role["jurisdiction"] != entity.get("jurisdiction"):
+                continue
+            return
+        if permission in scopes:
+            return
+        raise PermissionError("global or GIS administrator access is required")
+
+    @staticmethod
+    def _query_bounds(query: dict[str, list[str]]) -> tuple[float, float, float, float] | None:
+        keys = ("minLon", "minLat", "maxLon", "maxLat")
+        if not any(key in query for key in keys):
+            return None
+        try:
+            bounds = tuple(float(query.get(key, [""])[0]) for key in keys)
+        except ValueError as exc:
+            raise ValueError("minLon, minLat, maxLon and maxLat must be numbers") from exc
+        if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+            raise ValueError("map bounds must have minimum values below maximum values")
+        return bounds
+
+    @staticmethod
     def list_entities(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         programme = query.get("programme", [None])[0]
         status = query.get("status", [None])[0]
+        bounds = GeoHandler._query_bounds(query)
         items = list(GeoHandler.store.items.values())
         if programme:
             items = [i for i in items if i["programmeSlug"] == programme]
         if status:
             items = [i for i in items if i["status"] == status]
+        if bounds:
+            items = [i for i in items if i.get("geometry") and not (
+                (lambda box: box[2] < bounds[0] or box[0] > bounds[2] or box[3] < bounds[1] or box[1] > bounds[3])(geometry_bbox(i["geometry"]))
+            )]
         return page_result(items, query)
 
     @staticmethod
@@ -436,6 +478,69 @@ class GeoHandler(JsonHandler):
                                {"entityId": entity["id"], "editorId": body["editorId"], "note": body.get("note"), "geometry": geometry})
         return entity
 
+    @staticmethod
+    def change_geometry_type(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_gis_admin(p, entity, "geodata.geometry.manage")
+        body = p["_body"]
+        require(body, "geometryType", "editorId")
+        target = str(body["geometryType"]).upper()
+        if target not in {"POINT", "POLYGON"}:
+            raise ValueError("geometryType must be POINT or POLYGON")
+        current = str(entity.get("geometry", {}).get("type", "")).upper()
+        if current == target:
+            return entity
+        geometry = entity.get("geometry") or {}
+        if target == "POINT":
+            centre = geometry_centroid(geometry)
+            converted = {"type": "Point", "coordinates": [centre["lon"], centre["lat"]]}
+        elif current == "POINT":
+            coordinates = geometry.get("coordinates") or []
+            if len(coordinates) < 2:
+                raise ValueError("the existing point geometry is invalid")
+            lon, lat = float(coordinates[0]), float(coordinates[1])
+            delta = 0.0005
+            converted = {"type": "Polygon", "coordinates": [[[lon - delta, lat - delta], [lon + delta, lat - delta],
+                                                                  [lon + delta, lat + delta], [lon - delta, lat + delta],
+                                                                  [lon - delta, lat - delta]]]}
+        else:
+            rings = geometry.get("coordinates", [])
+            if current == "MULTIPOLYGON" and rings and rings[0]:
+                rings = rings[0]
+            if not rings:
+                raise ValueError("the existing polygon geometry is invalid")
+            converted = {"type": "Polygon", "coordinates": rings}
+        converted = normalize_geometry(converted)
+        changed_at = now()
+        entity.setdefault("geometryHistory", []).append({"action": "GEOMETRY_TYPE_CHANGED", "editorId": body["editorId"],
+                                                          "note": body.get("note"), "previousGeometry": geometry,
+                                                          "geometry": converted, "editedAt": changed_at})
+        entity.setdefault("reviewHistory", []).append({"action": "GEOMETRY_TYPE_CHANGED", "editorId": body["editorId"],
+                                                        "note": body.get("note"), "previousType": current,
+                                                        "geometryType": target, "occurredAt": changed_at})
+        entity["geometry"] = converted
+        entity["centroid"] = geometry_centroid(converted)
+        entity["updatedAt"] = changed_at
+        GeoHandler.store.event("geodata.entity.geometry-type-changed.v1", "entity", entity["id"],
+                               {"entityId": entity["id"], "editorId": body["editorId"], "previousType": current,
+                                "geometryType": target, "note": body.get("note")})
+        return entity
+
+    @staticmethod
+    def delete_rejected_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_gis_admin(p, entity, "geodata.delete")
+        if entity.get("status") != "REJECTED":
+            raise ValueError("only rejected entities can be permanently deleted")
+        entity_id = entity["id"]
+        for candidate_id, candidate in list(GeoHandler.store.data.setdefault("conflationCandidates", {}).items()):
+            if entity_id in (candidate.get("leftEntityId"), candidate.get("rightEntityId")):
+                GeoHandler.store.data["conflationCandidates"].pop(candidate_id, None)
+        GeoHandler.store.items.pop(entity_id, None)
+        GeoHandler.store.events[:] = [event for event in GeoHandler.store.events
+                                      if event.get("aggregate", {}).get("id") != entity_id]
+        return {"entityId": entity_id, "deleted": True, "_status": 204}
+
 
 GeoHandler.routes = {
     ("GET", "/v1/geodata/adapters"): GeoHandler.adapters,
@@ -458,6 +563,8 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
+    ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
+    ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_rejected_entity,
 }
 
 
