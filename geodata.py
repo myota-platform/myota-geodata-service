@@ -140,6 +140,37 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def set_status(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
+        body = p["_body"]
+        require(body, "status", "reviewerId")
+        allowed = {"APPROVED", "CANDIDATE", "PROPOSED", "RETIRED", "REJECTED"}
+        if body["status"] not in allowed:
+            raise ValueError("status must be APPROVED, CANDIDATE, PROPOSED, RETIRED, or REJECTED")
+        previous_status = entity["status"]
+        target_status = body["status"]
+        if previous_status == "APPROVED" and target_status != "RETIRED":
+            raise ValueError("approved entities can only be retired to protect historical QSOs")
+        if previous_status == "RETIRED" and target_status != "RETIRED":
+            raise ValueError("retired entities cannot be reactivated")
+        if previous_status == target_status:
+            return entity
+        changed_at = now()
+        entity["status"] = target_status
+        entity["review"] = {**(entity.get("review") or {}), "reviewerId": body["reviewerId"],
+                             "note": body.get("note"), "changedAt": changed_at}
+        entity.setdefault("reviewHistory", []).append({"action": "STATUS_CHANGED", "status": target_status,
+                                                        "previousStatus": previous_status, "reviewerId": body["reviewerId"],
+                                                        "note": body.get("note"), "occurredAt": changed_at})
+        entity["updatedAt"] = changed_at
+        GeoHandler.store.event("geodata.entity.status-changed.v1", "entity", entity["id"],
+                               {"entityId": entity["id"], "status": target_status,
+                                "previousStatus": previous_status, "reviewerId": body["reviewerId"],
+                                "note": body.get("note")})
+        return entity
+
+    @staticmethod
     def update_geometry(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
         GeoHandler._authorize_review(p, entity)
@@ -165,6 +196,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/imports/manual"): GeoHandler.import_manual,
     ("POST", "/v1/geodata/entities/{entityId}/propose"): GeoHandler.propose,
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
+    ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
 }
 
