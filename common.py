@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -20,6 +24,64 @@ def now() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _unb64(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def auth_signing_key() -> bytes:
+    value = os.environ.get("MYOTA_AUTH_SIGNING_KEY", "myota-development-key-change-me")
+    if os.environ.get("MYOTA_ENV", "development").lower() == "production" and value == "myota-development-key-change-me":
+        raise RuntimeError("MYOTA_AUTH_SIGNING_KEY must be set outside development")
+    return value.encode("utf-8")
+
+
+def sign_token(claims: dict[str, Any], token_type: str = "access") -> str:
+    header = {"alg": "HS256", "typ": "JWT", "tokenType": token_type}
+    encoded_header = _b64(json.dumps(header, separators=(",", ":")).encode())
+    encoded_claims = _b64(json.dumps(claims, separators=(",", ":")).encode())
+    signing_input = f"{encoded_header}.{encoded_claims}".encode()
+    signature = hmac.new(auth_signing_key(), signing_input, hashlib.sha256).digest()
+    return f"{encoded_header}.{encoded_claims}.{_b64(signature)}"
+
+
+def verify_token(token: str, expected_type: str | None = None) -> dict[str, Any]:
+    try:
+        encoded_header, encoded_claims, encoded_signature = token.split(".", 2)
+        signing_input = f"{encoded_header}.{encoded_claims}".encode()
+        expected = hmac.new(auth_signing_key(), signing_input, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, _unb64(encoded_signature)):
+            raise ValueError("invalid token signature")
+        header, claims = json.loads(_unb64(encoded_header)), json.loads(_unb64(encoded_claims))
+        if header.get("alg") != "HS256" or (expected_type and header.get("tokenType") != expected_type):
+            raise ValueError("invalid token type")
+        if int(claims.get("exp", 0)) <= int(datetime.now(timezone.utc).timestamp()):
+            raise ValueError("token expired")
+        return claims
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise PermissionError("invalid or expired token") from exc
+
+
+def hash_secret(value: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(value.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${_b64(salt)}${_b64(digest)}"
+
+
+def verify_secret(value: str, encoded: str) -> bool:
+    try:
+        scheme, salt, expected = encoded.split("$", 2)
+        if scheme != "scrypt":
+            return False
+        actual = hashlib.scrypt(value.encode(), salt=_unb64(salt), n=2**14, r=8, p=1)
+        return hmac.compare_digest(actual, _unb64(expected))
+    except (ValueError, TypeError):
+        return False
 
 
 def page_result(items: list[Any], query: dict[str, list[str]] | None = None) -> dict[str, Any]:
@@ -43,6 +105,7 @@ class Store:
         self.dsn = os.environ.get(dsn_env or "", "") if dsn_env else ""
         self.items: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self.data: dict[str, Any] = {}
         self.idempotency: dict[str, Any] = {}
         self.lock = threading.RLock()
         self._pool: Any = None
@@ -92,6 +155,7 @@ class Store:
             if row:
                 state = row[0]
                 self.items, self.events = state.get("items", {}), state.get("events", [])
+                self.data = state.get("data", {})
             rows = connection.execute("SELECT key, response FROM idempotency_record WHERE service = %s", (self.service,)).fetchall()
             self.idempotency = {key: response for key, response in rows}
         self._hydrated = True
@@ -103,7 +167,7 @@ class Store:
             connection.execute(
                 "INSERT INTO service_state(service, state, updated_at) VALUES (%s, %s::jsonb, now()) "
                 "ON CONFLICT (service) DO UPDATE SET state = EXCLUDED.state, updated_at = now()",
-                (self.service, json.dumps({"items": self.items, "events": self.events})))
+                (self.service, json.dumps({"items": self.items, "events": self.events, "data": self.data})))
             for event in self.events:
                 connection.execute(
                     "INSERT INTO outbox_event(event_id, event_type, producer, aggregate_type, aggregate_id, payload, occurred_at) "
@@ -222,7 +286,10 @@ class JsonHandler(BaseHTTPRequestHandler):
                 try:
                     body = read_json(self) if method == "POST" else {}
                     result = fn(self, {**params, "_body": body, "_path": self.path,
-                                       "Idempotency-Key": self.headers.get("Idempotency-Key")})
+                                       "Idempotency-Key": self.headers.get("Idempotency-Key"),
+                                       "Authorization": self.headers.get("Authorization", ""),
+                                       "User-Agent": self.headers.get("User-Agent", ""),
+                                       "Remote-Addr": self.client_address[0], "_http": "1"})
                     status = result.pop("_status", 200) if isinstance(result, dict) else 200
                     self.store.persist()
                     self._send(status, result)

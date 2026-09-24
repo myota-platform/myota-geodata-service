@@ -4,13 +4,39 @@ from http.server import ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from common import JsonHandler, Store, new_id, now, page_result, require
+from common import JsonHandler, Store, new_id, now, page_result, require, verify_token
 from import_adapters import normalize
 
 
 class GeoHandler(JsonHandler):
     service = "geodata-service"
     store = Store("geodata", "GEO_DATABASE_URL")
+
+    @staticmethod
+    def _authorize_review(p: dict[str, str], entity: dict[str, Any]) -> None:
+        if not p.get("_http"):
+            return
+        authorization = p.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise PermissionError("Bearer authentication is required")
+        claims = verify_token(authorization[7:])
+        scopes = set(claims.get("scp", []))
+        if "*" in scopes:
+            return
+        if "geodata.review" not in scopes:
+            raise PermissionError("geodata.review scope is required")
+        roles = claims.get("roles", [])
+        scoped = [r for r in roles if "geodata.review" in r.get("scopes", []) or r.get("role") == "GLOBAL_OPERATOR"]
+        for role in scoped:
+            if role.get("programmeSlug") and role["programmeSlug"] != entity.get("programmeSlug"):
+                continue
+            if role.get("entityType") and role["entityType"] != entity.get("entityType"):
+                continue
+            if role.get("jurisdiction") and role["jurisdiction"] != entity.get("jurisdiction"):
+                continue
+            return
+        if not any(r.get("role") == "GLOBAL_OPERATOR" for r in roles):
+            raise PermissionError("approver scope does not cover this entity")
 
     @staticmethod
     def list_entities(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -78,6 +104,7 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def review(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
         body = p["_body"]
         require(body, "decision", "reviewerId")
         if entity["status"] != "PROPOSED":
