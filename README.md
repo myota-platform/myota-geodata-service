@@ -10,6 +10,8 @@ This repository is a runnable vertical-slice bootstrap for the service repositor
 - Programme configuration: programme-owned entity types, rules, minimum QSOs, awards, theme and optional OIDC settings.
 - Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
+- Reverse-geocoded entity location fields: continent/country, ISO codes, first
+  country subdivision, optional province/county, and city/municipality.
 - Activation and QSO primitives with idempotency keys and audit events.
 - Universal themed frontend with verified/candidate map distinction.
 - OpenAPI and event contracts, ADRs, migration notes, health endpoints and local deployment manifests.
@@ -26,6 +28,26 @@ python3 services/dev_server.py
 Open <http://127.0.0.1:8080>. The dev server starts the four services on ports 8001–8004 and proxies the browser API calls. It is intentionally dependency-free.
 
 For a containerized PostGIS environment, use `docker compose up --build` after starting Colima. The image uses the same service code with `SERVICE=identity|programmes|geodata|activity`.
+
+## Reverse geocoding
+
+Server-side imports and geometry edits use BigDataCloud's Reverse Geocoding to
+City API. The service calls `https://api-bdc.net/data/reverse-geocode` with the
+entity centroid, keeps the normalized response on the entity, and preserves the
+provider response under `provenance.reverseGeocoding`.
+
+Copy `.env.example` to `.env` for local development and set
+`BIGDATACLOUD_API_KEY`. The real `.env` is ignored and must never be committed.
+Deployments should inject the key through a secret. The client-side free
+endpoint is intentionally not used because imports and stored entity
+coordinates are server-side/batch operations.
+
+The stable entity fields are `continent`, `continentCode`, `country`,
+`countryCode`, `region`, `regionCode`, `province`, `provinceCode`, `county`,
+`countyCode`, `city`, and `locality`. `regionCode` is the provider's first
+administrative subdivision code after the country (`principalSubdivisionCode`).
+Province and county are populated only when the provider supplies a matching
+administrative unit; the full administrative chain remains in provenance.
 
 ## Architecture
 

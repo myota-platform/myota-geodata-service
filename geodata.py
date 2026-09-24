@@ -9,6 +9,7 @@ from common import JsonHandler, Store, new_id, now, page_result, require, verify
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
                               normalize_geometry, source_manifest, validate_attachments)
 from import_adapters import normalize
+from reverse_geocoder import enrich_entity_location
 
 
 class GeoHandler(JsonHandler):
@@ -224,6 +225,7 @@ class GeoHandler(JsonHandler):
                           "reviewHistory": existing.get("reviewHistory", []) if existing else [],
                           "geometryHistory": existing.get("geometryHistory", []) if existing else [],
                           "createdAt": existing.get("createdAt", occurred_at) if existing else occurred_at, "updatedAt": occurred_at}
+                enrich_entity_location(entity)
                 GeoHandler.store.items[entity["id"]] = entity
                 (updated if existing else created).append(entity["id"])
                 records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
@@ -330,7 +332,9 @@ class GeoHandler(JsonHandler):
                 continue
             features.append({"type": "Feature", "id": entity["id"], "geometry": entity["geometry"],
                              "properties": {"name": entity["name"], "programmeSlug": entity["programmeSlug"], "status": entity["status"],
-                                            "entityType": entity.get("entityType"), "sourceRef": entity.get("sourceRef")}})
+                                            "entityType": entity.get("entityType"), "sourceRef": entity.get("sourceRef"),
+                                            "continentCode": entity.get("continentCode"), "countryCode": entity.get("countryCode"),
+                                            "regionCode": entity.get("regionCode"), "city": entity.get("city")}})
         truncated = len(features) > max_features
         return {"type": "FeatureCollection", "bbox": list(bounds), "features": features[:max_features],
                 "count": min(len(features), max_features), "truncated": truncated, "cacheTtlSeconds": 60,
@@ -472,7 +476,9 @@ class GeoHandler(JsonHandler):
         previous = entity.get("geometry")
         entity.setdefault("geometryHistory", []).append({"editorId": body["editorId"], "note": body.get("note"),
                                                           "geometry": previous, "editedAt": now()})
-        entity["geometry"] = geometry
+        entity["geometry"] = normalize_geometry(geometry)
+        entity["centroid"] = geometry_centroid(entity["geometry"])
+        enrich_entity_location(entity, force=True)
         entity["updatedAt"] = now()
         GeoHandler.store.event("geodata.entity.geometry-updated.v1", "entity", entity["id"],
                                {"entityId": entity["id"], "editorId": body["editorId"], "note": body.get("note"), "geometry": geometry})
@@ -520,6 +526,7 @@ class GeoHandler(JsonHandler):
                                                         "geometryType": target, "occurredAt": changed_at})
         entity["geometry"] = converted
         entity["centroid"] = geometry_centroid(converted)
+        enrich_entity_location(entity, force=True)
         entity["updatedAt"] = changed_at
         GeoHandler.store.event("geodata.entity.geometry-type-changed.v1", "entity", entity["id"],
                                {"entityId": entity["id"], "editorId": body["editorId"], "previousType": current,
@@ -601,6 +608,9 @@ def seed() -> None:
             "review": {"reviewerId": "seed-approver", "reviewedAt": now(), "note": "Seeded verified OSM reference"} if park["status"] == "APPROVED" else None,
             "reviewHistory": [{"action": "APPROVED", "reviewerId": "seed-approver", "note": "Seeded verified OSM reference", "occurredAt": now(), "previousStatus": "PROPOSED"}] if park["status"] == "APPROVED" else [],
             "geometryHistory": [], "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
+        enrich_entity_location(GeoHandler.store.items[park["id"]])
+    for entity in GeoHandler.store.items.values():
+        enrich_entity_location(entity)
 
 
 if __name__ == "__main__":

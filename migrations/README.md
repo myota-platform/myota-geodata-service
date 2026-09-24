@@ -8,6 +8,9 @@ ordered SQL files define the `myota_geo` database:
 2. `002_qgis_views.sql` creates the read-only QGIS review views.
 3. `003_production_pipeline.sql` adds refresh manifests, schedules,
    disappearance policy, attachments, conflation history and QGIS staging.
+4. `004_location_enrichment.sql` adds normalized continent, country,
+   subdivision, province, county and city fields plus reverse-geocoding
+   provenance and indexes.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
