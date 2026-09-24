@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
+import math
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from common import JsonHandler, Store, new_id, now, page_result, require, verify_token
+from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
+                              normalize_geometry, source_manifest, validate_attachments)
 from import_adapters import normalize
 
 
@@ -51,6 +54,15 @@ class GeoHandler(JsonHandler):
         return page_result(items, query)
 
     @staticmethod
+    def adapters(_: JsonHandler, __: dict[str, str]) -> dict[str, Any]:
+        return {"adapters": [
+            {"code": "PARKSERVE_US", "formats": ["PARKSERVE_US", "GEOJSON"], "requires": ["license", "retrievedAt", "sourceRef"]},
+            {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground"], "attribution": "© OpenStreetMap contributors"},
+            {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "SHAPEFILE", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
+            {"code": "MANUAL", "formats": ["GEOJSON"], "requires": ["programmeSlug", "feature"]}
+        ]}
+
+    @staticmethod
     def get_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         return GeoHandler.store.items[p["entityId"]]
 
@@ -64,42 +76,264 @@ class GeoHandler(JsonHandler):
                            if event.get("aggregate", {}).get("id") == entity["id"]]}
 
     @staticmethod
+    def _source_key(source: dict[str, Any]) -> str:
+        return str(source.get("sourceKey") or source.get("url") or source.get("name") or "unknown-source")
+
+    @staticmethod
+    def _create_conflation_candidates(entity: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates = GeoHandler.store.data.setdefault("conflationCandidates", {})
+        created = []
+        for existing in GeoHandler.store.items.values():
+            if existing["id"] == entity["id"] or existing.get("programmeSlug") != entity.get("programmeSlug"):
+                continue
+            if entity.get("sourceRef") and entity.get("sourceRef") == existing.get("sourceRef"):
+                continue
+            comparison = conflation_score(entity, existing) if entity.get("geometry") and existing.get("geometry") else {"score": 0.0, "signals": {}}
+            if comparison["score"] < 0.55:
+                continue
+            pair = sorted([entity["id"], existing["id"]])
+            candidate_id = digest(pair)[:32]
+            if candidate_id in candidates:
+                continue
+            candidate = {"id": candidate_id, "programmeSlug": entity["programmeSlug"], "leftEntityId": pair[0], "rightEntityId": pair[1],
+                         "score": comparison["score"], "signals": comparison["signals"], "resolution": "OPEN",
+                         "resolutionHistory": [], "createdAt": now(), "updatedAt": now()}
+            candidates[candidate_id] = candidate
+            created.append(candidate)
+        return created
+
+    @staticmethod
+    def _apply_disappearance(programme: str, source_key: str, adapter: str, seen_refs: set[str], policy: str) -> list[str]:
+        if policy not in {"UNCHANGED", "STALE", "RETIRED", "REVIEW_REQUIRED"}:
+            raise ValueError("disappearancePolicy must be UNCHANGED, STALE, RETIRED, or REVIEW_REQUIRED")
+        changed = []
+        for entity in GeoHandler.store.items.values():
+            provenance = entity.get("provenance") or {}
+            if entity.get("programmeSlug") != programme or provenance.get("adapter") != adapter or provenance.get("sourceKey") != source_key:
+                continue
+            if not entity.get("sourceRef") or entity["sourceRef"] in seen_refs:
+                continue
+            if policy == "UNCHANGED":
+                continue
+            occurred_at = now()
+            entity["sourceState"] = "STALE" if policy == "STALE" else "REVIEW_REQUIRED" if policy == "REVIEW_REQUIRED" else "RETIRED"
+            if policy == "RETIRED" and entity["status"] != "RETIRED":
+                previous = entity["status"]
+                entity["status"] = "RETIRED"
+            else:
+                previous = entity["status"]
+            entity.setdefault("reviewHistory", []).append({"action": "SOURCE_DISAPPEARED", "policy": policy,
+                                                             "previousStatus": previous, "occurredAt": occurred_at})
+            entity["updatedAt"] = occurred_at
+            changed.append(entity["id"])
+            GeoHandler.store.event("geodata.entity.source-disappeared.v1", "entity", entity["id"],
+                                   {"entityId": entity["id"], "policy": policy, "previousStatus": previous})
+        return changed
+
+    @staticmethod
+    def _import_features(body: dict[str, Any], run_id: str) -> dict[str, Any]:
+        if len(body["features"]) > MAX_IMPORT_FEATURES:
+            raise ValueError(f"an import may contain at most {MAX_IMPORT_FEATURES} features")
+        adapter = body["adapter"]
+        source = dict(body["source"])
+        if adapter == "OSM":
+            source.setdefault("attribution", "© OpenStreetMap contributors")
+        source_key = GeoHandler._source_key(source)
+        records = []
+        created, updated, skipped, errors, conflation = [], [], [], [], []
+        for index, raw_feature in enumerate(body["features"]):
+            try:
+                feature = normalize(adapter, raw_feature)
+                props = feature.get("properties", {})
+                source_ref = str(props.get("sourceRef") or props.get("id") or f"record-{index}")
+                if props.get("skipReason") == "FILTERED_TAG":
+                    skipped.append({"sourceRef": source_ref, "reason": props["skipReason"]})
+                    continue
+                if not feature.get("geometry"):
+                    skipped.append({"sourceRef": source_ref, "reason": "MISSING_GEOMETRY"})
+                    continue
+                geometry = normalize_geometry(feature["geometry"], props.get("crs"))
+                attachments = validate_attachments(raw_feature.get("attachments") or props.get("attachments"))
+                existing = next((item for item in GeoHandler.store.items.values()
+                                 if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == body["programmeSlug"]), None)
+                occurred_at = now()
+                entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": body["programmeSlug"],
+                          "entityType": props.get("entityType", "MUNICIPAL_PARK"), "name": props.get("name", "Unnamed candidate"),
+                          "status": existing["status"] if existing else "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
+                          "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
+                          "attachments": attachments, "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
+                                         "sourceFeature": raw_feature, "importRunId": run_id, "sourceHash": digest(raw_feature),
+                                         "license": source.get("license"), "attribution": source.get("attribution"),
+                                         "retrievedAt": source.get("retrievedAt", occurred_at)},
+                          "review": existing.get("review") if existing else None,
+                          "reviewHistory": existing.get("reviewHistory", []) if existing else [],
+                          "geometryHistory": existing.get("geometryHistory", []) if existing else [],
+                          "createdAt": existing.get("createdAt", occurred_at) if existing else occurred_at, "updatedAt": occurred_at}
+                GeoHandler.store.items[entity["id"]] = entity
+                (updated if existing else created).append(entity["id"])
+                records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
+                conflation.extend(GeoHandler._create_conflation_candidates(entity))
+            except (TypeError, ValueError) as error:
+                errors.append({"index": index, "message": str(error)})
+        seen_refs = {record["sourceRef"] for record in records}
+        disappeared = GeoHandler._apply_disappearance(body["programmeSlug"], source_key, adapter, seen_refs,
+                                                       body.get("disappearancePolicy", "REVIEW_REQUIRED")) if body.get("completeSnapshot") else []
+        manifest = source_manifest(adapter, source, records, run_id)
+        manifest["sourceKey"] = source_key
+        manifest["sourceChanged"] = not any(item.get("sourceHash") == manifest["sourceHash"] for item in GeoHandler.store.data.setdefault("sourceManifests", {}).values() if item.get("sourceKey") == source_key)
+        GeoHandler.store.data["sourceManifests"][run_id] = manifest
+        result = {"importRunId": run_id, "adapter": adapter, "created": created, "updated": updated, "skipped": skipped,
+                  "errors": errors, "disappeared": disappeared, "conflationCandidates": [item["id"] for item in conflation],
+                  "manifest": manifest, "_status": 202}
+        return result
+
+    @staticmethod
     def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         body = p["_body"]
-        require(body, "programmeSlug", "adapter", "source", "features")
+        require(body, "programmeSlug", "adapter", "source")
+        if "features" not in body or not isinstance(body["features"], list):
+            raise ValueError("features must be a list")
         if body["adapter"] not in ("PARKSERVE_US", "OSM", "GOVERNMENT_GIS", "MANUAL"):
             raise ValueError("unsupported adapter")
         def import_run() -> dict[str, Any]:
             run_id = new_id()
-            created, updated, skipped = [], [], []
-            for raw_feature in body["features"]:
-                feature = normalize(body["adapter"], raw_feature)
-                props = feature.get("properties", {})
-                source_ref = str(props.get("sourceRef") or props.get("id") or "")
-                existing = next((e for e in GeoHandler.store.items.values() if source_ref and e.get("sourceRef") == source_ref and e["programmeSlug"] == body["programmeSlug"]), None)
-                entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": body["programmeSlug"],
-                          "entityType": props.get("entityType", "MUNICIPAL_PARK"), "name": props.get("name", "Unnamed candidate"),
-                          "status": existing["status"] if existing else "CANDIDATE", "geometry": feature.get("geometry"),
-                          "centroid": props.get("centroid"), "sourceRef": source_ref or None,
-                          "provenance": {"adapter": body["adapter"], "source": body["source"], "sourceFeature": raw_feature,
-                                         "importRunId": run_id,
-                                         "license": body["source"].get("license"), "retrievedAt": body["source"].get("retrievedAt", now())},
-                          "review": existing.get("review") if existing else None,
-                          "reviewHistory": existing.get("reviewHistory", []) if existing else [],
-                          "geometryHistory": existing.get("geometryHistory", []) if existing else [],
-                          "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
-                if existing:
-                    GeoHandler.store.items[entity["id"]] = entity
-                    updated.append(entity["id"])
-                else:
-                    GeoHandler.store.items[entity["id"]] = entity
-                    created.append(entity["id"])
-                if not feature.get("geometry"):
-                    skipped.append(entity["id"])
-            result = {"importRunId": run_id, "adapter": body["adapter"], "created": created, "updated": updated, "skipped": skipped, "_status": 202}
+            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body["programmeSlug"],
+                "adapter": body["adapter"], "source": body["source"], "status": "RUNNING", "startedAt": now()}
+            result = GeoHandler._import_features(body, run_id)
+            GeoHandler.store.data["importRuns"][run_id].update({"status": "COMPLETED" if not result["errors"] else "COMPLETED_WITH_ERRORS",
+                "completedAt": now(), "stats": {key: len(result[key]) for key in ("created", "updated", "skipped", "errors", "disappeared")},
+                "manifest": result["manifest"]})
             GeoHandler.store.event("geodata.import.accepted.v1", "import_run", run_id, result)
             return result
         return GeoHandler.store.once(p.get("Idempotency-Key"), import_run)
+
+    @staticmethod
+    def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        query = parse_qs(urlparse(p.get("_path", "")).query)
+        return page_result(list(GeoHandler.store.data.setdefault("importRuns", {}).values()), query)
+
+    @staticmethod
+    def get_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        return GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
+
+    @staticmethod
+    def create_schedule(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = p["_body"]
+        require(body, "programmeSlug", "adapter", "source", "intervalSeconds")
+        interval = int(body["intervalSeconds"])
+        if interval < 300:
+            raise ValueError("refresh interval must be at least 300 seconds")
+        schedule = {"id": new_id(), "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "source": body["source"],
+                    "intervalSeconds": interval, "disappearancePolicy": body.get("disappearancePolicy", "REVIEW_REQUIRED"),
+                    "enabled": bool(body.get("enabled", True)), "lastRunAt": None, "nextRunAt": now(), "createdAt": now()}
+        GeoHandler.store.data.setdefault("schedules", {})[schedule["id"]] = schedule
+        GeoHandler.store.event("geodata.refresh-schedule.created.v1", "refresh_schedule", schedule["id"], schedule)
+        return {**schedule, "_status": 201}
+
+    @staticmethod
+    def list_schedules(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        query = parse_qs(urlparse(p.get("_path", "")).query)
+        return page_result(list(GeoHandler.store.data.setdefault("schedules", {}).values()), query)
+
+    @staticmethod
+    def refresh_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        schedule = GeoHandler.store.data.setdefault("schedules", {})[p["scheduleId"]]
+        if not schedule.get("enabled"):
+            raise ValueError("refresh schedule is disabled")
+        body = p["_body"]
+        if "features" not in body or not isinstance(body["features"], list):
+            raise ValueError("features must be a list")
+        body = {**body, "programmeSlug": schedule["programmeSlug"], "adapter": schedule["adapter"], "source": schedule["source"],
+                "disappearancePolicy": schedule["disappearancePolicy"], "completeSnapshot": True}
+        result = GeoHandler.import_manual(None, {"_body": body, "Idempotency-Key": p.get("Idempotency-Key")})
+        schedule["lastRunAt"], schedule["nextRunAt"] = now(), now()
+        return result
+
+    @staticmethod
+    def bbox(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        query = parse_qs(urlparse(p.get("_path", "")).query)
+        try:
+            bounds = tuple(float(query.get(key, [""])[0]) for key in ("minLon", "minLat", "maxLon", "maxLat"))
+        except ValueError as exc:
+            raise ValueError("minLon, minLat, maxLon and maxLat are required numbers") from exc
+        if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+            raise ValueError("bbox must have min values below max values")
+        programme = query.get("programme", [None])[0]
+        status = query.get("status", [None])[0]
+        max_features = min(1000, max(1, int(query.get("limit", ["500"])[0])))
+        features = []
+        for entity in GeoHandler.store.items.values():
+            if programme and entity.get("programmeSlug") != programme:
+                continue
+            if status and entity.get("status") != status:
+                continue
+            if not entity.get("geometry"):
+                continue
+            entity_box = geometry_bbox(entity["geometry"])
+            if entity_box[2] < bounds[0] or entity_box[0] > bounds[2] or entity_box[3] < bounds[1] or entity_box[1] > bounds[3]:
+                continue
+            features.append({"type": "Feature", "id": entity["id"], "geometry": entity["geometry"],
+                             "properties": {"name": entity["name"], "programmeSlug": entity["programmeSlug"], "status": entity["status"],
+                                            "entityType": entity.get("entityType"), "sourceRef": entity.get("sourceRef")}})
+        truncated = len(features) > max_features
+        return {"type": "FeatureCollection", "bbox": list(bounds), "features": features[:max_features],
+                "count": min(len(features), max_features), "truncated": truncated, "cacheTtlSeconds": 60,
+                "cacheKey": digest({"bbox": bounds, "programme": programme, "status": status,
+                                     "entityVersions": sorted((entity["id"], entity.get("updatedAt")) for entity in GeoHandler.store.items.values())}),
+                "performanceBudgetMs": 250}
+
+    @staticmethod
+    def tile(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        try:
+            zoom, tile_x, tile_y = int(p["z"]), int(p["x"]), int(p["y"])
+        except ValueError as exc:
+            raise ValueError("tile coordinates must be integers") from exc
+        if not 0 <= zoom <= 22 or not 0 <= tile_x < 2 ** zoom or not 0 <= tile_y < 2 ** zoom:
+            raise ValueError("invalid Web Mercator tile coordinates")
+        count = 2 ** zoom
+        min_lon = tile_x / count * 360 - 180
+        max_lon = (tile_x + 1) / count * 360 - 180
+        def latitude(tile_row: int) -> float:
+            radians = math.atan(math.sinh(math.pi * (1 - 2 * tile_row / count)))
+            return math.degrees(radians)
+        max_lat, min_lat = latitude(tile_y), latitude(tile_y + 1)
+        query = f"/v1/geodata/bbox?minLon={min_lon}&minLat={min_lat}&maxLon={max_lon}&maxLat={max_lat}&limit=500"
+        return GeoHandler.bbox(None, {"_path": query}) | {"tile": {"z": zoom, "x": tile_x, "y": tile_y}, "format": "geojson-vector"}
+
+    @staticmethod
+    def list_conflation(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        query = parse_qs(urlparse(p.get("_path", "")).query)
+        items = list(GeoHandler.store.data.setdefault("conflationCandidates", {}).values())
+        resolution = query.get("resolution", [None])[0]
+        if resolution:
+            items = [item for item in items if item.get("resolution") == resolution]
+        return page_result(items, query)
+
+    @staticmethod
+    def resolve_conflation(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = p["_body"]
+        require(body, "decision", "reviewerId")
+        if body["decision"] not in {"MERGED", "KEPT_SEPARATE", "IGNORED", "OPEN"}:
+            raise ValueError("decision must be MERGED, KEPT_SEPARATE, IGNORED, or OPEN")
+        item = GeoHandler.store.data.setdefault("conflationCandidates", {})[p["candidateId"]]
+        previous = item["resolution"]
+        item["resolution"] = body["decision"]
+        item["survivorEntityId"] = body.get("survivorEntityId")
+        item.setdefault("resolutionHistory", []).append({"decision": body["decision"], "previousDecision": previous,
+                                                           "reviewerId": body["reviewerId"], "note": body.get("note"), "occurredAt": now()})
+        item["updatedAt"] = now()
+        GeoHandler.store.event("geodata.conflation.resolved.v1", "conflation_candidate", item["id"], item)
+        return item
+
+    @staticmethod
+    def draw_proposal(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = p["_body"]
+        require(body, "programmeSlug", "feature")
+        feature = dict(body["feature"])
+        feature["attachments"] = body.get("attachments", feature.get("attachments"))
+        return GeoHandler.import_manual(None, {"_body": {"programmeSlug": body["programmeSlug"], "adapter": "MANUAL",
+            "source": {**(body.get("source") or {}), "name": (body.get("source") or {}).get("name", "Manual proposal"),
+                        "license": (body.get("source") or {}).get("license", "programme-supplied")}, "features": [feature]}})
 
     @staticmethod
     def propose(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -190,10 +424,22 @@ class GeoHandler(JsonHandler):
 
 
 GeoHandler.routes = {
+    ("GET", "/v1/geodata/adapters"): GeoHandler.adapters,
     ("GET", "/v1/geodata/entities"): GeoHandler.list_entities,
     ("GET", "/v1/geodata/entities/{entityId}"): GeoHandler.get_entity,
     ("GET", "/v1/geodata/entities/{entityId}/audit"): GeoHandler.audit_entity,
+    ("GET", "/v1/geodata/bbox"): GeoHandler.bbox,
+    ("GET", "/v1/geodata/tiles/{z}/{x}/{y}"): GeoHandler.tile,
+    ("GET", "/v1/geodata/imports"): GeoHandler.list_imports,
+    ("GET", "/v1/geodata/imports/{runId}"): GeoHandler.get_import,
+    ("GET", "/v1/geodata/refresh-schedules"): GeoHandler.list_schedules,
+    ("GET", "/v1/geodata/conflation"): GeoHandler.list_conflation,
     ("POST", "/v1/geodata/imports/manual"): GeoHandler.import_manual,
+    ("POST", "/v1/geodata/imports"): GeoHandler.import_manual,
+    ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
+    ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
+    ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,
+    ("POST", "/v1/geodata/conflation/{candidateId}/resolve"): GeoHandler.resolve_conflation,
     ("POST", "/v1/geodata/entities/{entityId}/propose"): GeoHandler.propose,
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
@@ -229,8 +475,8 @@ def seed() -> None:
         source_feature = {"type": "Feature", "id": f"way/{park['osmId']}", "properties": {"name": park["name"], "sourceRef": park["sourceRef"], "osmUrl": park["osmUrl"], "leisure": "park"}, "geometry": park["geometry"]}
         GeoHandler.store.items[park["id"]] = {
             "id": park["id"], "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK", "name": park["name"],
-            "status": park["status"], "sourceRef": park["sourceRef"], "geometry": park["geometry"], "centroid": park["centroid"],
-            "provenance": {"adapter": "OSM", "source": source, "sourceFeature": source_feature, "tags": {"leisure": "park"}},
+            "status": park["status"], "sourceState": "CURRENT", "sourceRef": park["sourceRef"], "geometry": park["geometry"], "centroid": park["centroid"],
+            "provenance": {"adapter": "OSM", "source": source, "sourceKey": "OpenStreetMap", "sourceFeature": source_feature, "tags": {"leisure": "park"}},
             "review": {"reviewerId": "seed-approver", "reviewedAt": now(), "note": "Seeded verified OSM reference"} if park["status"] == "APPROVED" else None,
             "reviewHistory": [{"action": "APPROVED", "reviewerId": "seed-approver", "note": "Seeded verified OSM reference", "occurredAt": now(), "previousStatus": "PROPOSED"}] if park["status"] == "APPROVED" else [],
             "geometryHistory": [], "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
