@@ -171,22 +171,37 @@ GeoHandler.routes = {
 
 def seed() -> None:
     GeoHandler.store.hydrate()
-    if GeoHandler.store.items:
-        return
-    GeoHandler.store.items["00000000-0000-4000-8000-000000000201"] = {
-        "id": "00000000-0000-4000-8000-000000000201", "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK",
-        "name": "Demo Verified Riverside Park", "status": "APPROVED", "sourceRef": "demo-approved-1",
-        "geometry": {"type": "Polygon", "coordinates": [[[-3.71, 40.41], [-3.70, 40.41], [-3.70, 40.42], [-3.71, 40.42], [-3.71, 40.41]]]},
-        "centroid": {"lat": 40.415, "lon": -3.705}, "provenance": {"adapter": "GOVERNMENT_GIS", "source": {"name": "Demo municipal GIS", "license": "ODbL-compatible demo"}},
-        "review": {"reviewerId": "demo-approver", "reviewedAt": now()},
-        "reviewHistory": [{"action": "APPROVED", "reviewerId": "demo-approver", "note": "Demo verified reference", "occurredAt": now(), "previousStatus": "PROPOSED"}],
-        "geometryHistory": [], "createdAt": now(), "updatedAt": now()}
-    GeoHandler.store.items["00000000-0000-4000-8000-000000000202"] = {
-        "id": "00000000-0000-4000-8000-000000000202", "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK",
-        "name": "Demo Candidate Neighbourhood Park", "status": "CANDIDATE", "sourceRef": "demo-candidate-1",
-        "geometry": {"type": "Point", "coordinates": [-3.69, 40.425]}, "centroid": {"lat": 40.425, "lon": -3.69},
-        "provenance": {"adapter": "OSM", "source": {"name": "OpenStreetMap", "license": "ODbL 1.0", "retrievedAt": now()}, "tags": {"leisure": "park"}},
-        "review": None, "createdAt": now(), "updatedAt": now()}
+    # These are deliberately small, real-world Sevilla examples for local
+    # development. The OSM references and source snapshots remain visible so
+    # they can be replaced by a licensed import run before production.
+    parks = [
+        {"id": "00000000-0000-4000-8000-000000000201", "name": "Parque de María Luisa", "status": "APPROVED",
+         "sourceRef": "osm-way-19394336", "osmId": 19394336, "osmUrl": "https://www.openstreetmap.org/way/19394336",
+         "centroid": {"lat": 37.374771, "lon": -5.9887943},
+         "geometry": {"type": "Polygon", "coordinates": [[[-5.9912281, 37.3759294], [-5.9900663, 37.3733659], [-5.9887632, 37.3712101], [-5.9854955, 37.3738139], [-5.986897, 37.3751501], [-5.9884592, 37.37816], [-5.9895231, 37.3787974], [-5.9912281, 37.3759294]]]}},
+        {"id": "00000000-0000-4000-8000-000000000202", "name": "Parque del Alamillo", "status": "APPROVED",
+         "sourceRef": "osm-way-39729420", "osmId": 39729420, "osmUrl": "https://www.openstreetmap.org/way/39729420",
+         "centroid": {"lat": 37.4183029, "lon": -5.9956268},
+         "geometry": {"type": "Polygon", "coordinates": [[[-6.0022151, 37.4188257], [-6.0008522, 37.4138541], [-5.9943133, 37.4123107], [-5.9915312, 37.4130282], [-5.9892589, 37.4199065], [-5.9907927, 37.4233188], [-5.9950954, 37.4253328], [-5.9995267, 37.4220373], [-6.0022151, 37.4188257]]]}},
+        {"id": "00000000-0000-4000-8000-000000000203", "name": "Parque de los Príncipes", "status": "CANDIDATE",
+         "sourceRef": "osm-way-28604482", "osmId": 28604482, "osmUrl": "https://www.openstreetmap.org/way/28604482",
+         "centroid": {"lat": 37.3739359, "lon": -6.006222},
+         "geometry": {"type": "Polygon", "coordinates": [[[-6.0084926, 37.3743451], [-6.0070003, 37.3726282], [-6.0038193, 37.3721343], [-6.0036725, 37.3730037], [-6.00429, 37.3741577], [-6.005208, 37.3753131], [-6.0062121, 37.3755272], [-6.0084926, 37.3743451]]]}}
+    ]
+    for park in parks:
+        existing = GeoHandler.store.items.get(park["id"])
+        if existing and not str(existing.get("sourceRef", "")).startswith(("demo-", "osm-way-")):
+            continue
+        retrieved_at = existing.get("provenance", {}).get("source", {}).get("retrievedAt") if existing else None
+        source = {"name": "OpenStreetMap", "license": "ODbL 1.0", "retrievedAt": retrieved_at or now(), "url": park["osmUrl"]}
+        source_feature = {"type": "Feature", "id": f"way/{park['osmId']}", "properties": {"name": park["name"], "sourceRef": park["sourceRef"], "osmUrl": park["osmUrl"], "leisure": "park"}, "geometry": park["geometry"]}
+        GeoHandler.store.items[park["id"]] = {
+            "id": park["id"], "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK", "name": park["name"],
+            "status": park["status"], "sourceRef": park["sourceRef"], "geometry": park["geometry"], "centroid": park["centroid"],
+            "provenance": {"adapter": "OSM", "source": source, "sourceFeature": source_feature, "tags": {"leisure": "park"}},
+            "review": {"reviewerId": "seed-approver", "reviewedAt": now(), "note": "Seeded verified OSM reference"} if park["status"] == "APPROVED" else None,
+            "reviewHistory": [{"action": "APPROVED", "reviewerId": "seed-approver", "note": "Seeded verified OSM reference", "occurredAt": now(), "previousStatus": "PROPOSED"}] if park["status"] == "APPROVED" else [],
+            "geometryHistory": [], "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
 
 
 if __name__ == "__main__":
