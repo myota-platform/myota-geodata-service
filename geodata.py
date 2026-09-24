@@ -4,13 +4,13 @@ from http.server import ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from common import JsonHandler, Store, new_id, now, require
+from common import JsonHandler, Store, new_id, now, page_result, require
 from import_adapters import normalize
 
 
 class GeoHandler(JsonHandler):
     service = "geodata-service"
-    store = Store()
+    store = Store("geodata", "GEO_DATABASE_URL")
 
     @staticmethod
     def list_entities(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -22,7 +22,7 @@ class GeoHandler(JsonHandler):
             items = [i for i in items if i["programmeSlug"] == programme]
         if status:
             items = [i for i in items if i["status"] == status]
-        return {"items": items, "count": len(items)}
+        return page_result(items, query)
 
     @staticmethod
     def get_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -101,6 +101,9 @@ GeoHandler.routes = {
 
 
 def seed() -> None:
+    GeoHandler.store.hydrate()
+    if GeoHandler.store.items:
+        return
     GeoHandler.store.items["00000000-0000-4000-8000-000000000201"] = {
         "id": "00000000-0000-4000-8000-000000000201", "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK",
         "name": "Demo Verified Riverside Park", "status": "APPROVED", "sourceRef": "demo-approved-1",
