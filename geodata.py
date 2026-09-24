@@ -55,6 +55,15 @@ class GeoHandler(JsonHandler):
         return GeoHandler.store.items[p["entityId"]]
 
     @staticmethod
+    def audit_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        return {"entityId": entity["id"], "status": entity["status"],
+                "reviewHistory": entity.get("reviewHistory", []),
+                "geometryHistory": entity.get("geometryHistory", []),
+                "events": [event for event in GeoHandler.store.events
+                           if event.get("aggregate", {}).get("id") == entity["id"]]}
+
+    @staticmethod
     def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         body = p["_body"]
         require(body, "programmeSlug", "adapter", "source", "features")
@@ -72,9 +81,13 @@ class GeoHandler(JsonHandler):
                           "entityType": props.get("entityType", "MUNICIPAL_PARK"), "name": props.get("name", "Unnamed candidate"),
                           "status": existing["status"] if existing else "CANDIDATE", "geometry": feature.get("geometry"),
                           "centroid": props.get("centroid"), "sourceRef": source_ref or None,
-                          "provenance": {"adapter": body["adapter"], "source": body["source"], "importRunId": run_id,
+                          "provenance": {"adapter": body["adapter"], "source": body["source"], "sourceFeature": raw_feature,
+                                         "importRunId": run_id,
                                          "license": body["source"].get("license"), "retrievedAt": body["source"].get("retrievedAt", now())},
-                          "review": existing.get("review") if existing else None, "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
+                          "review": existing.get("review") if existing else None,
+                          "reviewHistory": existing.get("reviewHistory", []) if existing else [],
+                          "geometryHistory": existing.get("geometryHistory", []) if existing else [],
+                          "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
                 if existing:
                     GeoHandler.store.items[entity["id"]] = entity
                     updated.append(entity["id"])
@@ -95,8 +108,13 @@ class GeoHandler(JsonHandler):
         require(body, "proposerId")
         if entity["status"] not in ("CANDIDATE", "REJECTED"):
             raise ValueError("only candidate or rejected entities can be proposed")
+        previous_status = entity["status"]
         entity["status"] = "PROPOSED"
-        entity["review"] = {"proposerId": body["proposerId"], "note": body.get("note"), "proposedAt": now()}
+        proposed_at = now()
+        entity["review"] = {"proposerId": body["proposerId"], "note": body.get("note"), "proposedAt": proposed_at}
+        entity.setdefault("reviewHistory", []).append({"action": "PROPOSED", "proposerId": body["proposerId"],
+                                                        "note": body.get("note"), "occurredAt": proposed_at,
+                                                        "previousStatus": previous_status})
         entity["updatedAt"] = now()
         GeoHandler.store.event("geodata.entity.proposed.v1", "entity", entity["id"], entity)
         return entity
@@ -111,19 +129,43 @@ class GeoHandler(JsonHandler):
             raise ValueError("only proposed entities can be reviewed")
         if body["decision"] not in ("APPROVED", "REJECTED"):
             raise ValueError("decision must be APPROVED or REJECTED")
+        reviewed_at = now()
         entity["status"] = body["decision"]
-        entity["review"] = {**(entity.get("review") or {}), "reviewerId": body["reviewerId"], "note": body.get("note"), "reviewedAt": now()}
+        entity["review"] = {**(entity.get("review") or {}), "reviewerId": body["reviewerId"], "note": body.get("note"), "reviewedAt": reviewed_at}
+        entity.setdefault("reviewHistory", []).append({"action": body["decision"], "reviewerId": body["reviewerId"],
+                                                        "note": body.get("note"), "occurredAt": reviewed_at,
+                                                        "previousStatus": "PROPOSED"})
         entity["updatedAt"] = now()
         GeoHandler.store.event("geodata.entity.reviewed.v1", "entity", entity["id"], entity)
+        return entity
+
+    @staticmethod
+    def update_geometry(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
+        body = p["_body"]
+        require(body, "geometry", "editorId")
+        geometry = body["geometry"]
+        if not isinstance(geometry, dict) or geometry.get("type") not in ("Point", "Polygon", "MultiPolygon") or "coordinates" not in geometry:
+            raise ValueError("geometry must be a GeoJSON Point, Polygon, or MultiPolygon")
+        previous = entity.get("geometry")
+        entity.setdefault("geometryHistory", []).append({"editorId": body["editorId"], "note": body.get("note"),
+                                                          "geometry": previous, "editedAt": now()})
+        entity["geometry"] = geometry
+        entity["updatedAt"] = now()
+        GeoHandler.store.event("geodata.entity.geometry-updated.v1", "entity", entity["id"],
+                               {"entityId": entity["id"], "editorId": body["editorId"], "note": body.get("note"), "geometry": geometry})
         return entity
 
 
 GeoHandler.routes = {
     ("GET", "/v1/geodata/entities"): GeoHandler.list_entities,
     ("GET", "/v1/geodata/entities/{entityId}"): GeoHandler.get_entity,
+    ("GET", "/v1/geodata/entities/{entityId}/audit"): GeoHandler.audit_entity,
     ("POST", "/v1/geodata/imports/manual"): GeoHandler.import_manual,
     ("POST", "/v1/geodata/entities/{entityId}/propose"): GeoHandler.propose,
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
+    ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
 }
 
 
@@ -136,7 +178,9 @@ def seed() -> None:
         "name": "Demo Verified Riverside Park", "status": "APPROVED", "sourceRef": "demo-approved-1",
         "geometry": {"type": "Polygon", "coordinates": [[[-3.71, 40.41], [-3.70, 40.41], [-3.70, 40.42], [-3.71, 40.42], [-3.71, 40.41]]]},
         "centroid": {"lat": 40.415, "lon": -3.705}, "provenance": {"adapter": "GOVERNMENT_GIS", "source": {"name": "Demo municipal GIS", "license": "ODbL-compatible demo"}},
-        "review": {"reviewerId": "demo-approver", "reviewedAt": now()}, "createdAt": now(), "updatedAt": now()}
+        "review": {"reviewerId": "demo-approver", "reviewedAt": now()},
+        "reviewHistory": [{"action": "APPROVED", "reviewerId": "demo-approver", "note": "Demo verified reference", "occurredAt": now(), "previousStatus": "PROPOSED"}],
+        "geometryHistory": [], "createdAt": now(), "updatedAt": now()}
     GeoHandler.store.items["00000000-0000-4000-8000-000000000202"] = {
         "id": "00000000-0000-4000-8000-000000000202", "programmeSlug": "mpota", "entityType": "MUNICIPAL_PARK",
         "name": "Demo Candidate Neighbourhood Park", "status": "CANDIDATE", "sourceRef": "demo-candidate-1",
