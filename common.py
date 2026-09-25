@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import base64
+import errno
 import hashlib
 import hmac
 import os
@@ -234,18 +235,25 @@ class JsonHandler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, payload: Any) -> None:
         data = b"" if status == 204 else json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("X-Request-ID", self.request_id)
-        self.send_header("X-Correlation-ID", self.correlation_id)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Correlation-ID")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("API-Version", "v1")
-        self.end_headers()
-        if data:
-            self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Request-ID", self.request_id)
+            self.send_header("X-Correlation-ID", self.correlation_id)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Correlation-ID")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("API-Version", "v1")
+            self.end_headers()
+            if data:
+                self.wfile.write(data)
+        except OSError as exc:
+            # Browser fetch cancellation, navigation, and proxy timeouts can
+            # close the socket before a response is fully written. There is
+            # no second response to send, so do not turn that into a traceback.
+            if exc.errno not in {errno.EPIPE, errno.ECONNRESET, errno.ESHUTDOWN}:
+                raise
 
     def _error(self, status: int, code: str, detail: str) -> None:
         self._send(status, {"type": f"https://myota.dev/problems/{code}", "title": code.replace("_", " ").title(),
