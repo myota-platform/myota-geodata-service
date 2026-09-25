@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 import math
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -571,6 +572,31 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def change_entity_type(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
+        body = p["_body"]
+        require(body, "entityType", "editorId")
+        if entity.get("status") == "RETIRED":
+            raise ValueError("retired entities cannot change category")
+        entity_type = str(body["entityType"]).strip().upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", entity_type):
+            raise ValueError("entityType must be a stable category code")
+        previous = entity.get("entityType")
+        if entity_type == previous:
+            return entity
+        changed_at = now()
+        entity["entityType"] = entity_type
+        entity.setdefault("reviewHistory", []).append({"action": "ENTITY_TYPE_CHANGED", "editorId": body["editorId"],
+                                                         "previousEntityType": previous, "entityType": entity_type,
+                                                         "note": body.get("note"), "occurredAt": changed_at})
+        entity["updatedAt"] = changed_at
+        GeoHandler.store.event("geodata.entity.entity-type-changed.v1", "entity", entity["id"],
+                               {"entityId": entity["id"], "editorId": body["editorId"],
+                                "previousEntityType": previous, "entityType": entity_type, "note": body.get("note")})
+        return entity
+
+    @staticmethod
     def change_geometry_type(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
         GeoHandler._authorize_gis_admin(p, entity, "geodata.geometry.manage")
@@ -690,6 +716,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
     ("POST", "/v1/geodata/entities/{entityId}/location"): GeoHandler.update_location,
+    ("POST", "/v1/geodata/entities/{entityId}/entity-type"): GeoHandler.change_entity_type,
     ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
     ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_rejected_entity,
 }

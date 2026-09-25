@@ -45,6 +45,15 @@ class GeometryWayTests(unittest.TestCase):
         result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "POLYGON", "editorId": "admin"}})
         self.assertEqual(result["geometry"]["type"], "Polygon")
 
+    def test_entity_category_change_is_audited(self):
+        GeoHandler.store.items["entity-1"]["entityType"] = "MUNICIPAL_PARK"
+        result = GeoHandler.change_entity_type(None, {"entityId": "entity-1", "_body": {
+            "entityType": "TRAIL", "editorId": "admin", "note": "Reclassified as a trail"
+        }})
+        self.assertEqual(result["entityType"], "TRAIL")
+        self.assertEqual(result["reviewHistory"][-1]["action"], "ENTITY_TYPE_CHANGED")
+        self.assertEqual(result["reviewHistory"][-1]["previousEntityType"], "MUNICIPAL_PARK")
+
 
 if __name__ == "__main__":
     unittest.main()
