@@ -99,17 +99,33 @@ class GeoHandler(JsonHandler):
     def list_entities(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         programme = query.get("programme", [None])[0]
-        status = query.get("status", [None])[0]
+        statuses = {value.strip().upper() for raw in query.get("status", []) for value in raw.split(",") if value.strip()}
         bounds = GeoHandler._query_bounds(query)
         items = list(GeoHandler.store.items.values())
         if programme:
             items = [i for i in items if i["programmeSlug"] == programme]
-        if status:
-            items = [i for i in items if i["status"] == status]
+        if statuses and "ALL" not in statuses:
+            items = [i for i in items if str(i.get("status", "")).upper() in statuses]
+        exact_filters = {
+            "entityType": "entityType",
+            "continent": "continent",
+            "country": "country",
+            "region": "region",
+            "province": "province",
+        }
+        for query_field, entity_field in exact_filters.items():
+            value = query.get(query_field, [None])[0]
+            if value:
+                items = [i for i in items if str(i.get(entity_field) or (i.get("location") or {}).get(entity_field) or "").casefold() == value.casefold()]
+        city = query.get("city", [None])[0]
+        if city:
+            target = city.casefold()
+            items = [i for i in items if any(str(i.get(field) or (i.get("location") or {}).get(field) or "").casefold() == target for field in ("city", "municipality"))]
         if bounds:
             items = [i for i in items if i.get("geometry") and not (
                 (lambda box: box[2] < bounds[0] or box[0] > bounds[2] or box[3] < bounds[1] or box[1] > bounds[3])(geometry_bbox(i["geometry"]))
             )]
+        items.sort(key=lambda item: (str(item.get("name") or "").casefold(), str(item.get("id") or "")))
         return page_result(items, query)
 
     @staticmethod

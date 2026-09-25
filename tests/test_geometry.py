@@ -97,6 +97,25 @@ class GeometryWayTests(unittest.TestCase):
         self.assertIsNone(entity["programmeSlug"])
         self.assertEqual(entity["status"], "CANDIDATE")
 
+    def test_review_filters_support_multiple_statuses_location_and_paging(self):
+        self.previous_items = GeoHandler.store.items
+        GeoHandler.store.items = {
+            "a": {"id": "a", "name": "Alpha", "status": "APPROVED", "entityType": "MUNICIPAL_PARK", "programmeSlug": None,
+                  "country": "Spain", "region": "Andalucia", "province": "Sevilla", "city": "Sevilla", "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]}},
+            "b": {"id": "b", "name": "Bravo", "status": "CANDIDATE", "entityType": "TRAIL", "programmeSlug": None,
+                  "country": "Spain", "region": "Andalucia", "province": "Sevilla", "city": "Dos Hermanas", "geometry": {"type": "Point", "coordinates": [-5.95, 37.28]}},
+            "c": {"id": "c", "name": "Charlie", "status": "REJECTED", "entityType": "TRAIL", "programmeSlug": None,
+                  "country": "Spain", "region": "Andalucia", "province": "Cadiz", "city": "Cadiz", "geometry": {"type": "Point", "coordinates": [-6.29, 36.53]}},
+        }
+        try:
+            result = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?status=CANDIDATE&status=APPROVED&country=Spain&region=Andalucia&province=Sevilla&pageSize=1"})
+            self.assertEqual(result["total"], 2)
+            self.assertEqual(result["items"][0]["name"], "Alpha")
+            next_page = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?status=CANDIDATE,APPROVED&city=Dos%20Hermanas&pageSize=10"})
+            self.assertEqual([item["name"] for item in next_page["items"]], ["Bravo"])
+        finally:
+            GeoHandler.store.items = self.previous_items
+
 
 if __name__ == "__main__":
     unittest.main()
