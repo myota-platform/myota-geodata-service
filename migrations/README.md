@@ -16,6 +16,9 @@ ordered SQL files define the `myota_geo` database:
 6. `006_unscoped_imports.sql` makes programme assignment optional for
    imported candidates and adds the category field used by global refresh
    schedules.
+7. `007_relational_entity_persistence.sql` adds the nullable cross-service
+   programme slug and shared category code columns used by the service's
+   relational entity persistence adapter.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

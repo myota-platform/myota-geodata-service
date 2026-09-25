@@ -6,9 +6,10 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from common import JsonHandler, Store, new_id, now, page_result, require, verify_token
+from common import JsonHandler, new_id, now, page_result, require, verify_token
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
                               normalize_geometry, source_manifest, validate_attachments)
+from geodata_store import GeodataStore
 from import_adapters import normalize
 from import_formats import SUPPORTED_FORMATS, parse_text, parse_uploaded
 from location_catalog import build_location_tree, derive_location_codes
@@ -17,7 +18,7 @@ from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
 class GeoHandler(JsonHandler):
     service = "geodata-service"
-    store = Store("geodata", "GEO_DATABASE_URL")
+    store = GeodataStore("geodata", "GEO_DATABASE_URL")
 
     @staticmethod
     def _authorize_review(p: dict[str, str], entity: dict[str, Any]) -> None:
@@ -806,6 +807,7 @@ class GeoHandler(JsonHandler):
         for candidate_id, candidate in list(GeoHandler.store.data.setdefault("conflationCandidates", {}).items()):
             if entity_id in (candidate.get("leftEntityId"), candidate.get("rightEntityId")):
                 GeoHandler.store.data["conflationCandidates"].pop(candidate_id, None)
+        GeoHandler.store.delete_relational(entity_id)
         GeoHandler.store.items.pop(entity_id, None)
         GeoHandler.store.events[:] = [event for event in GeoHandler.store.events
                                       if event.get("aggregate", {}).get("id") != entity_id]
