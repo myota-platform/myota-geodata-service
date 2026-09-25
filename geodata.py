@@ -9,7 +9,7 @@ from common import JsonHandler, Store, new_id, now, page_result, require, verify
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
                               normalize_geometry, source_manifest, validate_attachments)
 from import_adapters import normalize
-from reverse_geocoder import enrich_entity_location
+from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
 
 class GeoHandler(JsonHandler):
@@ -187,6 +187,17 @@ class GeoHandler(JsonHandler):
         return changed
 
     @staticmethod
+    def _preserve_manual_location(existing: dict[str, Any] | None, entity: dict[str, Any]) -> None:
+        if not existing:
+            entity["manualLocationFields"] = []
+            return
+        manual_fields = set(existing.get("manualLocationFields") or []) & set(LOCATION_FIELDS)
+        entity["manualLocationFields"] = sorted(manual_fields)
+        for field in manual_fields:
+            if field in existing:
+                entity[field] = existing[field]
+
+    @staticmethod
     def _import_features(body: dict[str, Any], run_id: str) -> dict[str, Any]:
         if len(body["features"]) > MAX_IMPORT_FEATURES:
             raise ValueError(f"an import may contain at most {MAX_IMPORT_FEATURES} features")
@@ -225,6 +236,7 @@ class GeoHandler(JsonHandler):
                           "reviewHistory": existing.get("reviewHistory", []) if existing else [],
                           "geometryHistory": existing.get("geometryHistory", []) if existing else [],
                           "createdAt": existing.get("createdAt", occurred_at) if existing else occurred_at, "updatedAt": occurred_at}
+                GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
                 GeoHandler.store.items[entity["id"]] = entity
                 (updated if existing else created).append(entity["id"])
@@ -485,6 +497,61 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def update_location(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_gis_admin(p, entity, "geodata.location.manage")
+        body = p["_body"]
+        require(body, "editorId")
+        if "location" not in body:
+            raise ValueError("location must be an object")
+        location = body["location"]
+        if not isinstance(location, dict):
+            raise ValueError("location must be an object")
+        allowed = set(LOCATION_FIELDS)
+        unknown = set(location) - allowed
+        if unknown:
+            raise ValueError(f"unsupported location fields: {', '.join(sorted(unknown))}")
+        requested_manual = body.get("manualFields", list(location))
+        if not isinstance(requested_manual, list) or not set(requested_manual) <= allowed:
+            raise ValueError("manualFields must be a list of supported location fields")
+        manual_fields = set(requested_manual)
+        previous_manual = set(entity.get("manualLocationFields") or [])
+        released_fields = previous_manual - manual_fields
+
+        def normalize_value(field: str, value: Any) -> Any:
+            if value is None:
+                return None
+            if not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"location field {field} must be a scalar or null")
+            value = str(value).strip()
+            return value.upper() if field.endswith("Code") else value or None
+
+        previous = {field: entity.get(field) for field in LOCATION_FIELDS}
+        for field in manual_fields:
+            if field in location:
+                entity[field] = normalize_value(field, location[field])
+        for field in released_fields:
+            entity[field] = None
+        entity["manualLocationFields"] = sorted(manual_fields)
+        enrich_entity_location(entity, force=True)
+        changed_at = now()
+        entity.setdefault("reviewHistory", []).append({
+            "action": "LOCATION_UPDATED", "editorId": body["editorId"], "note": body.get("note"),
+            "manualFields": sorted(manual_fields), "previous": previous,
+            "location": {field: entity.get(field) for field in LOCATION_FIELDS}, "occurredAt": changed_at,
+        })
+        entity.setdefault("provenance", {})["manualLocation"] = {
+            "fields": sorted(manual_fields), "editorId": body["editorId"], "note": body.get("note"),
+            "updatedAt": changed_at,
+        }
+        entity["updatedAt"] = changed_at
+        GeoHandler.store.event("geodata.entity.location-updated.v1", "entity", entity["id"], {
+            "entityId": entity["id"], "editorId": body["editorId"], "manualFields": sorted(manual_fields),
+            "note": body.get("note"),
+        })
+        return entity
+
+    @staticmethod
     def change_geometry_type(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
         GeoHandler._authorize_gis_admin(p, entity, "geodata.geometry.manage")
@@ -570,6 +637,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
+    ("POST", "/v1/geodata/entities/{entityId}/location"): GeoHandler.update_location,
     ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
     ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_rejected_entity,
 }

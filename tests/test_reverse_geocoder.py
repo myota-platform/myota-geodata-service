@@ -1,6 +1,6 @@
 import unittest
 
-from reverse_geocoder import normalize_response
+from reverse_geocoder import apply_location_result, normalize_response
 
 
 class ReverseGeocoderTests(unittest.TestCase):
@@ -36,6 +36,24 @@ class ReverseGeocoderTests(unittest.TestCase):
         })
         self.assertEqual(result["province"], "Sevilla")
         self.assertIsNone(result["county"])
+
+    def test_manual_location_fields_are_not_overwritten_by_provider(self):
+        entity = {
+            "country": "Reino de España",
+            "countryCode": "ES",
+            "region": "Andalucía manual",
+            "manualLocationFields": ["country", "countryCode", "region"],
+        }
+        apply_location_result(entity, {
+            "country": "Spain", "countryCode": "ES", "region": "Andalucia", "regionCode": "ES-AN",
+            "city": "Sevilla", "municipality": "Sevilla",
+        })
+        self.assertEqual(entity["country"], "Reino de España")
+        self.assertEqual(entity["countryCode"], "ES")
+        self.assertEqual(entity["region"], "Andalucía manual")
+        self.assertEqual(entity["regionCode"], "ES-AN")
+        self.assertEqual(entity["city"], "Sevilla")
+        self.assertEqual(entity["location"]["municipality"], "Sevilla")
 
 
 if __name__ == "__main__":

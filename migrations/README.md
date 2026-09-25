@@ -11,6 +11,8 @@ ordered SQL files define the `myota_geo` database:
 4. `004_location_enrichment.sql` adds normalized continent, country,
    subdivision, province, county and city fields plus reverse-geocoding
    provenance and indexes.
+5. `005_location_manual_precedence.sql` adds the municipality alias and
+   durable manual-location override fields, index, and QGIS view projections.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

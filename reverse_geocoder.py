@@ -38,7 +38,8 @@ _load_local_env()
 
 LOCATION_FIELDS = (
     "continent", "continentCode", "country", "countryCode", "region", "regionCode",
-    "province", "provinceCode", "county", "countyCode", "city", "locality",
+    "subdivision", "subdivisionCode", "province", "provinceCode", "county", "countyCode",
+    "city", "municipality", "locality",
 )
 
 
@@ -110,6 +111,7 @@ def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
         "county": county_name,
         "countyCode": value(county_entry, "isoCode"),
         "city": city_name,
+        "municipality": city_name,
         "locality": payload.get("locality"),
         "geocodeProvider": "BIGDATACLOUD",
         "geocodeStatus": "ENRICHED",
@@ -157,6 +159,20 @@ class ReverseGeocoder:
 GEOCODER = ReverseGeocoder()
 
 
+def apply_location_result(entity: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Merge provider data without overwriting explicitly managed fields."""
+    manual_fields = set(entity.get("manualLocationFields") or [])
+    for field in LOCATION_FIELDS:
+        if field in result and field not in manual_fields:
+            entity[field] = result[field]
+    for field in ("geocodeProvider", "geocodeStatus", "geocodeLookupSource", "geocodeError", "geocodedAt"):
+        if field in result:
+            entity[field] = result[field]
+    entity["manualLocationFields"] = sorted(manual_fields)
+    entity["location"] = {field: entity.get(field) for field in LOCATION_FIELDS}
+    return entity
+
+
 def enrich_entity_location(entity: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
     """Enrich an entity from its centroid while keeping provider provenance."""
     if not force and entity.get("geocodeStatus") == "ENRICHED" and entity.get("countryCode"):
@@ -166,13 +182,7 @@ def enrich_entity_location(entity: dict[str, Any], *, force: bool = False) -> di
         result = GEOCODER.lookup(float(centroid["lat"]), float(centroid["lon"]))
     except (KeyError, TypeError, ValueError):
         result = {"geocodeProvider": "BIGDATACLOUD", "geocodeStatus": "SKIPPED_NO_CENTROID", "geocodedAt": now()}
-    for field in LOCATION_FIELDS:
-        if field in result:
-            entity[field] = result[field]
-    for field in ("subdivision", "subdivisionCode", "geocodeProvider", "geocodeStatus", "geocodeLookupSource", "geocodeError", "geocodedAt"):
-        if field in result:
-            entity[field] = result[field]
-    entity["location"] = {field: entity.get(field) for field in LOCATION_FIELDS}
+    apply_location_result(entity, result)
     provenance = entity.setdefault("provenance", {})
     provenance["reverseGeocoding"] = {key: value for key, value in result.items() if key != "geocodePayload"}
     if "geocodePayload" in result:

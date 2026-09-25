@@ -43,11 +43,19 @@ endpoint is intentionally not used because imports and stored entity
 coordinates are server-side/batch operations.
 
 The stable entity fields are `continent`, `continentCode`, `country`,
-`countryCode`, `region`, `regionCode`, `province`, `provinceCode`, `county`,
-`countyCode`, `city`, and `locality`. `regionCode` is the provider's first
-administrative subdivision code after the country (`principalSubdivisionCode`).
+`countryCode`, `region`, `regionCode`, `subdivision`, `subdivisionCode`,
+`province`, `provinceCode`, `county`, `countyCode`, `city`, `municipality`, and
+`locality`. `regionCode` and `subdivisionCode` identify the provider's first
+administrative subdivision after the country (`principalSubdivisionCode`).
 Province and county are populated only when the provider supplies a matching
 administrative unit; the full administrative chain remains in provenance.
+
+Administrators can edit these fields through
+`POST /v1/geodata/entities/{entityId}/location` with `location`,
+`manualFields`, `editorId`, and an optional note. The service records the
+manual field set in `manualLocationFields` and never overwrites those fields
+when an import, geometry edit, or reverse-geocoding refresh runs. Removing a
+field from `manualFields` explicitly returns it to provider-managed values.
 
 ## Architecture
 
