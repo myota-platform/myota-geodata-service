@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
 import math
+import os
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -11,7 +13,7 @@ from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geo
                               normalize_geometry, source_manifest, validate_attachments)
 from geodata_store import GeodataStore
 from import_adapters import normalize
-from import_formats import SUPPORTED_FORMATS, parse_text, parse_uploaded
+from import_formats import SUPPORTED_FORMATS, TEXT_FORMATS, parse_text, parse_uploaded
 from location_catalog import build_location_tree, derive_location_codes
 from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
@@ -40,6 +42,8 @@ def entity_categories(entity: dict[str, Any]) -> list[str]:
 class GeoHandler(JsonHandler):
     service = "geodata-service"
     store = GeodataStore("geodata", "GEO_DATABASE_URL")
+    import_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_IMPORT_WORKERS", "2"))),
+                                          thread_name_prefix="geodata-import")
 
     @staticmethod
     def _authorize_review(p: dict[str, str], entity: dict[str, Any]) -> None:
@@ -318,8 +322,8 @@ class GeoHandler(JsonHandler):
         return result
 
     @staticmethod
-    def _start_import(body: dict[str, Any], features: list[dict[str, Any]], p: dict[str, str], filename: str | None = None) -> dict[str, Any]:
-        body = {**body, "features": features}
+    def _prepare_import_body(body: dict[str, Any], features: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        body = {**body}
         require(body, "adapter", "source")
         categories = entity_type_codes(body.get("entityTypes") or body.get("entityTypeCodes"), body.get("entityType"))
         if not categories:
@@ -331,21 +335,81 @@ class GeoHandler(JsonHandler):
             raise ValueError("unsupported adapter")
         if body.get("format", "GEOJSON").upper() not in SUPPORTED_FORMATS:
             raise ValueError("unsupported import format")
-        for feature in body["features"]:
+        for feature in features or []:
             feature["properties"] = {**(feature.get("properties") or {}), "entityType": body["entityType"], "entityTypes": categories, "entityTypeCodes": categories}
-        run_id = new_id()
-        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body.get("programmeSlug"),
+        return body
+
+    @staticmethod
+    def _create_import_run(body: dict[str, Any], filename: str | None, run_id: str | None = None) -> tuple[str, dict[str, Any]]:
+        run_id = run_id or new_id()
+        categories = entity_type_codes(body.get("entityTypes") or body.get("entityTypeCodes"), body.get("entityType"))
+        record = {"id": run_id, "programmeSlug": body.get("programmeSlug"),
             "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(), "entityType": body["entityType"], "entityTypes": categories,
-            "source": body["source"], "filename": filename, "status": "QUEUED", "queuedAt": now(), "startedAt": now()}
+            "source": body["source"], "filename": filename, "status": "QUEUED", "queuedAt": now(), "featureCount": len(body.get("features") or []) or None}
+        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
         GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id,
             "programmeSlug": body.get("programmeSlug"), "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
             "entityType": body["entityType"], "entityTypes": categories, "filename": filename})
-        result = GeoHandler._import_features(body, run_id)
-        GeoHandler.store.data["importRuns"][run_id].update({"status": "COMPLETED" if not result["errors"] else "COMPLETED_WITH_ERRORS",
-            "completedAt": now(), "stats": {key: len(result[key]) for key in ("created", "updated", "skipped", "errors", "disappeared")},
-            "manifest": result["manifest"]})
+        return run_id, record
+
+    @staticmethod
+    def _complete_import_run(run_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+        run.update({"status": "COMPLETED" if not result.get("errors") else "COMPLETED_WITH_ERRORS", "completedAt": now(),
+                    "stats": {key: len(result.get(key, [])) for key in ("created", "updated", "skipped", "errors", "disappeared")},
+                    "errors": result.get("errors", []), "manifest": result.get("manifest"),
+                    "conflationCandidateCount": len(result.get("conflationCandidates", []))})
         GeoHandler.store.event("geodata.import.accepted.v1", "import_run", run_id, result)
-        return {**result, "status": GeoHandler.store.data["importRuns"][run_id]["status"], "queued": True}
+        return run
+
+    @staticmethod
+    def _fail_import_run(run_id: str, error: Exception) -> dict[str, Any]:
+        run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+        run.update({"status": "FAILED", "completedAt": now(), "errors": [{"message": str(error)}],
+                    "stats": {"created": 0, "updated": 0, "skipped": 0, "errors": 1, "disappeared": 0}})
+        GeoHandler.store.event("geodata.import.failed.v1", "import_run", run_id, {"importRunId": run_id, "error": str(error)})
+        return run
+
+    @staticmethod
+    def _queue_import(body: dict[str, Any], p: dict[str, str], filename: str | None,
+                      loader: Any) -> dict[str, Any]:
+        run_id, record = GeoHandler._create_import_run(body, filename)
+
+        def process() -> None:
+            try:
+                with GeoHandler.store.lock:
+                    run = GeoHandler.store.data["importRuns"][run_id]
+                    run.update({"status": "PROCESSING", "startedAt": now()})
+                    GeoHandler.store.persist()
+                features = loader()
+                prepared = GeoHandler._prepare_import_body(body, features)
+                with GeoHandler.store.lock:
+                    GeoHandler.store.data["importRuns"][run_id]["featureCount"] = len(features)
+                result = GeoHandler._import_features({**prepared, "features": features}, run_id)
+                with GeoHandler.store.lock:
+                    GeoHandler._complete_import_run(run_id, result)
+                    GeoHandler.store.persist()
+            except Exception as error:  # imports must report failure in the run, not fail the HTTP request
+                with GeoHandler.store.lock:
+                    GeoHandler._fail_import_run(run_id, error)
+                    GeoHandler.store.persist()
+
+        # Persist the QUEUED record before the worker can finish, preventing a
+        # fast worker from being overwritten by the request handler's final save.
+        if p.get("_http"):
+            GeoHandler.store.persist()
+        GeoHandler.import_executor.submit(process)
+        return {**record, "queued": True, "_status": 202}
+
+    @staticmethod
+    def _start_import(body: dict[str, Any], features: list[dict[str, Any]], p: dict[str, str], filename: str | None = None) -> dict[str, Any]:
+        body = GeoHandler._prepare_import_body({**body, "features": features}, features)
+        if p.get("_http"):
+            return GeoHandler._queue_import(body, p, filename, lambda: features)
+        run_id, _ = GeoHandler._create_import_run(body, filename)
+        result = GeoHandler._import_features(body, run_id)
+        run = GeoHandler._complete_import_run(run_id, result)
+        return {**result, "status": run["status"], "queued": True}
 
     @staticmethod
     def enqueue_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -360,8 +424,14 @@ class GeoHandler(JsonHandler):
             return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, body["features"], p, body.get("filename")))
         if "content" not in body or not isinstance(body["content"], str):
             raise ValueError("content must contain copied text or features must be a list")
-        features = parse_text(format_code, body["content"])
-        return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, features, p, body.get("filename")))
+        content = body["content"]
+        if not content.strip():
+            raise ValueError("content must not be empty")
+        if not p.get("_http"):
+            return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, parse_text(format_code, content), p, body.get("filename")))
+        prepared = GeoHandler._prepare_import_body({**body, "format": format_code})
+        return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._queue_import(
+            prepared, p, body.get("filename"), lambda: parse_text(format_code, content)))
 
     @staticmethod
     def upload_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -387,8 +457,12 @@ class GeoHandler(JsonHandler):
             body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
         except ImportError:
             body = {**body, "source": {**body["source"], "sha256": __import__("hashlib").sha256(content).hexdigest()}}
+        if format_code in TEXT_FORMATS or format_code in {"WFS", "ARCGIS_FEATURESERVER", "SHAPEFILE", "SHP"}:
+            prepared = GeoHandler._prepare_import_body({**body, "format": format_code})
+            return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._queue_import(
+                prepared, p, body["filename"], lambda: parse_uploaded(format_code, content, body["filename"])))
         try:
-            features = parse_uploaded(format_code, content, body["filename"])
+            parse_uploaded(format_code, content, body["filename"])
         except ValueError:
             if format_code not in {"OSM_PBF", "PARKSERVE_US"}:
                 raise
@@ -399,7 +473,7 @@ class GeoHandler(JsonHandler):
             GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
             GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id, **record})
             return {**record, "queued": True, "_status": 202}
-        return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import({**body, "format": format_code}, features, p, body["filename"]))
+        raise ValueError(f"unsupported upload format {format_code}")
 
     @staticmethod
     def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:

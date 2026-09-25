@@ -16,7 +16,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Iterator
 
-MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", "1048576"))
+# Geodata imports are sent as JSON envelopes and can legitimately contain a
+# sizeable pasted FeatureCollection. Deployments may lower this explicitly,
+# but the service default must not reject ordinary large dataset intake.
+MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", "33554432"))
 
 
 def require_durable_database(dsn_env: str | None, dsn: str) -> None:

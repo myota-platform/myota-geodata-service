@@ -93,10 +93,19 @@ metadata, and must pass the normal proposal and approval workflow.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. File uploads use `POST /v1/geodata/imports/upload` with a base64
-payload, filename, and the same category/source metadata. The deployment
-stores uploaded bytes in MinIO and records a `geodata.import.queued.v1`
-outbox event for NATS consumers. Shapefile uploads must be ZIP archives with
-their `.shp`, `.shx`, and `.dbf` members.
+payload, filename, and the same category/source metadata. Both paths return
+`202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
+candidate persistence run in a bounded background import worker. The
+deployment stores uploaded bytes in MinIO and records a
+`geodata.import.queued.v1` outbox event for NATS consumers. Shapefile uploads
+must be ZIP archives with their `.shp`, `.shx`, and `.dbf` members.
+
+Use `GET /v1/geodata/imports/{runId}` to retrieve the durable run summary.
+It includes status/timestamps, source manifest information, and counts for
+created, updated, skipped, disappeared, and failed features. The default
+request limit is 32 MiB (`MYOTA_MAX_BODY_BYTES`); deployments may set a lower
+bounded value. The admin web treats the text area as optional when a file is
+selected and links each recent run to this summary.
 
 During review, `POST /v1/geodata/entities/{entityId}/entity-type` changes the
 ordered shared Master data category list, regardless of whether
