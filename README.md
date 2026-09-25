@@ -9,6 +9,7 @@ This repository is a runnable vertical-slice bootstrap for the service repositor
 - Amateur-radio-aware identity: operator/SWL participation, multiple callsigns, one primary callsign, lifecycle and verification fields.
 - Programme configuration: programme-owned entity types, rules, minimum QSOs, awards, theme and optional OIDC settings.
 - Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
+- GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.

@@ -10,7 +10,8 @@ from typing import Any
 from geodata_pipeline import normalize_geometry
 
 
-OSM_REQUIRED_TAGS = ("leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground")
+OSM_REQUIRED_TAGS = ("leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground",
+                     "highway=path", "highway=footway", "highway=track", "highway=bridleway", "route=hiking")
 GOVERNMENT_GIS_FORMATS = ("GEOJSON", "WFS", "SHAPEFILE", "ARCGIS_FEATURESERVER")
 
 
@@ -18,8 +19,16 @@ class Adapter:
     code = "BASE"
 
     def normalize(self, feature: dict[str, Any]) -> dict[str, Any]:
-        properties = dict(feature.get("properties") or {})
-        geometry = normalize_geometry(feature.get("geometry"), feature.get("crs") or properties.get("crs")) if feature.get("geometry") else None
+        is_way_record = str(feature.get("type") or "").casefold() == "way"
+        properties = dict(feature.get("properties") or feature.get("tags") or {})
+        if is_way_record:
+            properties.setdefault("featureType", "way")
+            if feature.get("id") is not None:
+                properties.setdefault("id", feature["id"])
+        raw_geometry = feature.get("geometry")
+        if not raw_geometry and is_way_record and feature.get("coordinates") is not None:
+            raw_geometry = {"type": "LineString", "coordinates": feature["coordinates"]}
+        geometry = normalize_geometry(raw_geometry, feature.get("crs") or properties.get("crs")) if raw_geometry else None
         return {"type": "Feature", "geometry": geometry, "properties": properties}
 
 

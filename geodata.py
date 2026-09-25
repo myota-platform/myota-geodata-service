@@ -114,7 +114,7 @@ class GeoHandler(JsonHandler):
     def adapters(_: JsonHandler, __: dict[str, str]) -> dict[str, Any]:
         return {"adapters": [
             {"code": "PARKSERVE_US", "formats": ["PARKSERVE_US", "GEOJSON"], "requires": ["license", "retrievedAt", "sourceRef"]},
-            {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground"], "attribution": "© OpenStreetMap contributors"},
+            {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground", "highway=path", "highway=footway", "highway=track", "highway=bridleway", "route=hiking"], "attribution": "© OpenStreetMap contributors"},
             {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "SHAPEFILE", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
             {"code": "MANUAL", "formats": ["GEOJSON"], "requires": ["programmeSlug", "feature"]}
         ]}
@@ -238,8 +238,9 @@ class GeoHandler(JsonHandler):
                 existing = next((item for item in GeoHandler.store.items.values()
                                  if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == body["programmeSlug"]), None)
                 occurred_at = now()
+                default_entity_type = "TRAIL" if str(props.get("featureType") or "").casefold() == "way" or geometry.get("type") == "LineString" else "MUNICIPAL_PARK"
                 entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": body["programmeSlug"],
-                          "entityType": props.get("entityType", "MUNICIPAL_PARK"), "name": props.get("name", "Unnamed candidate"),
+                          "entityType": props.get("entityType") or default_entity_type, "name": props.get("name", "Unnamed candidate"),
                           "status": existing["status"] if existing else "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
                           "attachments": attachments, "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
@@ -497,8 +498,8 @@ class GeoHandler(JsonHandler):
         body = p["_body"]
         require(body, "geometry", "editorId")
         geometry = body["geometry"]
-        if not isinstance(geometry, dict) or geometry.get("type") not in ("Point", "Polygon", "MultiPolygon") or "coordinates" not in geometry:
-            raise ValueError("geometry must be a GeoJSON Point, Polygon, or MultiPolygon")
+        if not isinstance(geometry, dict) or "coordinates" not in geometry:
+            raise ValueError("geometry must be a GeoJSON Point, LineString (way), Polygon, or MultiPolygon")
         previous = entity.get("geometry")
         entity.setdefault("geometryHistory", []).append({"editorId": body["editorId"], "note": body.get("note"),
                                                           "geometry": previous, "editedAt": now()})
@@ -576,15 +577,35 @@ class GeoHandler(JsonHandler):
         body = p["_body"]
         require(body, "geometryType", "editorId")
         target = str(body["geometryType"]).upper()
-        if target not in {"POINT", "POLYGON"}:
-            raise ValueError("geometryType must be POINT or POLYGON")
+        target = {"LINESTRING": "WAY"}.get(target, target)
+        if target not in {"POINT", "WAY", "POLYGON"}:
+            raise ValueError("geometryType must be POINT, WAY, or POLYGON")
         current = str(entity.get("geometry", {}).get("type", "")).upper()
+        current = {"LINESTRING": "WAY"}.get(current, current)
         if current == target:
             return entity
         geometry = entity.get("geometry") or {}
         if target == "POINT":
             centre = geometry_centroid(geometry)
             converted = {"type": "Point", "coordinates": [centre["lon"], centre["lat"]]}
+        elif target == "WAY":
+            if current == "POINT":
+                coordinates = geometry.get("coordinates") or []
+                if len(coordinates) < 2:
+                    raise ValueError("the existing point geometry is invalid")
+                lon, lat = float(coordinates[0]), float(coordinates[1])
+                delta = 0.0005
+                converted = {"type": "LineString", "coordinates": [[lon - delta, lat], [lon + delta, lat]]}
+            elif current == "WAY":
+                converted = geometry
+            else:
+                rings = geometry.get("coordinates", [])
+                if current == "MULTIPOLYGON":
+                    rings = rings[0] if rings else []
+                ring = rings[0] if current in {"POLYGON", "MULTIPOLYGON"} and rings else rings
+                if len(ring) > 1 and ring[0] == ring[-1]:
+                    ring = ring[:-1]
+                converted = {"type": "LineString", "coordinates": ring}
         elif current == "POINT":
             coordinates = geometry.get("coordinates") or []
             if len(coordinates) < 2:
@@ -594,6 +615,18 @@ class GeoHandler(JsonHandler):
             converted = {"type": "Polygon", "coordinates": [[[lon - delta, lat - delta], [lon + delta, lat - delta],
                                                                   [lon + delta, lat + delta], [lon - delta, lat + delta],
                                                                   [lon - delta, lat - delta]]]}
+        elif current == "WAY":
+            coordinates = geometry.get("coordinates") or []
+            if len(coordinates) < 2:
+                raise ValueError("the existing way geometry is invalid")
+            longitudes = [float(point[0]) for point in coordinates]
+            latitudes = [float(point[1]) for point in coordinates]
+            delta = max((max(longitudes) - min(longitudes)) * 0.05, (max(latitudes) - min(latitudes)) * 0.05, 0.0001)
+            min_lon, max_lon = min(longitudes) - delta, max(longitudes) + delta
+            min_lat, max_lat = min(latitudes) - delta, max(latitudes) + delta
+            converted = {"type": "Polygon", "coordinates": [[[min_lon, min_lat], [max_lon, min_lat],
+                                                                  [max_lon, max_lat], [min_lon, max_lat],
+                                                                  [min_lon, min_lat]]]}
         else:
             rings = geometry.get("coordinates", [])
             if current == "MULTIPOLYGON" and rings and rings[0]:
