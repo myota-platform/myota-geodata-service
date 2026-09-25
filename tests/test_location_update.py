@@ -42,6 +42,16 @@ class LocationUpdateTests(unittest.TestCase):
         self.assertEqual(result["reviewHistory"][-1]["action"], "LOCATION_UPDATED")
         self.assertEqual(GeoHandler.store.events[-1]["eventType"], "geodata.entity.location-updated.v1")
 
+    def test_manual_edit_reuses_existing_provider_data(self):
+        entity = GeoHandler.store.items["entity-1"]
+        entity.update({"geocodeStatus": "ENRICHED", "countryCode": "ES", "country": "Spain", "city": "Sevilla"})
+        update = {"entityId": "entity-1", "_body": {
+            "location": {"country": "Reino de España"}, "manualFields": ["country"], "editorId": "admin-1",
+        }}
+        with patch("geodata.enrich_entity_location") as enrich:
+            GeoHandler.update_location(None, update)
+        enrich.assert_called_once_with(entity, force=False)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,9 @@ Administrators can edit these fields through
 manual field set in `manualLocationFields` and never overwrites those fields
 when an import, geometry edit, or reverse-geocoding refresh runs. Removing a
 field from `manualFields` explicitly returns it to provider-managed values.
+Successful provider data is reused by subsequent imports, geometry edits and
+metadata saves; a new remote lookup is made only when location data is missing
+or an administrator explicitly releases fields back to automatic management.
 
 ## Architecture
 

@@ -1,6 +1,8 @@
 import unittest
 
-from reverse_geocoder import apply_location_result, normalize_response
+from unittest.mock import patch
+
+from reverse_geocoder import apply_location_result, enrich_entity_location, normalize_response
 
 
 class ReverseGeocoderTests(unittest.TestCase):
@@ -54,6 +56,18 @@ class ReverseGeocoderTests(unittest.TestCase):
         self.assertEqual(entity["regionCode"], "ES-AN")
         self.assertEqual(entity["city"], "Sevilla")
         self.assertEqual(entity["location"]["municipality"], "Sevilla")
+
+    def test_existing_successful_data_does_not_trigger_remote_refresh(self):
+        entity = {
+            "centroid": {"lat": 37.39, "lon": -5.99},
+            "geocodeStatus": "ENRICHED", "countryCode": "ES", "country": "Spain",
+            "city": "Sevilla", "manualLocationFields": [],
+        }
+        with patch("reverse_geocoder.GEOCODER.lookup") as lookup:
+            enrich_entity_location(entity, force=False)
+            enrich_entity_location(entity, force=False)
+        lookup.assert_not_called()
+        self.assertEqual(entity["location"]["city"], "Sevilla")
 
 
 if __name__ == "__main__":

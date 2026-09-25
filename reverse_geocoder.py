@@ -159,6 +159,10 @@ class ReverseGeocoder:
 GEOCODER = ReverseGeocoder()
 
 
+def _sync_location_snapshot(entity: dict[str, Any]) -> None:
+    entity["location"] = {field: entity.get(field) for field in LOCATION_FIELDS}
+
+
 def apply_location_result(entity: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """Merge provider data without overwriting explicitly managed fields."""
     manual_fields = set(entity.get("manualLocationFields") or [])
@@ -169,13 +173,19 @@ def apply_location_result(entity: dict[str, Any], result: dict[str, Any]) -> dic
         if field in result:
             entity[field] = result[field]
     entity["manualLocationFields"] = sorted(manual_fields)
-    entity["location"] = {field: entity.get(field) for field in LOCATION_FIELDS}
+    _sync_location_snapshot(entity)
     return entity
 
 
 def enrich_entity_location(entity: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
-    """Enrich an entity from its centroid while keeping provider provenance."""
+    """Enrich an entity from its centroid while keeping provider provenance.
+
+    ``force`` is reserved for an explicit refresh after automatic values have
+    been released. Normal imports, geometry changes, and metadata edits reuse
+    an existing successful provider result and do not issue another request.
+    """
     if not force and entity.get("geocodeStatus") == "ENRICHED" and entity.get("countryCode"):
+        _sync_location_snapshot(entity)
         return entity
     centroid = entity.get("centroid") or {}
     try:

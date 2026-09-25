@@ -191,11 +191,20 @@ class GeoHandler(JsonHandler):
         if not existing:
             entity["manualLocationFields"] = []
             return
-        manual_fields = set(existing.get("manualLocationFields") or []) & set(LOCATION_FIELDS)
-        entity["manualLocationFields"] = sorted(manual_fields)
-        for field in manual_fields:
+        existing_location = existing.get("location") or {}
+        for field in LOCATION_FIELDS:
             if field in existing:
                 entity[field] = existing[field]
+            elif field in existing_location:
+                entity[field] = existing_location[field]
+        manual_fields = set(existing.get("manualLocationFields") or []) & set(LOCATION_FIELDS)
+        entity["manualLocationFields"] = sorted(manual_fields)
+        for field in ("geocodeProvider", "geocodeStatus", "geocodeLookupSource", "geocodeError", "geocodedAt"):
+            if field in existing:
+                entity[field] = existing[field]
+        previous_geocoding = (existing.get("provenance") or {}).get("reverseGeocoding")
+        if previous_geocoding:
+            entity.setdefault("provenance", {})["reverseGeocoding"] = previous_geocoding
 
     @staticmethod
     def _import_features(body: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -490,7 +499,7 @@ class GeoHandler(JsonHandler):
                                                           "geometry": previous, "editedAt": now()})
         entity["geometry"] = normalize_geometry(geometry)
         entity["centroid"] = geometry_centroid(entity["geometry"])
-        enrich_entity_location(entity, force=True)
+        enrich_entity_location(entity)
         entity["updatedAt"] = now()
         GeoHandler.store.event("geodata.entity.geometry-updated.v1", "entity", entity["id"],
                                {"entityId": entity["id"], "editorId": body["editorId"], "note": body.get("note"), "geometry": geometry})
@@ -533,7 +542,7 @@ class GeoHandler(JsonHandler):
         for field in released_fields:
             entity[field] = None
         entity["manualLocationFields"] = sorted(manual_fields)
-        enrich_entity_location(entity, force=True)
+        enrich_entity_location(entity, force=bool(released_fields))
         changed_at = now()
         entity.setdefault("reviewHistory", []).append({
             "action": "LOCATION_UPDATED", "editorId": body["editorId"], "note": body.get("note"),
@@ -593,7 +602,7 @@ class GeoHandler(JsonHandler):
                                                         "geometryType": target, "occurredAt": changed_at})
         entity["geometry"] = converted
         entity["centroid"] = geometry_centroid(converted)
-        enrich_entity_location(entity, force=True)
+        enrich_entity_location(entity)
         entity["updatedAt"] = changed_at
         GeoHandler.store.event("geodata.entity.geometry-type-changed.v1", "entity", entity["id"],
                                {"entityId": entity["id"], "editorId": body["editorId"], "previousType": current,
