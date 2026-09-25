@@ -19,6 +19,13 @@ from typing import Any, Callable, Iterator
 MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", "1048576"))
 
 
+def require_durable_database(dsn_env: str | None, dsn: str) -> None:
+    """Fail fast instead of silently dropping writes into process memory."""
+    required = os.environ.get("MYOTA_REQUIRE_DURABILITY", "").strip().lower() in {"1", "true", "yes", "on"}
+    if required and dsn_env and not dsn:
+        raise RuntimeError(f"{dsn_env} is required when MYOTA_REQUIRE_DURABILITY is enabled")
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -104,6 +111,7 @@ class Store:
     def __init__(self, service: str = "service", dsn_env: str | None = None) -> None:
         self.service = service
         self.dsn = os.environ.get(dsn_env or "", "") if dsn_env else ""
+        require_durable_database(dsn_env, self.dsn)
         self.items: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.data: dict[str, Any] = {}
