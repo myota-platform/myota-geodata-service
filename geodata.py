@@ -500,7 +500,7 @@ class GeoHandler(JsonHandler):
         require(body, "geometry", "editorId")
         geometry = body["geometry"]
         if not isinstance(geometry, dict) or "coordinates" not in geometry:
-            raise ValueError("geometry must be a GeoJSON Point, LineString (way), Polygon, or MultiPolygon")
+            raise ValueError("geometry must be a GeoJSON Point, LineString, MultiLineString, Polygon, or MultiPolygon")
         previous = entity.get("geometry")
         entity.setdefault("geometryHistory", []).append({"editorId": body["editorId"], "note": body.get("note"),
                                                           "geometry": previous, "editedAt": now()})
@@ -603,27 +603,29 @@ class GeoHandler(JsonHandler):
         body = p["_body"]
         require(body, "geometryType", "editorId")
         target = str(body["geometryType"]).upper()
-        target = {"LINESTRING": "WAY"}.get(target, target)
-        if target not in {"POINT", "WAY", "POLYGON"}:
-            raise ValueError("geometryType must be POINT, WAY, or POLYGON")
+        target = {"WAY": "LINESTRING"}.get(target, target)
+        if target not in {"POINT", "LINESTRING", "MULTILINESTRING", "POLYGON", "MULTIPOLYGON"}:
+            raise ValueError("geometryType must be POINT, LINESTRING, MULTILINESTRING, POLYGON, or MULTIPOLYGON")
         current = str(entity.get("geometry", {}).get("type", "")).upper()
-        current = {"LINESTRING": "WAY"}.get(current, current)
+        current = {"WAY": "LINESTRING"}.get(current, current)
         if current == target:
             return entity
         geometry = entity.get("geometry") or {}
         if target == "POINT":
             centre = geometry_centroid(geometry)
             converted = {"type": "Point", "coordinates": [centre["lon"], centre["lat"]]}
-        elif target == "WAY":
+        elif target in {"LINESTRING", "MULTILINESTRING"}:
             if current == "POINT":
                 coordinates = geometry.get("coordinates") or []
                 if len(coordinates) < 2:
                     raise ValueError("the existing point geometry is invalid")
                 lon, lat = float(coordinates[0]), float(coordinates[1])
                 delta = 0.0005
-                converted = {"type": "LineString", "coordinates": [[lon - delta, lat], [lon + delta, lat]]}
-            elif current == "WAY":
-                converted = geometry
+                lines = [[[lon - delta, lat], [lon + delta, lat]]]
+            elif current == "LINESTRING":
+                lines = [geometry.get("coordinates") or []]
+            elif current == "MULTILINESTRING":
+                lines = geometry.get("coordinates") or []
             else:
                 rings = geometry.get("coordinates", [])
                 if current == "MULTIPOLYGON":
@@ -631,35 +633,42 @@ class GeoHandler(JsonHandler):
                 ring = rings[0] if current in {"POLYGON", "MULTIPOLYGON"} and rings else rings
                 if len(ring) > 1 and ring[0] == ring[-1]:
                     ring = ring[:-1]
-                converted = {"type": "LineString", "coordinates": ring}
-        elif current == "POINT":
+                lines = [ring]
+            converted = {"type": target.title() if target == "LINESTRING" else "MultiLineString",
+                         "coordinates": lines[0] if target == "LINESTRING" else lines}
+        elif target in {"POLYGON", "MULTIPOLYGON"} and current == "POINT":
             coordinates = geometry.get("coordinates") or []
             if len(coordinates) < 2:
                 raise ValueError("the existing point geometry is invalid")
             lon, lat = float(coordinates[0]), float(coordinates[1])
             delta = 0.0005
-            converted = {"type": "Polygon", "coordinates": [[[lon - delta, lat - delta], [lon + delta, lat - delta],
-                                                                  [lon + delta, lat + delta], [lon - delta, lat + delta],
-                                                                  [lon - delta, lat - delta]]]}
-        elif current == "WAY":
-            coordinates = geometry.get("coordinates") or []
-            if len(coordinates) < 2:
-                raise ValueError("the existing way geometry is invalid")
-            longitudes = [float(point[0]) for point in coordinates]
-            latitudes = [float(point[1]) for point in coordinates]
+            polygon = [[[lon - delta, lat - delta], [lon + delta, lat - delta],
+                        [lon + delta, lat + delta], [lon - delta, lat + delta],
+                        [lon - delta, lat - delta]]]
+            converted = {"type": "Polygon" if target == "POLYGON" else "MultiPolygon",
+                         "coordinates": polygon if target == "POLYGON" else [polygon]}
+        elif target in {"POLYGON", "MULTIPOLYGON"} and current in {"LINESTRING", "MULTILINESTRING"}:
+            lines = geometry.get("coordinates") or []
+            points = lines if current == "LINESTRING" else [point for line in lines for point in line]
+            if len(points) < 2:
+                raise ValueError("the existing line geometry is invalid")
+            longitudes = [float(point[0]) for point in points]
+            latitudes = [float(point[1]) for point in points]
             delta = max((max(longitudes) - min(longitudes)) * 0.05, (max(latitudes) - min(latitudes)) * 0.05, 0.0001)
             min_lon, max_lon = min(longitudes) - delta, max(longitudes) + delta
             min_lat, max_lat = min(latitudes) - delta, max(latitudes) + delta
-            converted = {"type": "Polygon", "coordinates": [[[min_lon, min_lat], [max_lon, min_lat],
-                                                                  [max_lon, max_lat], [min_lon, max_lat],
-                                                                  [min_lon, min_lat]]]}
+            polygon = [[[min_lon, min_lat], [max_lon, min_lat], [max_lon, max_lat],
+                        [min_lon, max_lat], [min_lon, min_lat]]]
+            converted = {"type": "Polygon" if target == "POLYGON" else "MultiPolygon",
+                         "coordinates": polygon if target == "POLYGON" else [polygon]}
         else:
-            rings = geometry.get("coordinates", [])
-            if current == "MULTIPOLYGON" and rings and rings[0]:
-                rings = rings[0]
-            if not rings:
+            polygons = geometry.get("coordinates", [])
+            if current == "POLYGON":
+                polygons = [polygons]
+            if not polygons:
                 raise ValueError("the existing polygon geometry is invalid")
-            converted = {"type": "Polygon", "coordinates": rings}
+            converted = {"type": "Polygon" if target == "POLYGON" else "MultiPolygon",
+                         "coordinates": polygons[0] if target == "POLYGON" else polygons}
         converted = normalize_geometry(converted)
         changed_at = now()
         entity.setdefault("geometryHistory", []).append({"action": "GEOMETRY_TYPE_CHANGED", "editorId": body["editorId"],

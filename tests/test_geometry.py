@@ -27,6 +27,12 @@ class GeometryWayTests(unittest.TestCase):
     def test_linestring_is_valid_and_way_alias_is_canonicalized(self):
         self.assertEqual(normalize_geometry({"type": "way", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})["type"], "LineString")
 
+    def test_multilinestring_is_valid(self):
+        geometry = normalize_geometry({"type": "MultiLineString", "coordinates": [
+            [[-5.99, 37.39], [-5.98, 37.40]], [[-5.97, 37.41], [-5.96, 37.42]]
+        ]})
+        self.assertEqual(geometry["type"], "MultiLineString")
+
     def test_osm_style_way_record_is_importable(self):
         feature = normalize("MANUAL", {"type": "way", "id": "way/42", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})
         self.assertEqual(feature["geometry"]["type"], "LineString")
@@ -44,6 +50,9 @@ class GeometryWayTests(unittest.TestCase):
 
         result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "POLYGON", "editorId": "admin"}})
         self.assertEqual(result["geometry"]["type"], "Polygon")
+
+        result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "MULTILINESTRING", "editorId": "admin"}})
+        self.assertEqual(result["geometry"]["type"], "MultiLineString")
 
     def test_entity_category_change_is_audited(self):
         GeoHandler.store.items["entity-1"]["entityType"] = "MUNICIPAL_PARK"

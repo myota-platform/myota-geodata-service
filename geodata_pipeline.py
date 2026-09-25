@@ -19,7 +19,7 @@ MAX_ATTACHMENTS = 20
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_COORDINATES = int(os.environ.get("GEODATA_MAX_COORDINATES", "50000"))
 SUPPORTED_CRS = {"EPSG:4326", "CRS84", "urn:ogc:def:crs:OGC:1.3:CRS84"}
-GEOMETRY_TYPE_ALIASES = {"way": "LineString", "linestring": "LineString"}
+GEOMETRY_TYPE_ALIASES = {"way": "LineString", "linestring": "LineString", "multilinestring": "MultiLineString"}
 
 
 def canonical_json(value: Any) -> str:
@@ -55,13 +55,17 @@ def _valid_line(coordinates: Any) -> bool:
     )
 
 
+def _valid_multiline(coordinates: Any) -> bool:
+    return isinstance(coordinates, list) and len(coordinates) >= 1 and all(_valid_line(line) for line in coordinates)
+
+
 def validate_geometry(geometry: dict[str, Any] | None, *, max_coordinates: int = MAX_COORDINATES) -> dict[str, Any]:
     if not isinstance(geometry, dict):
-        raise ValueError("geometry must be a GeoJSON Point, LineString (way), Polygon, or MultiPolygon")
+        raise ValueError("geometry must be a GeoJSON Point, LineString, MultiLineString, Polygon, or MultiPolygon")
     raw_type = str(geometry.get("type") or "")
     geometry_type = GEOMETRY_TYPE_ALIASES.get(raw_type.casefold(), raw_type)
-    if geometry_type not in ("Point", "LineString", "Polygon", "MultiPolygon"):
-        raise ValueError("geometry must be a GeoJSON Point, LineString (way), Polygon, or MultiPolygon")
+    if geometry_type not in ("Point", "LineString", "MultiLineString", "Polygon", "MultiPolygon"):
+        raise ValueError("geometry must be a GeoJSON Point, LineString, MultiLineString, Polygon, or MultiPolygon")
     coordinates = geometry.get("coordinates")
     count = coordinate_count(geometry)
     if count == 0 or count > max_coordinates:
@@ -70,6 +74,8 @@ def validate_geometry(geometry: dict[str, Any] | None, *, max_coordinates: int =
         raise ValueError("Point geometry must contain longitude and latitude")
     if geometry_type == "LineString" and not _valid_line(coordinates):
         raise ValueError("LineString (way) geometry must contain at least two coordinates")
+    if geometry_type == "MultiLineString" and not _valid_multiline(coordinates):
+        raise ValueError("MultiLineString geometry must contain one or more lines with at least two coordinates")
     if geometry_type == "Polygon" and (not isinstance(coordinates, list) or not all(_valid_ring(ring) for ring in coordinates)):
         raise ValueError("Polygon geometry must contain closed rings with at least four points")
     if geometry_type == "MultiPolygon" and (not isinstance(coordinates, list) or not all(all(_valid_ring(ring) for ring in polygon) for polygon in coordinates)):
