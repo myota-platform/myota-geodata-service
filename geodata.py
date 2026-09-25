@@ -660,6 +660,34 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def change_entity_name(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
+        body = p["_body"]
+        require(body, "name", "editorId")
+        name = str(body["name"]).strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        if len(name) > 240:
+            raise ValueError("name must be 240 characters or fewer")
+        previous = entity.get("name") or ""
+        if name == previous:
+            return entity
+        changed_at = now()
+        entity["name"] = name
+        entity.setdefault("reviewHistory", []).append({
+            "action": "ENTITY_NAME_CHANGED", "editorId": body["editorId"],
+            "previousName": previous, "name": name, "note": body.get("note"),
+            "occurredAt": changed_at,
+        })
+        entity["updatedAt"] = changed_at
+        GeoHandler.store.event("geodata.entity.name-changed.v1", "entity", entity["id"], {
+            "entityId": entity["id"], "editorId": body["editorId"],
+            "previousName": previous, "name": name, "note": body.get("note"),
+        })
+        return entity
+
+    @staticmethod
     def change_geometry_type(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
         GeoHandler._authorize_gis_admin(p, entity, "geodata.geometry.manage")
@@ -797,6 +825,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
     ("POST", "/v1/geodata/entities/{entityId}/location"): GeoHandler.update_location,
     ("POST", "/v1/geodata/entities/{entityId}/entity-type"): GeoHandler.change_entity_type,
+    ("POST", "/v1/geodata/entities/{entityId}/name"): GeoHandler.change_entity_name,
     ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
     ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_entity,
 }

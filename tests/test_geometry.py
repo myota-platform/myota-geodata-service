@@ -63,6 +63,19 @@ class GeometryWayTests(unittest.TestCase):
         self.assertEqual(result["reviewHistory"][-1]["action"], "ENTITY_TYPE_CHANGED")
         self.assertEqual(result["reviewHistory"][-1]["previousEntityType"], "MUNICIPAL_PARK")
 
+    def test_platform_wide_category_and_name_change_are_audited(self):
+        GeoHandler.store.items["entity-1"]["programmeSlug"] = None
+        category = GeoHandler.change_entity_type(None, {"entityId": "entity-1", "_body": {
+            "entityType": "MUNICIPAL_PARK", "editorId": "admin", "note": "Shared category correction"
+        }})
+        renamed = GeoHandler.change_entity_name(None, {"entityId": "entity-1", "_body": {
+            "name": "Sevilla trail", "editorId": "admin", "note": "Corrected display name"
+        }})
+        self.assertIsNone(category["programmeSlug"])
+        self.assertEqual(category["entityType"], "MUNICIPAL_PARK")
+        self.assertEqual(renamed["name"], "Sevilla trail")
+        self.assertEqual(renamed["reviewHistory"][-1]["action"], "ENTITY_NAME_CHANGED")
+
     def test_import_can_create_platform_wide_candidate(self):
         result = GeoHandler.import_manual(None, {"_body": {
             "adapter": "MANUAL", "source": {"name": "shared-catalogue-test", "license": "CC0"},

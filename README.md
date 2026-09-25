@@ -97,3 +97,11 @@ payload, filename, and the same category/source metadata. The deployment
 stores uploaded bytes in MinIO and records a `geodata.import.queued.v1`
 outbox event for NATS consumers. Shapefile uploads must be ZIP archives with
 their `.shp`, `.shx`, and `.dbf` members.
+
+During review, `POST /v1/geodata/entities/{entityId}/entity-type` changes the
+shared Master data category, regardless of whether `programmeSlug` is set.
+`POST /v1/geodata/entities/{entityId}/name` corrects the display name. Both
+operations require review authorization, preserve the previous value, editor,
+note, and timestamp in the entity audit history, and reject edits to retired
+entities for category changes; name corrections remain available for historical
+records.
