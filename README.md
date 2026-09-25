@@ -79,14 +79,21 @@ The original `ea7klk/mpota` repository remains untouched. Its charter and planne
 
 ## Dataset imports
 
+Dataset intake is platform-wide and is not assigned to a programme. Each
+import selects a category from the shared Master data catalogue; programme
+assignment is a later eligibility decision. The admin page reads all category
+definitions from `GET /v1/entity-types`, including categories not currently
+assigned to any programme, and imports always create `CANDIDATE` entities.
+
 Use the admin web's **Geodata imports** page rather than the review page. Select
-the programme and the assigned feature category before submitting. Every
+the shared feature category before submitting; programme assignment is not
+part of dataset intake. Every
 dataset import is written as `CANDIDATE`, retains source/license/attribution
 metadata, and must pass the normal proposal and approval workflow.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. File uploads use `POST /v1/geodata/imports/upload` with a base64
-payload, filename, and the same programme/category metadata. The deployment
+payload, filename, and the same category/source metadata. The deployment
 stores uploaded bytes in MinIO and records a `geodata.import.queued.v1`
 outbox event for NATS consumers. Shapefile uploads must be ZIP archives with
 their `.shp`, `.shx`, and `.dbf` members.

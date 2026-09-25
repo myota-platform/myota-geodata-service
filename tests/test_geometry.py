@@ -63,6 +63,17 @@ class GeometryWayTests(unittest.TestCase):
         self.assertEqual(result["reviewHistory"][-1]["action"], "ENTITY_TYPE_CHANGED")
         self.assertEqual(result["reviewHistory"][-1]["previousEntityType"], "MUNICIPAL_PARK")
 
+    def test_import_can_create_platform_wide_candidate(self):
+        result = GeoHandler.import_manual(None, {"_body": {
+            "adapter": "MANUAL", "source": {"name": "shared-catalogue-test", "license": "CC0"},
+            "entityType": "TRAIL", "features": [{"type": "Feature", "properties": {"name": "Unassigned trail"},
+            "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}]
+        }, "Idempotency-Key": "import-unscoped-1"})
+        entity = GeoHandler.get_entity(None, {"entityId": result["created"][0]})
+        self.assertIsNone(entity["programmeSlug"])
+        self.assertEqual(entity["entityType"], "TRAIL")
+        self.assertEqual(entity["status"], "CANDIDATE")
+
 
 if __name__ == "__main__":
     unittest.main()

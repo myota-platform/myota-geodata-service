@@ -118,7 +118,7 @@ class GeoHandler(JsonHandler):
             {"code": "PARKSERVE_US", "formats": ["PARKSERVE_US", "GEOJSON", "KML", "GPX"], "requires": ["license", "retrievedAt", "sourceRef"]},
             {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON", "KML", "GPX"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground", "highway=path", "highway=footway", "highway=track", "highway=bridleway", "route=hiking"], "attribution": "© OpenStreetMap contributors"},
             {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "KML", "GPX", "SHAPEFILE", "SHP", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
-            {"code": "MANUAL", "formats": ["GEOJSON", "KML", "GPX", "SHAPEFILE", "SHP"], "requires": ["programmeSlug", "feature"]}
+            {"code": "MANUAL", "formats": ["GEOJSON", "KML", "GPX", "SHAPEFILE", "SHP"], "requires": ["feature", "entityType"]}
         ]}
 
     @staticmethod
@@ -218,6 +218,7 @@ class GeoHandler(JsonHandler):
         if len(body["features"]) > MAX_IMPORT_FEATURES:
             raise ValueError(f"an import may contain at most {MAX_IMPORT_FEATURES} features")
         adapter = body["adapter"]
+        programme_slug = body.get("programmeSlug") or None
         source = dict(body["source"])
         if adapter == "OSM":
             source.setdefault("attribution", "© OpenStreetMap contributors")
@@ -238,10 +239,10 @@ class GeoHandler(JsonHandler):
                 geometry = normalize_geometry(feature["geometry"], props.get("crs"))
                 attachments = validate_attachments(raw_feature.get("attachments") or props.get("attachments"))
                 existing = next((item for item in GeoHandler.store.items.values()
-                                 if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == body["programmeSlug"]), None)
+                                 if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == programme_slug), None)
                 occurred_at = now()
                 default_entity_type = "TRAIL" if str(props.get("featureType") or "").casefold() == "way" or geometry.get("type") == "LineString" else "MUNICIPAL_PARK"
-                entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": body["programmeSlug"],
+                entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": programme_slug,
                           "entityType": props.get("entityType") or default_entity_type, "name": props.get("name", "Unnamed candidate"),
                           "status": "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
@@ -262,7 +263,7 @@ class GeoHandler(JsonHandler):
             except (TypeError, ValueError) as error:
                 errors.append({"index": index, "message": str(error)})
         seen_refs = {record["sourceRef"] for record in records}
-        disappeared = GeoHandler._apply_disappearance(body["programmeSlug"], source_key, adapter, seen_refs,
+        disappeared = GeoHandler._apply_disappearance(programme_slug, source_key, adapter, seen_refs,
                                                        body.get("disappearancePolicy", "REVIEW_REQUIRED")) if body.get("completeSnapshot") else []
         manifest = source_manifest(adapter, source, records, run_id)
         manifest["sourceKey"] = source_key
@@ -276,7 +277,10 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def _start_import(body: dict[str, Any], features: list[dict[str, Any]], p: dict[str, str], filename: str | None = None) -> dict[str, Any]:
         body = {**body, "features": features}
-        require(body, "programmeSlug", "adapter", "source", "entityType")
+        require(body, "adapter", "source", "entityType")
+        body["entityType"] = str(body["entityType"]).strip().upper()
+        if not body["entityType"]:
+            raise ValueError("entityType must be a shared entity category code")
         if body["adapter"] not in ("PARKSERVE_US", "OSM", "GOVERNMENT_GIS", "MANUAL"):
             raise ValueError("unsupported adapter")
         if body.get("format", "GEOJSON").upper() not in SUPPORTED_FORMATS:
@@ -284,11 +288,11 @@ class GeoHandler(JsonHandler):
         for feature in body["features"]:
             feature["properties"] = {**(feature.get("properties") or {}), "entityType": body["entityType"]}
         run_id = new_id()
-        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body["programmeSlug"],
+        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body.get("programmeSlug"),
             "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(), "entityType": body["entityType"],
             "source": body["source"], "filename": filename, "status": "QUEUED", "queuedAt": now(), "startedAt": now()}
         GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id,
-            "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
+            "programmeSlug": body.get("programmeSlug"), "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
             "entityType": body["entityType"], "filename": filename})
         result = GeoHandler._import_features(body, run_id)
         GeoHandler.store.data["importRuns"][run_id].update({"status": "COMPLETED" if not result["errors"] else "COMPLETED_WITH_ERRORS",
@@ -300,8 +304,8 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def enqueue_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         GeoHandler._authorize_import(p)
-        body = {**p["_body"], "entityType": p["_body"].get("entityType") or "MUNICIPAL_PARK"}
-        require(body, "programmeSlug", "adapter", "source", "entityType")
+        body = {**p["_body"]}
+        require(body, "adapter", "source", "entityType")
         format_code = str(body.get("format", "GEOJSON")).upper()
         if "features" in body:
             if not isinstance(body["features"], list): raise ValueError("features must be a list")
@@ -314,8 +318,8 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def upload_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         GeoHandler._authorize_import(p)
-        body = {**p["_body"], "entityType": p["_body"].get("entityType") or "MUNICIPAL_PARK"}
-        require(body, "programmeSlug", "adapter", "source", "entityType", "filename", "contentBase64")
+        body = {**p["_body"]}
+        require(body, "adapter", "source", "entityType", "filename", "contentBase64")
         import base64
         try: content = base64.b64decode(body["contentBase64"], validate=True)
         except Exception as exc: raise ValueError("contentBase64 must be valid base64") from exc
@@ -337,7 +341,7 @@ class GeoHandler(JsonHandler):
             if format_code not in {"OSM_PBF", "PARKSERVE_US"}:
                 raise
             run_id = new_id()
-            record = {"id": run_id, "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "format": format_code,
+            record = {"id": run_id, "programmeSlug": body.get("programmeSlug"), "adapter": body["adapter"], "format": format_code,
                       "entityType": body["entityType"], "source": body["source"], "filename": body["filename"], "status": "QUEUED",
                       "queuedAt": now(), "binaryObjectPending": True}
             GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
@@ -361,11 +365,11 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def create_schedule(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         body = p["_body"]
-        require(body, "programmeSlug", "adapter", "source", "intervalSeconds")
+        require(body, "adapter", "source", "entityType", "intervalSeconds")
         interval = int(body["intervalSeconds"])
         if interval < 300:
             raise ValueError("refresh interval must be at least 300 seconds")
-        schedule = {"id": new_id(), "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "source": body["source"],
+        schedule = {"id": new_id(), "programmeSlug": body.get("programmeSlug"), "entityType": str(body["entityType"]).strip().upper(), "adapter": body["adapter"], "source": body["source"],
                     "intervalSeconds": interval, "disappearancePolicy": body.get("disappearancePolicy", "REVIEW_REQUIRED"),
                     "enabled": bool(body.get("enabled", True)), "lastRunAt": None, "nextRunAt": now(), "createdAt": now()}
         GeoHandler.store.data.setdefault("schedules", {})[schedule["id"]] = schedule
@@ -385,7 +389,7 @@ class GeoHandler(JsonHandler):
         body = p["_body"]
         if "features" not in body or not isinstance(body["features"], list):
             raise ValueError("features must be a list")
-        body = {**body, "programmeSlug": schedule["programmeSlug"], "adapter": schedule["adapter"], "source": schedule["source"],
+        body = {**body, "programmeSlug": schedule.get("programmeSlug"), "entityType": schedule["entityType"], "adapter": schedule["adapter"], "source": schedule["source"],
                 "disappearancePolicy": schedule["disappearancePolicy"], "completeSnapshot": True}
         result = GeoHandler.import_manual(None, {"_body": body, "Idempotency-Key": p.get("Idempotency-Key")})
         schedule["lastRunAt"], schedule["nextRunAt"] = now(), now()
@@ -475,7 +479,10 @@ class GeoHandler(JsonHandler):
         require(body, "programmeSlug", "feature")
         feature = dict(body["feature"])
         feature["attachments"] = body.get("attachments", feature.get("attachments"))
+        entity_type = str((feature.get("properties") or {}).get("entityType") or "").strip().upper()
+        require({"entityType": entity_type}, "entityType")
         return GeoHandler.import_manual(None, {"_body": {"programmeSlug": body["programmeSlug"], "adapter": "MANUAL",
+            "entityType": entity_type,
             "source": {**(body.get("source") or {}), "name": (body.get("source") or {}).get("name", "Manual proposal"),
                         "license": (body.get("source") or {}).get("license", "programme-supplied")}, "features": [feature]}})
 

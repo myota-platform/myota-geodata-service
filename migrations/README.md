@@ -13,6 +13,9 @@ ordered SQL files define the `myota_geo` database:
    provenance and indexes.
 5. `005_location_manual_precedence.sql` adds the municipality alias and
    durable manual-location override fields, index, and QGIS view projections.
+6. `006_unscoped_imports.sql` makes programme assignment optional for
+   imported candidates and adds the category field used by global refresh
+   schedules.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
