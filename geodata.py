@@ -10,6 +10,7 @@ from common import JsonHandler, Store, new_id, now, page_result, require, verify
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
                               normalize_geometry, source_manifest, validate_attachments)
 from import_adapters import normalize
+from import_formats import SUPPORTED_FORMATS, parse_text, parse_uploaded
 from location_catalog import build_location_tree, derive_location_codes
 from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
@@ -114,10 +115,10 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def adapters(_: JsonHandler, __: dict[str, str]) -> dict[str, Any]:
         return {"adapters": [
-            {"code": "PARKSERVE_US", "formats": ["PARKSERVE_US", "GEOJSON"], "requires": ["license", "retrievedAt", "sourceRef"]},
-            {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground", "highway=path", "highway=footway", "highway=track", "highway=bridleway", "route=hiking"], "attribution": "© OpenStreetMap contributors"},
-            {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "SHAPEFILE", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
-            {"code": "MANUAL", "formats": ["GEOJSON"], "requires": ["programmeSlug", "feature"]}
+            {"code": "PARKSERVE_US", "formats": ["PARKSERVE_US", "GEOJSON", "KML", "GPX"], "requires": ["license", "retrievedAt", "sourceRef"]},
+            {"code": "OSM", "formats": ["OSM_PBF", "GEOJSON", "KML", "GPX"], "requiredTags": ["leisure=park", "leisure=nature_reserve", "boundary=protected_area", "landuse=recreation_ground", "highway=path", "highway=footway", "highway=track", "highway=bridleway", "route=hiking"], "attribution": "© OpenStreetMap contributors"},
+            {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "KML", "GPX", "SHAPEFILE", "SHP", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
+            {"code": "MANUAL", "formats": ["GEOJSON", "KML", "GPX", "SHAPEFILE", "SHP"], "requires": ["programmeSlug", "feature"]}
         ]}
 
     @staticmethod
@@ -227,7 +228,7 @@ class GeoHandler(JsonHandler):
             try:
                 feature = normalize(adapter, raw_feature)
                 props = feature.get("properties", {})
-                source_ref = str(props.get("sourceRef") or props.get("id") or f"record-{index}")
+                source_ref = str(props.get("sourceRef") or props.get("id") or f"{source_key}:record-{index}")
                 if props.get("skipReason") == "FILTERED_TAG":
                     skipped.append({"sourceRef": source_ref, "reason": props["skipReason"]})
                     continue
@@ -242,7 +243,7 @@ class GeoHandler(JsonHandler):
                 default_entity_type = "TRAIL" if str(props.get("featureType") or "").casefold() == "way" or geometry.get("type") == "LineString" else "MUNICIPAL_PARK"
                 entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": body["programmeSlug"],
                           "entityType": props.get("entityType") or default_entity_type, "name": props.get("name", "Unnamed candidate"),
-                          "status": existing["status"] if existing else "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
+                          "status": "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
                           "attachments": attachments, "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
                                          "sourceFeature": raw_feature, "importRunId": run_id, "sourceHash": digest(raw_feature),
@@ -273,25 +274,80 @@ class GeoHandler(JsonHandler):
         return result
 
     @staticmethod
-    def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
-        GeoHandler._authorize_import(p)
-        body = p["_body"]
-        require(body, "programmeSlug", "adapter", "source")
-        if "features" not in body or not isinstance(body["features"], list):
-            raise ValueError("features must be a list")
+    def _start_import(body: dict[str, Any], features: list[dict[str, Any]], p: dict[str, str], filename: str | None = None) -> dict[str, Any]:
+        body = {**body, "features": features}
+        require(body, "programmeSlug", "adapter", "source", "entityType")
         if body["adapter"] not in ("PARKSERVE_US", "OSM", "GOVERNMENT_GIS", "MANUAL"):
             raise ValueError("unsupported adapter")
-        def import_run() -> dict[str, Any]:
+        if body.get("format", "GEOJSON").upper() not in SUPPORTED_FORMATS:
+            raise ValueError("unsupported import format")
+        for feature in body["features"]:
+            feature["properties"] = {**(feature.get("properties") or {}), "entityType": body["entityType"]}
+        run_id = new_id()
+        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body["programmeSlug"],
+            "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(), "entityType": body["entityType"],
+            "source": body["source"], "filename": filename, "status": "QUEUED", "queuedAt": now(), "startedAt": now()}
+        GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id,
+            "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
+            "entityType": body["entityType"], "filename": filename})
+        result = GeoHandler._import_features(body, run_id)
+        GeoHandler.store.data["importRuns"][run_id].update({"status": "COMPLETED" if not result["errors"] else "COMPLETED_WITH_ERRORS",
+            "completedAt": now(), "stats": {key: len(result[key]) for key in ("created", "updated", "skipped", "errors", "disappeared")},
+            "manifest": result["manifest"]})
+        GeoHandler.store.event("geodata.import.accepted.v1", "import_run", run_id, result)
+        return {**result, "status": GeoHandler.store.data["importRuns"][run_id]["status"], "queued": True}
+
+    @staticmethod
+    def enqueue_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
+        body = {**p["_body"], "entityType": p["_body"].get("entityType") or "MUNICIPAL_PARK"}
+        require(body, "programmeSlug", "adapter", "source", "entityType")
+        format_code = str(body.get("format", "GEOJSON")).upper()
+        if "features" in body:
+            if not isinstance(body["features"], list): raise ValueError("features must be a list")
+            return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, body["features"], p, body.get("filename")))
+        if "content" not in body or not isinstance(body["content"], str):
+            raise ValueError("content must contain copied text or features must be a list")
+        features = parse_text(format_code, body["content"])
+        return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, features, p, body.get("filename")))
+
+    @staticmethod
+    def upload_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
+        body = {**p["_body"], "entityType": p["_body"].get("entityType") or "MUNICIPAL_PARK"}
+        require(body, "programmeSlug", "adapter", "source", "entityType", "filename", "contentBase64")
+        import base64
+        try: content = base64.b64decode(body["contentBase64"], validate=True)
+        except Exception as exc: raise ValueError("contentBase64 must be valid base64") from exc
+        format_code = str(body.get("format") or body["filename"].rsplit(".", 1)[-1]).upper()
+        if format_code == "JSON": format_code = "GEOJSON"
+        if format_code == "SHP": format_code = "SHAPEFILE"
+        try:
+            from storage import ObjectStore
+            scan = ObjectStore.scan_content(content, body["filename"])
+            object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
+            bucket = "myota-geodata-imports"
+            stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
+            body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
+        except ImportError:
+            body = {**body, "source": {**body["source"], "sha256": __import__("hashlib").sha256(content).hexdigest()}}
+        try:
+            features = parse_uploaded(format_code, content, body["filename"])
+        except ValueError:
+            if format_code not in {"OSM_PBF", "PARKSERVE_US"}:
+                raise
             run_id = new_id()
-            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {"id": run_id, "programmeSlug": body["programmeSlug"],
-                "adapter": body["adapter"], "source": body["source"], "status": "RUNNING", "startedAt": now()}
-            result = GeoHandler._import_features(body, run_id)
-            GeoHandler.store.data["importRuns"][run_id].update({"status": "COMPLETED" if not result["errors"] else "COMPLETED_WITH_ERRORS",
-                "completedAt": now(), "stats": {key: len(result[key]) for key in ("created", "updated", "skipped", "errors", "disappeared")},
-                "manifest": result["manifest"]})
-            GeoHandler.store.event("geodata.import.accepted.v1", "import_run", run_id, result)
-            return result
-        return GeoHandler.store.once(p.get("Idempotency-Key"), import_run)
+            record = {"id": run_id, "programmeSlug": body["programmeSlug"], "adapter": body["adapter"], "format": format_code,
+                      "entityType": body["entityType"], "source": body["source"], "filename": body["filename"], "status": "QUEUED",
+                      "queuedAt": now(), "binaryObjectPending": True}
+            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
+            GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id, **record})
+            return {**record, "queued": True, "_status": 202}
+        return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import({**body, "format": format_code}, features, p, body["filename"]))
+
+    @staticmethod
+    def import_manual(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        return GeoHandler.enqueue_import(_, p)
 
     @staticmethod
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -687,10 +743,13 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
-    def delete_rejected_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+    def delete_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
         GeoHandler._authorize_gis_admin(p, entity, "geodata.delete")
-        if entity.get("status") != "REJECTED":
+        authorization = p.get("Authorization", "")
+        claims = verify_token(authorization[7:]) if authorization.startswith("Bearer ") else {}
+        global_admin = "*" in set(claims.get("scp", [])) or any(role.get("role") in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"} for role in claims.get("roles", []))
+        if not global_admin and entity.get("status") != "REJECTED":
             raise ValueError("only rejected entities can be permanently deleted")
         entity_id = entity["id"]
         for candidate_id, candidate in list(GeoHandler.store.data.setdefault("conflationCandidates", {}).items()):
@@ -699,7 +758,11 @@ class GeoHandler(JsonHandler):
         GeoHandler.store.items.pop(entity_id, None)
         GeoHandler.store.events[:] = [event for event in GeoHandler.store.events
                                       if event.get("aggregate", {}).get("id") != entity_id]
-        return {"entityId": entity_id, "deleted": True, "_status": 204}
+        GeoHandler.store.event("geodata.entity.deleted.v1", "entity", entity_id,
+                               {"entityId": entity_id, "deletedBy": p.get("_body", {}).get("deletedBy"), "previousStatus": entity.get("status")})
+        return {"entityId": entity_id, "deleted": True, "previousStatus": entity.get("status"), "_status": 204}
+
+    delete_rejected_entity = delete_entity
 
 
 GeoHandler.routes = {
@@ -715,7 +778,8 @@ GeoHandler.routes = {
     ("GET", "/v1/geodata/refresh-schedules"): GeoHandler.list_schedules,
     ("GET", "/v1/geodata/conflation"): GeoHandler.list_conflation,
     ("POST", "/v1/geodata/imports/manual"): GeoHandler.import_manual,
-    ("POST", "/v1/geodata/imports"): GeoHandler.import_manual,
+    ("POST", "/v1/geodata/imports"): GeoHandler.enqueue_import,
+    ("POST", "/v1/geodata/imports/upload"): GeoHandler.upload_import,
     ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
     ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
     ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,
@@ -727,7 +791,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/entities/{entityId}/location"): GeoHandler.update_location,
     ("POST", "/v1/geodata/entities/{entityId}/entity-type"): GeoHandler.change_entity_type,
     ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
-    ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_rejected_entity,
+    ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_entity,
 }
 
 
