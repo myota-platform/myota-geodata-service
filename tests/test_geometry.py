@@ -87,6 +87,16 @@ class GeometryWayTests(unittest.TestCase):
         self.assertEqual(entity["entityType"], "TRAIL")
         self.assertEqual(entity["status"], "CANDIDATE")
 
+    def test_manual_draw_can_create_platform_wide_candidate(self):
+        result = GeoHandler.draw_proposal(None, {"_body": {
+            "source": {"name": "manual-map-test", "license": "CC0"},
+            "feature": {"properties": {"name": "Unassigned drawn trail", "entityType": "TRAIL"},
+                        "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}
+        }})
+        entity = GeoHandler.get_entity(None, {"entityId": result["created"][0]})
+        self.assertIsNone(entity["programmeSlug"])
+        self.assertEqual(entity["status"], "CANDIDATE")
+
 
 if __name__ == "__main__":
     unittest.main()

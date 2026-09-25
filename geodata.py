@@ -476,12 +476,12 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def draw_proposal(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         body = p["_body"]
-        require(body, "programmeSlug", "feature")
+        require(body, "feature")
         feature = dict(body["feature"])
         feature["attachments"] = body.get("attachments", feature.get("attachments"))
         entity_type = str((feature.get("properties") or {}).get("entityType") or "").strip().upper()
         require({"entityType": entity_type}, "entityType")
-        return GeoHandler.import_manual(None, {"_body": {"programmeSlug": body["programmeSlug"], "adapter": "MANUAL",
+        return GeoHandler.import_manual(None, {"_body": {"programmeSlug": body.get("programmeSlug"), "adapter": "MANUAL",
             "entityType": entity_type,
             "source": {**(body.get("source") or {}), "name": (body.get("source") or {}).get("name", "Manual proposal"),
                         "license": (body.get("source") or {}).get("license", "programme-supplied")}, "features": [feature]}})
