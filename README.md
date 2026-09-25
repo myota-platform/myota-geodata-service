@@ -7,7 +7,7 @@ This repository is a runnable vertical-slice bootstrap for the service repositor
 ## What works now
 
 - Amateur-radio-aware identity: operator/SWL participation, multiple callsigns, one primary callsign, lifecycle and verification fields.
-- Programme configuration: programme-owned entity types, rules, minimum QSOs, awards, theme and optional OIDC settings.
+- Shared entity-category catalogue used by imports and review, with programme assignment handled separately.
 - Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
@@ -80,13 +80,13 @@ The original `ea7klk/mpota` repository remains untouched. Its charter and planne
 ## Dataset imports
 
 Dataset intake is platform-wide and is not assigned to a programme. Each
-import selects a category from the shared Master data catalogue; programme
+import selects one or more categories from the shared Master data catalogue; programme
 assignment is a later eligibility decision. The admin page reads all category
 definitions from `GET /v1/entity-types`, including categories not currently
 assigned to any programme, and imports always create `CANDIDATE` entities.
 
 Use the admin web's **Geodata imports** page rather than the review page. Select
-the shared feature category before submitting; programme assignment is not
+the shared feature categories before submitting; programme assignment is not
 part of dataset intake. Every
 dataset import is written as `CANDIDATE`, retains source/license/attribution
 metadata, and must pass the normal proposal and approval workflow.
@@ -99,7 +99,12 @@ outbox event for NATS consumers. Shapefile uploads must be ZIP archives with
 their `.shp`, `.shx`, and `.dbf` members.
 
 During review, `POST /v1/geodata/entities/{entityId}/entity-type` changes the
-shared Master data category, regardless of whether `programmeSlug` is set.
+ordered shared Master data category list, regardless of whether
+`programmeSlug` is set. The first category remains the compatibility
+`entityType`; all selected categories are returned as `entityTypes` and
+`entityTypeCodes`. Assignments are persisted in the relational
+`geodata_entity_category` table; the JSON state is only a compatibility
+projection. Category filters match any assigned category.
 `POST /v1/geodata/entities/{entityId}/name` corrects the display name. Both
 operations require review authorization, preserve the previous value, editor,
 note, and timestamp in the entity audit history, and reject edits to retired

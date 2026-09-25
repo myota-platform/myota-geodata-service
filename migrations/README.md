@@ -19,6 +19,9 @@ ordered SQL files define the `myota_geo` database:
 7. `007_relational_entity_persistence.sql` adds the nullable cross-service
    programme slug and shared category code columns used by the service's
    relational entity persistence adapter.
+8. `008_entity_category_assignments.sql` adds relational entity-to-category
+   assignments, enforces one primary category per entity, and backfills the
+   legacy primary category.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
