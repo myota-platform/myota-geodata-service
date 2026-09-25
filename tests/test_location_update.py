@@ -12,7 +12,9 @@ class LocationUpdateTests(unittest.TestCase):
             "entity-1": {
                 "id": "entity-1", "programmeSlug": "regional-ota", "entityType": "MUNICIPAL_PARK",
                 "status": "CANDIDATE", "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]},
-                "centroid": {"lon": -5.99, "lat": 37.39}, "country": "Spain", "countryCode": "ES",
+                "centroid": {"lon": -5.99, "lat": 37.39}, "continent": "Europe", "continentCode": "EU",
+                "country": "Spain", "countryCode": "ES", "region": "Andalucia", "regionCode": "ES-AN",
+                "subdivision": "Andalucia", "subdivisionCode": "ES-AN", "province": "Sevilla", "provinceCode": "ES-SE",
                 "manualLocationFields": [], "reviewHistory": [], "provenance": {},
             },
         }
@@ -25,12 +27,12 @@ class LocationUpdateTests(unittest.TestCase):
     def test_manual_values_are_saved_and_can_be_released(self):
         update = {"entityId": "entity-1", "_body": {
             "location": {"country": "Reino de España", "countryCode": "ES"},
-            "manualFields": ["country", "countryCode"], "editorId": "admin-1", "note": "Verified by administrator",
+            "manualFields": ["country"], "editorId": "admin-1", "note": "Verified by administrator",
         }}
         with patch("geodata.enrich_entity_location", side_effect=lambda entity, force=False: entity):
             result = GeoHandler.update_location(None, update)
             self.assertEqual(result["country"], "Reino de España")
-            self.assertEqual(result["manualLocationFields"], ["country", "countryCode"])
+            self.assertEqual(result["manualLocationFields"], ["country"])
 
             released = {"entityId": "entity-1", "_body": {
                 "location": {}, "manualFields": [], "editorId": "admin-1",
@@ -51,6 +53,13 @@ class LocationUpdateTests(unittest.TestCase):
         with patch("geodata.enrich_entity_location") as enrich:
             GeoHandler.update_location(None, update)
         enrich.assert_called_once_with(entity, force=False)
+
+    def test_provider_codes_cannot_be_marked_manual(self):
+        with self.assertRaisesRegex(ValueError, "provider-derived"):
+            GeoHandler.update_location(None, {"entityId": "entity-1", "_body": {
+                "location": {"country": "Spain", "countryCode": "ES"},
+                "manualFields": ["country", "countryCode"], "editorId": "admin-1",
+            }})
 
 
 if __name__ == "__main__":

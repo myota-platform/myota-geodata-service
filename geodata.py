@@ -9,6 +9,7 @@ from common import JsonHandler, Store, new_id, now, page_result, require, verify
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
                               normalize_geometry, source_manifest, validate_attachments)
 from import_adapters import normalize
+from location_catalog import build_location_tree, derive_location_codes
 from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
 
@@ -117,6 +118,10 @@ class GeoHandler(JsonHandler):
             {"code": "GOVERNMENT_GIS", "formats": ["WFS", "GEOJSON", "SHAPEFILE", "ARCGIS_FEATURESERVER"], "requires": ["license", "attribution", "sourceFormat"]},
             {"code": "MANUAL", "formats": ["GEOJSON"], "requires": ["programmeSlug", "feature"]}
         ]}
+
+    @staticmethod
+    def location_options(_: JsonHandler, __: dict[str, str]) -> dict[str, Any]:
+        return build_location_tree(GeoHandler.store.items.values())
 
     @staticmethod
     def get_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -524,6 +529,9 @@ class GeoHandler(JsonHandler):
         if not isinstance(requested_manual, list) or not set(requested_manual) <= allowed:
             raise ValueError("manualFields must be a list of supported location fields")
         manual_fields = set(requested_manual)
+        code_fields = {"continentCode", "countryCode", "regionCode", "subdivisionCode", "provinceCode"}
+        if manual_fields.intersection(code_fields):
+            raise ValueError("continent, country, subdivision, and province codes are provider-derived and cannot be manually edited")
         previous_manual = set(entity.get("manualLocationFields") or [])
         released_fields = previous_manual - manual_fields
 
@@ -539,6 +547,7 @@ class GeoHandler(JsonHandler):
         for field in manual_fields:
             if field in location:
                 entity[field] = normalize_value(field, location[field])
+        entity.update(derive_location_codes(location, manual_fields, GeoHandler.store.items.values()))
         for field in released_fields:
             entity[field] = None
         entity["manualLocationFields"] = sorted(manual_fields)
@@ -627,6 +636,7 @@ class GeoHandler(JsonHandler):
 
 GeoHandler.routes = {
     ("GET", "/v1/geodata/adapters"): GeoHandler.adapters,
+    ("GET", "/v1/geodata/location-options"): GeoHandler.location_options,
     ("GET", "/v1/geodata/entities"): GeoHandler.list_entities,
     ("GET", "/v1/geodata/entities/{entityId}"): GeoHandler.get_entity,
     ("GET", "/v1/geodata/entities/{entityId}/audit"): GeoHandler.audit_entity,

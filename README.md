@@ -59,6 +59,13 @@ field from `manualFields` explicitly returns it to provider-managed values.
 Successful provider data is reused by subsequent imports, geometry edits and
 metadata saves; a new remote lookup is made only when location data is missing
 or an administrator explicitly releases fields back to automatic management.
+The hierarchy editor uses `GET /v1/geodata/location-options`, which aggregates
+the stored BigDataCloud names and codes into continent → country → first
+subdivision → province options. BigDataCloud documents these values as
+`continent`/`continentCode`, `countryName`/`countryCode`,
+`principalSubdivision`/`principalSubdivisionCode`, and administrative
+`isoCode` values; it does not provide a separate global catalog endpoint.
+Hierarchy codes are therefore read-only and derived from the selected names.
 
 ## Architecture
 
