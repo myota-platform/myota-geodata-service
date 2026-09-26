@@ -11,7 +11,7 @@ This repository is a runnable vertical-slice bootstrap for the service repositor
 - Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
-- A dedicated candidate-only intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in MinIO/S3-compatible storage, and emit a durable queue event.
+- A dedicated candidate-only intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit a durable queue event.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
 - Activation and QSO primitives with idempotency keys and audit events.
@@ -96,7 +96,7 @@ Text can be pasted through `POST /v1/geodata/imports` with `format` and
 payload, filename, and the same category/source metadata. Both paths return
 `202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
 candidate persistence run in a bounded background import worker. The
-deployment stores uploaded bytes in MinIO and records a
+deployment stores uploaded bytes in SeaweedFS and records a
 `geodata.import.queued.v1` outbox event for NATS consumers. Shapefile uploads
 must be ZIP archives with their `.shp`, `.shx`, and `.dbf` members.
 
