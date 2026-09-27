@@ -6,8 +6,9 @@ This repository owns the platform-wide geospatial catalogue and its
 candidate-to-approved lifecycle. It owns PostGIS entities, geometries, source
 provenance, import runs, adapter/conflation metadata, review and audit
 records, location enrichment, and entity-category assignments. Imports are
-programme-independent and always create candidates; programme eligibility is
-decided separately.
+programme-independent and first enter durable pre-processing; administrator
+promotion chooses CANDIDATE or APPROVED while programme eligibility remains a
+separate decision.
 
 ## What works now
 
