@@ -295,7 +295,7 @@ class GeoHandler(JsonHandler):
                 entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": programme_slug,
                           "entityType": categories[0], "entityTypes": categories, "entityTypeCodes": categories,
                           "name": props.get("name", "Unnamed candidate"),
-                          "status": "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
+                          "status": existing["status"] if existing else "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
                           "attachments": attachments, "candidateSource": candidate_source,
                           "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
