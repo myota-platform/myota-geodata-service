@@ -94,13 +94,15 @@ Dataset intake is platform-wide and is not assigned to a programme. Each
 import selects one or more categories from the shared Master data catalogue; programme
 assignment is a later eligibility decision. The admin page reads all category
 definitions from `GET /v1/entity-types`, including categories not currently
-assigned to any programme, and imports always create `CANDIDATE` entities.
+assigned to any programme. Imports stop at `PREPROCESSED` and require
+administrator confirmation before they create or update an entity.
 
 Use the admin web's **Geodata imports** page rather than the review page. Select
 the shared feature categories before submitting; programme assignment is not
-part of dataset intake. Every dataset import is written as `CANDIDATE`, retains
-source/license/attribution metadata, records an `ADAPTER_IMPORT` candidate
-source, and must pass the normal approval workflow. Community proposals use
+part of dataset intake. Every dataset import is pre-processed with its
+source/license/attribution metadata and `ADAPTER_IMPORT` candidate source. The
+validated processing queue can create a `CANDIDATE` or, for an authorized
+administrator, an `APPROVED` entity. Community proposals use
 `COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
