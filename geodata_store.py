@@ -10,7 +10,7 @@ import json
 import uuid
 from typing import Any
 
-from common import Store
+from common import Store, now
 
 
 def _uuid(value: Any) -> uuid.UUID | None:
@@ -99,6 +99,51 @@ class GeodataStore(Store):
         with self.transaction() as connection:
             for entity in self.items.values():
                 self._upsert_entity(connection, entity)
+            for run in self.data.get("importRuns", {}).values():
+                run_id = _uuid(run.get("id"))
+                if not run_id:
+                    continue
+                connection.execute(
+                    "INSERT INTO import_run(id, adapter_code, source_metadata, started_at, completed_at, stats, status) "
+                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET source_metadata=EXCLUDED.source_metadata, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, stats=EXCLUDED.stats, status=EXCLUDED.status",
+                    (run_id, run.get("adapter") or "MANUAL", json.dumps({"source": run.get("source") or {}, "programmeSlug": run.get("programmeSlug"),
+                                                                           "format": run.get("format"), "filename": run.get("filename")} ),
+                     run.get("startedAt") or run.get("queuedAt") or now(), run.get("completedAt"), json.dumps(run.get("stats") or {}),
+                     run.get("status") or "QUEUED"),
+                )
+            for candidate in self.data.get("importCandidates", {}).values():
+                entity = candidate.get("entity") or {}
+                geometry = entity.get("geometry") or {}
+                candidate_id = _uuid(candidate.get("id"))
+                run_id = _uuid(candidate.get("importRunId"))
+                if not candidate_id or not run_id or not geometry:
+                    continue
+                connection.execute(
+                    "INSERT INTO geodata_import_candidate "
+                    "(id, import_run_id, ordinal, planned_entity_id, programme_slug, entity_type_codes, name, geom, candidate_source, source_ref, source_hash, provenance, entity_payload, validation_status, validation_note, validated_by, validated_at, target_status, processed_entity_id, processed_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, now()) "
+                    "ON CONFLICT (id) DO UPDATE SET validation_status=EXCLUDED.validation_status, validation_note=EXCLUDED.validation_note, validated_by=EXCLUDED.validated_by, validated_at=EXCLUDED.validated_at, target_status=EXCLUDED.target_status, processed_entity_id=EXCLUDED.processed_entity_id, processed_at=EXCLUDED.processed_at, entity_payload=EXCLUDED.entity_payload, updated_at=now()",
+                    (candidate_id, run_id, int(candidate.get("ordinal", 0)), _uuid(entity.get("id")), entity.get("programmeSlug"),
+                     json.dumps(entity.get("entityTypes") or []), entity.get("name") or "Unnamed candidate", json.dumps(geometry),
+                     json.dumps(candidate.get("candidateSource") or {}), entity.get("sourceRef"), (entity.get("provenance") or {}).get("sourceHash"),
+                     json.dumps(entity.get("provenance") or {}), json.dumps(entity), candidate.get("validationStatus", "PENDING"),
+                     candidate.get("validationNote"), candidate.get("validatedBy"), candidate.get("validatedAt"), candidate.get("targetStatus"),
+                     _uuid(candidate.get("processedEntityId")), candidate.get("processedAt")),
+                )
+            for queue in self.data.get("importProcessingQueues", {}).values():
+                queue_id = _uuid(queue.get("id"))
+                run_id = _uuid(queue.get("importRunId"))
+                if not queue_id or not run_id:
+                    continue
+                connection.execute(
+                    "INSERT INTO geodata_import_processing_queue(id, import_run_id, candidate_ids, target_status, requested_by, status, result, error, requested_at, started_at, completed_at) "
+                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, result=EXCLUDED.result, error=EXCLUDED.error, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at",
+                    (queue_id, run_id, json.dumps(queue.get("candidateIds") or []), queue.get("targetStatus"), queue.get("requestedBy"),
+                     queue.get("status", "QUEUED"), json.dumps(queue.get("result") or {}), queue.get("error"), queue.get("requestedAt"),
+                     queue.get("startedAt"), queue.get("completedAt")),
+                )
 
     def delete_relational(self, entity_id: str) -> None:
         if not self.durable:

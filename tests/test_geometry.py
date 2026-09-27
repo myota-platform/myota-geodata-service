@@ -82,7 +82,11 @@ class GeometryWayTests(unittest.TestCase):
             "entityType": "TRAIL", "features": [{"type": "Feature", "properties": {"name": "Unassigned trail"},
             "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}]
         }, "Idempotency-Key": "import-unscoped-1"})
-        entity = GeoHandler.get_entity(None, {"entityId": result["created"][0]})
+        self.assertEqual(result["status"], "PREPROCESSED")
+        candidate_id = result["preprocessed"][0]
+        GeoHandler.validate_import_candidates(None, {"runId": result["importRunId"], "_body": {"candidateIds": [candidate_id], "reviewerId": "admin"}})
+        queue = GeoHandler.process_import_candidates(None, {"runId": result["importRunId"], "_body": {"candidateIds": [candidate_id], "targetStatus": "CANDIDATE", "processorId": "admin"}})
+        entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
         self.assertIsNone(entity["programmeSlug"])
         self.assertEqual(entity["entityType"], "TRAIL")
         self.assertEqual(entity["status"], "CANDIDATE")

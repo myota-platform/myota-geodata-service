@@ -17,7 +17,7 @@ decided separately.
 - Geodata lifecycle: adapter/import run or community proposal → CANDIDATE → approver review → APPROVED or REJECTED; approved entities may only be RETIRED.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
-- A dedicated candidate-only intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit a durable queue event.
+- A dedicated two-stage intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit durable queue events. Parsing and normalization stop at `PREPROCESSED`; no entity is created until an administrator validates selected records.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
 - Lifecycle transitions are API-owned and audited; QGIS is a controlled
@@ -107,14 +107,23 @@ Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. File uploads use `POST /v1/geodata/imports/upload` with a base64
 payload, filename, and the same category/source metadata. Both paths return
 `202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
-candidate persistence run in a bounded background import worker. The
-deployment stores uploaded bytes in SeaweedFS and records a
-`geodata.import.queued.v1` outbox event for NATS consumers. Shapefile uploads
-must be ZIP archives with their `.shp`, `.shx`, and `.dbf` members.
+pre-processed candidate persistence run in a bounded background import worker.
+The deployment stores uploaded bytes in SeaweedFS and records
+`geodata.import.preprocessed.v1` in the durable outbox for NATS consumers.
+Shapefile uploads must be ZIP archives with their `.shp`, `.shx`, and `.dbf`
+members.
 
 Use `GET /v1/geodata/imports/{runId}` to retrieve the durable run summary.
-It includes status/timestamps, source manifest information, and counts for
-created, updated, skipped, disappeared, and failed features. The default
+It includes status/timestamps, source manifest information, candidate counts,
+and counts for pre-processed, created, updated, skipped, disappeared, and
+failed features. Use `GET /v1/geodata/imports/{runId}/candidates` for a compact
+paged validation queue. `POST .../candidates/validate` confirms selected
+records. `POST /v1/geodata/imports/{runId}/process` requires confirmed IDs and
+an explicit `CANDIDATE` or `APPROVED` target; it emits
+`geodata.import.processing.queued.v1` to the
+`myota.geodata.import.process.v1` subject. The local service runs a bounded
+fallback worker, while production NATS consumers process the same durable
+queue idempotently. The default
 request limit is 32 MiB (`MYOTA_MAX_BODY_BYTES`); deployments may set a lower
 bounded value. The admin web treats the text area as optional when a file is
 selected and links each recent run to this summary.

@@ -38,12 +38,32 @@ class ImportQueueTests(unittest.TestCase):
             deadline = time.time() + 3
             while time.time() < deadline:
                 status = GeoHandler.store.data["importRuns"][run_id]["status"]
-                if status in {"COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED"}:
+                if status in {"PREPROCESSED", "PREPROCESSED_WITH_ERRORS", "FAILED"}:
                     break
                 time.sleep(0.01)
 
         run = GeoHandler.store.data["importRuns"][run_id]
-        self.assertEqual(run["status"], "COMPLETED")
+        self.assertEqual(run["status"], "PREPROCESSED")
+        self.assertEqual(run["stats"]["preprocessed"], 1)
+        self.assertEqual(len(GeoHandler.store.items), 0)
+        candidates = GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": f"?pageSize=10"})
+        self.assertEqual(candidates["total"], 1)
+        candidate_id = candidates["items"][0]["id"]
+        with patch.object(GeoHandler, "_authorize_import"):
+            validation = GeoHandler.validate_import_candidates(None, {"runId": run_id, "_body": {
+                "candidateIds": [candidate_id], "reviewerId": "admin-1", "note": "Checked in import queue",
+            }})
+            self.assertEqual(validation["validationStatus"], "CONFIRMED")
+            queued = GeoHandler.process_import_candidates(None, {"runId": run_id, "_body": {
+                "candidateIds": [candidate_id], "targetStatus": "CANDIDATE", "processorId": "admin-1",
+            }})
+        queue_id = queued["id"]
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if GeoHandler.store.data["importProcessingQueues"][queue_id]["status"] in {"COMPLETED", "FAILED"}:
+                break
+            time.sleep(0.01)
+        self.assertEqual(GeoHandler.store.data["importProcessingQueues"][queue_id]["status"], "COMPLETED")
         self.assertEqual(run["stats"]["created"], 1)
         self.assertEqual(len(GeoHandler.store.items), 1)
 
@@ -53,6 +73,24 @@ class ImportQueueTests(unittest.TestCase):
                 "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
                 "source": {"name": "empty"}, "content": "   ",
             }})
+
+    def test_confirmed_records_can_be_promoted_directly_to_approved(self):
+        body = {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "validated import", "license": "CC0"},
+            "features": [{"type": "Feature", "properties": {"name": "Validated park"},
+                          "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]}}],
+        }
+        result = GeoHandler.enqueue_import(None, {"_body": body})
+        candidate_id = result["preprocessed"][0]
+        GeoHandler.validate_import_candidates(None, {"runId": result["importRunId"], "_body": {
+            "candidateIds": [candidate_id], "reviewerId": "global-admin",
+        }})
+        queue = GeoHandler.process_import_candidates(None, {"runId": result["importRunId"], "_body": {
+            "candidateIds": [candidate_id], "targetStatus": "APPROVED", "processorId": "global-admin",
+        }})
+        entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
+        self.assertEqual(entity["status"], "APPROVED")
 
 
 if __name__ == "__main__":
