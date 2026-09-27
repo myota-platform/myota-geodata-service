@@ -150,6 +150,17 @@ def _haversine_km(left: dict[str, float], right: dict[str, float]) -> float:
     return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
 
 
+def geometry_distance_meters(left_geometry: dict[str, Any], right_geometry: dict[str, Any]) -> float:
+    """Return the distance between two geometry centroids in metres.
+
+    This is deliberately a conservative, explainable pre-processing signal. It
+    is not a conflation decision: administrators still decide whether a record
+    should be promoted. Exact geometry is reported as zero metres and all other
+    geometries use their WGS84 bounding-box centroids.
+    """
+    return _haversine_km(geometry_centroid(left_geometry), geometry_centroid(right_geometry)) * 1000
+
+
 def conflation_score(candidate: dict[str, Any], existing: dict[str, Any]) -> dict[str, Any]:
     candidate_name = str(candidate.get("name", "")).casefold().strip()
     existing_name = str(existing.get("name", "")).casefold().strip()

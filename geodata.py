@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from common import JsonHandler, new_id, now, page_result, require, verify_token
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
+                              geometry_distance_meters,
                               normalize_geometry, source_manifest, validate_attachments)
 from geodata_store import GeodataStore
 from import_adapters import normalize
@@ -259,6 +260,33 @@ class GeoHandler(JsonHandler):
             entity.setdefault("provenance", {})["reverseGeocoding"] = previous_geocoding
 
     @staticmethod
+    def _possible_duplicates(entity: dict[str, Any]) -> list[dict[str, Any]]:
+        """Find existing entities whose geometry is identical or under 50 m away."""
+        geometry = entity.get("geometry")
+        if not geometry:
+            return []
+        matches = []
+        candidate_digest = digest(geometry)
+        for existing in GeoHandler.store.items.values():
+            if existing.get("id") == entity.get("id") or not existing.get("geometry"):
+                continue
+            distance = geometry_distance_meters(geometry, existing["geometry"])
+            if distance >= 50:
+                continue
+            existing_geometry = existing["geometry"]
+            matches.append({
+                "entityId": existing.get("id"),
+                "name": existing.get("name") or "Unnamed entity",
+                "status": existing.get("status"),
+                "entityTypes": entity_categories(existing),
+                "geometry": existing_geometry,
+                "centroid": existing.get("centroid") or geometry_centroid(existing_geometry),
+                "distanceMeters": round(distance, 2),
+                "matchType": "IDENTICAL_GEOMETRY" if digest(existing_geometry) == candidate_digest else "WITHIN_50_METERS",
+            })
+        return sorted(matches, key=lambda match: (match["distanceMeters"], match["name"]))
+
+    @staticmethod
     def _import_features(body: dict[str, Any], run_id: str) -> dict[str, Any]:
         if len(body["features"]) > MAX_IMPORT_FEATURES:
             raise ValueError(f"an import may contain at most {MAX_IMPORT_FEATURES} features")
@@ -309,10 +337,13 @@ class GeoHandler(JsonHandler):
                           "createdAt": existing.get("createdAt", occurred_at) if existing else occurred_at, "updatedAt": occurred_at}
                 GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
+                possible_duplicates = GeoHandler._possible_duplicates(entity)
                 candidate_id = new_id()
                 candidate = {"id": candidate_id, "importRunId": run_id, "ordinal": index,
                              "existingEntityId": existing["id"] if existing else None,
                              "candidateSource": candidate_source, "validationStatus": "PENDING",
+                             "dedupeWarning": "POSSIBLE_DUPLICATE" if possible_duplicates else None,
+                             "possibleDuplicates": possible_duplicates,
                              "targetStatus": None, "processedEntityId": None, "processedAt": None,
                              "entity": entity}
                 import_candidates[candidate_id] = candidate
@@ -340,6 +371,8 @@ class GeoHandler(JsonHandler):
                 "entityTypes": entity.get("entityTypes") or [], "geometry": entity.get("geometry"),
                 "centroid": entity.get("centroid"), "sourceRef": entity.get("sourceRef"),
                 "candidateSource": candidate.get("candidateSource") or {}, "validationStatus": candidate.get("validationStatus", "PENDING"),
+                "dedupeWarning": candidate.get("dedupeWarning"),
+                "possibleDuplicates": candidate.get("possibleDuplicates") or [],
                 "validationNote": candidate.get("validationNote"), "validatedBy": candidate.get("validatedBy"),
                 "validatedAt": candidate.get("validatedAt"), "targetStatus": candidate.get("targetStatus"),
                 "processedEntityId": candidate.get("processedEntityId"), "processedAt": candidate.get("processedAt"),

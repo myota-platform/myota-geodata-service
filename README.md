@@ -107,10 +107,17 @@ administrator, an `APPROVED` entity. Community proposals use
 `COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
-`content`. File uploads use `POST /v1/geodata/imports/upload` with a base64
+`content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
+it submits ordinary GeoJSON through the `OSM` adapter so OSM tags are filtered,
+attribution is preserved, and source references remain available for review.
+File uploads use `POST /v1/geodata/imports/upload` with a base64
 payload, filename, and the same category/source metadata. Both paths return
 `202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
 pre-processed candidate persistence run in a bounded background import worker.
+Each candidate is checked against existing entities; identical geometry or a
+centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
+and a list of comparison geometries. This is a review warning, not an automatic
+merge or rejection.
 The deployment stores uploaded bytes in SeaweedFS and records
 `geodata.import.preprocessed.v1` in the durable outbox for NATS consumers.
 Shapefile uploads must be ZIP archives with their `.shp`, `.shx`, and `.dbf`

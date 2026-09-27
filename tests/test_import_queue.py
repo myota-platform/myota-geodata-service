@@ -92,6 +92,28 @@ class ImportQueueTests(unittest.TestCase):
         entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
         self.assertEqual(entity["status"], "APPROVED")
 
+    def test_preprocessing_marks_existing_entity_within_fifty_metres(self):
+        existing_id = "existing-seville-park"
+        GeoHandler.store.items[existing_id] = {
+            "id": existing_id, "name": "Existing Seville park", "status": "APPROVED",
+            "entityType": "MUNICIPAL_PARK", "entityTypes": ["MUNICIPAL_PARK"],
+            "geometry": {"type": "Point", "coordinates": [-5.9900, 37.3900]},
+            "centroid": {"lon": -5.9900, "lat": 37.3900},
+        }
+        body = {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "OSM GeoJSON", "license": "ODbL 1.0"},
+            "features": [{"type": "Feature", "properties": {"name": "Nearby imported park"},
+                          "geometry": {"type": "Point", "coordinates": [-5.9902, 37.3901]}}],
+        }
+        with patch("geodata.enrich_entity_location", side_effect=lambda entity, force=False: entity):
+            result = GeoHandler.enqueue_import(None, {"_body": body})
+        candidates = GeoHandler.list_import_candidates(None, {"runId": result["importRunId"], "_path": "?pageSize=10"})
+        candidate = candidates["items"][0]
+        self.assertEqual(candidate["dedupeWarning"], "POSSIBLE_DUPLICATE")
+        self.assertEqual(candidate["possibleDuplicates"][0]["entityId"], existing_id)
+        self.assertLess(candidate["possibleDuplicates"][0]["distanceMeters"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()
