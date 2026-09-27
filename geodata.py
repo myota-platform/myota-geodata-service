@@ -288,12 +288,17 @@ class GeoHandler(JsonHandler):
                 occurred_at = now()
                 default_entity_type = "TRAIL" if str(props.get("featureType") or "").casefold() == "way" or geometry.get("type") == "LineString" else "MUNICIPAL_PARK"
                 categories = entity_type_codes(props.get("entityTypes") or props.get("entityType"), default_entity_type) or [default_entity_type]
+                candidate_source = props.get("candidateSource") or {
+                    "type": "ADAPTER_IMPORT", "adapter": adapter, "importRunId": run_id,
+                    "sourceKey": source_key, "sourceRef": source_ref,
+                }
                 entity = {"id": existing["id"] if existing else new_id(), "programmeSlug": programme_slug,
                           "entityType": categories[0], "entityTypes": categories, "entityTypeCodes": categories,
                           "name": props.get("name", "Unnamed candidate"),
                           "status": "CANDIDATE", "sourceState": "CURRENT", "geometry": geometry,
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
-                          "attachments": attachments, "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
+                          "attachments": attachments, "candidateSource": candidate_source,
+                          "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
                                          "sourceFeature": raw_feature, "importRunId": run_id, "sourceHash": digest(raw_feature),
                                          "license": source.get("license"), "attribution": source.get("attribution"),
                                          "retrievedAt": source.get("retrievedAt", occurred_at)},
@@ -304,6 +309,8 @@ class GeoHandler(JsonHandler):
                 GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
                 GeoHandler.store.items[entity["id"]] = entity
+                if not existing:
+                    GeoHandler.store.event("geodata.entity.candidate.created.v1", "entity", entity["id"], entity)
                 (updated if existing else created).append(entity["id"])
                 records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
                 conflation.extend(GeoHandler._create_conflation_candidates(entity))
@@ -612,28 +619,16 @@ class GeoHandler(JsonHandler):
         categories = entity_type_codes(properties.get("entityTypes") or properties.get("entityTypeCodes"), properties.get("entityType"))
         if not categories:
             raise ValueError("entityTypes must contain at least one shared entity category code")
+        properties["candidateSource"] = {
+            "type": "COMMUNITY_PROPOSAL",
+            "proposalId": new_id(),
+            "proposerId": body.get("proposerId") or p.get("accountId"),
+        }
+        feature["properties"] = properties
         return GeoHandler.import_manual(None, {"_body": {"programmeSlug": body.get("programmeSlug"), "adapter": "MANUAL",
             "entityTypes": categories, "entityType": categories[0],
             "source": {**(body.get("source") or {}), "name": (body.get("source") or {}).get("name", "Manual proposal"),
                         "license": (body.get("source") or {}).get("license", "programme-supplied")}, "features": [feature]}})
-
-    @staticmethod
-    def propose(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
-        entity = GeoHandler.store.items[p["entityId"]]
-        body = p["_body"]
-        require(body, "proposerId")
-        if entity["status"] not in ("CANDIDATE", "REJECTED"):
-            raise ValueError("only candidate or rejected entities can be proposed")
-        previous_status = entity["status"]
-        entity["status"] = "PROPOSED"
-        proposed_at = now()
-        entity["review"] = {"proposerId": body["proposerId"], "note": body.get("note"), "proposedAt": proposed_at}
-        entity.setdefault("reviewHistory", []).append({"action": "PROPOSED", "proposerId": body["proposerId"],
-                                                        "note": body.get("note"), "occurredAt": proposed_at,
-                                                        "previousStatus": previous_status})
-        entity["updatedAt"] = now()
-        GeoHandler.store.event("geodata.entity.proposed.v1", "entity", entity["id"], entity)
-        return entity
 
     @staticmethod
     def review(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -641,8 +636,8 @@ class GeoHandler(JsonHandler):
         GeoHandler._authorize_review(p, entity)
         body = p["_body"]
         require(body, "decision", "reviewerId")
-        if entity["status"] != "PROPOSED":
-            raise ValueError("only proposed entities can be reviewed")
+        if entity["status"] != "CANDIDATE":
+            raise ValueError("only candidate entities can be reviewed")
         if body["decision"] not in ("APPROVED", "REJECTED"):
             raise ValueError("decision must be APPROVED or REJECTED")
         reviewed_at = now()
@@ -650,7 +645,7 @@ class GeoHandler(JsonHandler):
         entity["review"] = {**(entity.get("review") or {}), "reviewerId": body["reviewerId"], "note": body.get("note"), "reviewedAt": reviewed_at}
         entity.setdefault("reviewHistory", []).append({"action": body["decision"], "reviewerId": body["reviewerId"],
                                                         "note": body.get("note"), "occurredAt": reviewed_at,
-                                                        "previousStatus": "PROPOSED"})
+                                                        "previousStatus": "CANDIDATE"})
         entity["updatedAt"] = now()
         GeoHandler.store.event("geodata.entity.reviewed.v1", "entity", entity["id"], entity)
         return entity
@@ -661,15 +656,19 @@ class GeoHandler(JsonHandler):
         GeoHandler._authorize_review(p, entity)
         body = p["_body"]
         require(body, "status", "reviewerId")
-        allowed = {"APPROVED", "CANDIDATE", "PROPOSED", "RETIRED", "REJECTED"}
+        allowed = {"APPROVED", "CANDIDATE", "RETIRED", "REJECTED"}
         if body["status"] not in allowed:
-            raise ValueError("status must be APPROVED, CANDIDATE, PROPOSED, RETIRED, or REJECTED")
+            raise ValueError("status must be APPROVED, CANDIDATE, RETIRED, or REJECTED")
         previous_status = entity["status"]
         target_status = body["status"]
         if previous_status == "APPROVED" and target_status != "RETIRED":
             raise ValueError("approved entities can only be retired to protect historical QSOs")
         if previous_status == "RETIRED" and target_status != "RETIRED":
             raise ValueError("retired entities cannot be reactivated")
+        if previous_status == "CANDIDATE" and target_status not in {"CANDIDATE", "APPROVED", "REJECTED"}:
+            raise ValueError("candidate entities can only remain candidates, be approved, or be rejected")
+        if previous_status == "REJECTED" and target_status != "REJECTED":
+            raise ValueError("rejected entities cannot be moved back into the review lifecycle")
         if previous_status == target_status:
             return entity
         changed_at = now()
@@ -954,7 +953,6 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
     ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,
     ("POST", "/v1/geodata/conflation/{candidateId}/resolve"): GeoHandler.resolve_conflation,
-    ("POST", "/v1/geodata/entities/{entityId}/propose"): GeoHandler.propose,
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
@@ -997,7 +995,7 @@ def seed() -> None:
             "status": park["status"], "sourceState": "CURRENT", "sourceRef": park["sourceRef"], "geometry": park["geometry"], "centroid": park["centroid"],
             "provenance": {"adapter": "OSM", "source": source, "sourceKey": "OpenStreetMap", "sourceFeature": source_feature, "tags": {"leisure": "park"}},
             "review": {"reviewerId": "seed-approver", "reviewedAt": now(), "note": "Seeded verified OSM reference"} if park["status"] == "APPROVED" else None,
-            "reviewHistory": [{"action": "APPROVED", "reviewerId": "seed-approver", "note": "Seeded verified OSM reference", "occurredAt": now(), "previousStatus": "PROPOSED"}] if park["status"] == "APPROVED" else [],
+            "reviewHistory": [{"action": "APPROVED", "reviewerId": "seed-approver", "note": "Seeded verified OSM reference", "occurredAt": now(), "previousStatus": "CANDIDATE"}] if park["status"] == "APPROVED" else [],
             "geometryHistory": [], "createdAt": existing.get("createdAt", now()) if existing else now(), "updatedAt": now()}
         enrich_entity_location(GeoHandler.store.items[park["id"]])
     for entity in GeoHandler.store.items.values():

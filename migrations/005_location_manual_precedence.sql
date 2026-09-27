@@ -17,7 +17,7 @@ SELECT e.id, e.programme_id, e.name, e.lifecycle_status, e.source_state, e.juris
        e.municipality, e.manual_location_fields
 FROM geodata_entity e
 LEFT JOIN source_reference s ON s.entity_id = e.id
-WHERE e.lifecycle_status IN ('CANDIDATE', 'PROPOSED', 'REJECTED') OR e.source_state IN ('STALE', 'REVIEW_REQUIRED');
+WHERE e.lifecycle_status IN ('CANDIDATE', 'REJECTED') OR e.source_state IN ('STALE', 'REVIEW_REQUIRED');
 
 CREATE OR REPLACE VIEW qgis_approved_entities AS
 SELECT id, programme_id, name, geom, public_properties, source_state, jurisdiction,

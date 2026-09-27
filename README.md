@@ -14,7 +14,7 @@ decided separately.
 - The identity, programme, activity, public-web, admin-web, and deployment
   boundaries are documented in the
   [repository map](https://github.com/myota-platform/myota-docs/blob/main/docs/repository-map.md).
-- Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
+- Geodata lifecycle: adapter/import run or community proposal → CANDIDATE → approver review → APPROVED or REJECTED; approved entities may only be RETIRED.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
 - A dedicated candidate-only intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit a durable queue event.
@@ -98,9 +98,10 @@ assigned to any programme, and imports always create `CANDIDATE` entities.
 
 Use the admin web's **Geodata imports** page rather than the review page. Select
 the shared feature categories before submitting; programme assignment is not
-part of dataset intake. Every
-dataset import is written as `CANDIDATE`, retains source/license/attribution
-metadata, and must pass the normal proposal and approval workflow.
+part of dataset intake. Every dataset import is written as `CANDIDATE`, retains
+source/license/attribution metadata, records an `ADAPTER_IMPORT` candidate
+source, and must pass the normal approval workflow. Community proposals use
+`COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. File uploads use `POST /v1/geodata/imports/upload` with a base64

@@ -22,6 +22,9 @@ ordered SQL files define the `myota_geo` database:
 8. `008_entity_category_assignments.sql` adds relational entity-to-category
    assignments, enforces one primary category per entity, and backfills the
    legacy primary category.
+9. `009_candidate_lifecycle.sql` removes the legacy `PROPOSED` lifecycle state,
+   normalizes old rows to `CANDIDATE`, and records that adapter/import runs and
+   community proposals are candidate sources rather than statuses.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS geodata_entity (
   programme_id uuid NOT NULL,
   entity_type_id uuid NOT NULL REFERENCES entity_type(id),
   name text NOT NULL,
-  lifecycle_status text NOT NULL DEFAULT 'CANDIDATE' CHECK (lifecycle_status IN ('CANDIDATE','PROPOSED','APPROVED','REJECTED','RETIRED')),
+  lifecycle_status text NOT NULL DEFAULT 'CANDIDATE' CHECK (lifecycle_status IN ('CANDIDATE','APPROVED','REJECTED','RETIRED')),
   geom geometry(Geometry, 4326) NOT NULL,
   centroid geography(Point, 4326),
   public_properties jsonb NOT NULL DEFAULT '{}'::jsonb,
