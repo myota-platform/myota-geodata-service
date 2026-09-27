@@ -1,24 +1,33 @@
-# MyOTA Outdoor Activation Platform
+# MyOTA geodata service
 
 MyOTA is a programme-agnostic platform for outdoor activation programmes. MPOTA is represented as a configured programme, not as the platform itself. No rules or charter text are copied from POTA or any other programme: every programme supplies its own configuration, policy, eligibility, awards and public charter.
 
-This repository is a runnable vertical-slice bootstrap for the service repositories described in [`docs/repository-map.md`](docs/repository-map.md). It contains four independently runnable Python services, an API-first contract, a universal browser UI, PostGIS migrations, and Kubernetes/Helm deployment assets.
+This repository owns the platform-wide geospatial catalogue and its
+candidate-to-approved lifecycle. It owns PostGIS entities, geometries, source
+provenance, import runs, adapter/conflation metadata, review and audit
+records, location enrichment, and entity-category assignments. Imports are
+programme-independent and always create candidates; programme eligibility is
+decided separately.
 
 ## What works now
 
-- Amateur-radio-aware identity: operator/SWL participation, multiple callsigns, one primary callsign, lifecycle and verification fields.
-- Shared entity-category catalogue used by imports and review, with programme assignment handled separately.
+- The identity, programme, activity, public-web, admin-web, and deployment
+  boundaries are documented in the
+  [repository map](https://github.com/myota-platform/myota-docs/blob/main/docs/repository-map.md).
 - Geodata lifecycle: imported candidate → community proposal → approver review → approved entity.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
 - A dedicated candidate-only intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit a durable queue event.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
-- Activation and QSO primitives with idempotency keys and audit events.
-- Universal themed frontend with verified/candidate map distinction.
-- OpenAPI and event contracts, ADRs, migration notes, health endpoints and local deployment manifests.
+- Lifecycle transitions are API-owned and audited; QGIS is a controlled
+  graphical editing tool, not an approval bypass.
 
-The default test/runtime adapter is in-memory so the slice can be exercised without third-party Python packages. PostgreSQL/PostGIS is the production storage target and is defined in `db/migrations/`.
+Unit tests may use an in-memory adapter. Durable Compose/Kubernetes operation
+uses PostgreSQL/PostGIS and SeaweedFS through myota-deploy. The remaining
+large-scale source workers, public data publication, stewardship workflow, and
+production operations are tracked in the
+[charter gap analysis](https://github.com/myota-platform/myota-docs/blob/main/docs/charter-gap-analysis.md).
 
 ## Run the vertical slice
 
@@ -71,7 +80,9 @@ Hierarchy codes are therefore read-only and derived from the selected names.
 
 ## Architecture
 
-Read [`docs/architecture.md`](docs/architecture.md), [`docs/adr/0001-storage-topology.md`](docs/adr/0001-storage-topology.md), and [`docs/repository-map.md`](docs/repository-map.md). The current bootstrap is kept together to make the vertical slice easy to run; the repository map defines the justified GitHub split once the MyOTA organization is available.
+Read the [geodata architecture](https://github.com/myota-platform/myota-docs/blob/main/docs/architecture.md),
+[project charter](https://github.com/myota-platform/myota-docs/blob/main/docs/project-charter.md),
+and [repository map](https://github.com/myota-platform/myota-docs/blob/main/docs/repository-map.md).
 
 ## Source project
 
