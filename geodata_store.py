@@ -122,7 +122,7 @@ class GeodataStore(Store):
                 connection.execute(
                     "INSERT INTO geodata_import_candidate "
                     "(id, import_run_id, ordinal, planned_entity_id, programme_slug, entity_type_codes, name, geom, candidate_source, source_ref, source_hash, provenance, entity_payload, validation_status, validation_note, validated_by, validated_at, target_status, processed_entity_id, processed_at, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, now()) "
+                    "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, now()) "
                     "ON CONFLICT (id) DO UPDATE SET validation_status=EXCLUDED.validation_status, validation_note=EXCLUDED.validation_note, validated_by=EXCLUDED.validated_by, validated_at=EXCLUDED.validated_at, target_status=EXCLUDED.target_status, processed_entity_id=EXCLUDED.processed_entity_id, processed_at=EXCLUDED.processed_at, entity_payload=EXCLUDED.entity_payload, updated_at=now()",
                     (candidate_id, run_id, int(candidate.get("ordinal", 0)), _uuid(entity.get("id")), entity.get("programmeSlug"),
                      json.dumps(entity.get("entityTypes") or []), entity.get("name") or "Unnamed candidate", json.dumps(geometry),
