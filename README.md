@@ -136,7 +136,11 @@ fallback worker, while production NATS consumers process the same durable
 queue idempotently. The default
 request limit is 32 MiB (`MYOTA_MAX_BODY_BYTES`); deployments may set a lower
 bounded value. The admin web treats the text area as optional when a file is
-selected and links each recent run to this summary.
+selected and links each recent run to this summary. Active `QUEUED`,
+`PROCESSING`, and `PREPROCESSED` runs are exposed with their pending and
+confirmed candidate counts so the admin web can keep a dedicated
+pre-processing queue separate from Geodata Review. Only explicit promotion
+creates or updates reviewable entities.
 
 During review, `POST /v1/geodata/entities/{entityId}/entity-type` changes the
 ordered shared Master data category list, regardless of whether
