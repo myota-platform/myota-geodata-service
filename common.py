@@ -310,7 +310,8 @@ class JsonHandler(BaseHTTPRequestHandler):
                                        "User-Agent": self.headers.get("User-Agent", ""),
                                        "Remote-Addr": self.client_address[0], "_http": "1"})
                     status = result.pop("_status", 200) if isinstance(result, dict) else 200
-                    self.store.persist()
+                    if method == "POST":
+                        self.store.persist()
                     self._send(status, result)
                 except ValueError as exc:
                     self._error(400, "invalid_request", str(exc))
