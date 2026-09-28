@@ -720,6 +720,7 @@ class GeoHandler(JsonHandler):
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         runs = [GeoHandler._import_run_view(run) for run in GeoHandler.store.data.setdefault("importRuns", {}).values()]
+        runs.sort(key=lambda run: run.get("queuedAt") or run.get("startedAt") or "", reverse=True)
         return page_result(runs, query)
 
     @staticmethod

@@ -77,6 +77,19 @@ class ImportQueueTests(unittest.TestCase):
                 "source": {"name": "empty"}, "content": "   ",
             }})
 
+    def test_import_history_returns_newest_runs_first(self):
+        GeoHandler.store.data["importRuns"] = {
+            f"run-{index}": {
+                "id": f"run-{index}", "status": "PREPROCESSED", "adapter": "MANUAL",
+                "format": "GEOJSON", "queuedAt": f"2026-09-28T00:{index:02d}:00Z",
+            }
+            for index in range(37)
+        }
+        result = GeoHandler.list_imports(None, {"_path": "?pageSize=20"})
+        self.assertEqual(result["items"][0]["id"], "run-36")
+        self.assertEqual(result["items"][-1]["id"], "run-17")
+        self.assertEqual(result["nextPage"], 2)
+
     def test_confirmed_records_can_be_promoted_directly_to_approved(self):
         body = {
             "adapter": "MANUAL", "format": "GEOJSON", "entityType": "MUNICIPAL_PARK",

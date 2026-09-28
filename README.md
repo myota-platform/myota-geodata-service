@@ -148,6 +148,10 @@ confirmed candidate counts so the admin web can keep a dedicated
 pre-processing queue separate from Geodata Review. Only explicit promotion
 creates or updates reviewable entities.
 
+The import-run collection is ordered newest-first before pagination, so a newly
+submitted file remains visible on the first page even when the history contains
+more runs than the page size.
+
 After review, `POST /v1/geodata/imports/{runId}/processed` explicitly finalizes
 the run. The operation is idempotent, records the administrator and timestamp,
 deletes all staged candidate and promotion-queue rows for that run, and keeps
