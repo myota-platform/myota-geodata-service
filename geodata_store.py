@@ -106,13 +106,22 @@ class GeodataStore(Store):
                 if not run_id:
                     continue
                 connection.execute(
-                    "INSERT INTO import_run(id, adapter_code, source_metadata, started_at, completed_at, stats, status) "
-                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET source_metadata=EXCLUDED.source_metadata, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, stats=EXCLUDED.stats, status=EXCLUDED.status",
+                    "INSERT INTO import_run(id, adapter_code, source_metadata, started_at, completed_at, stats, status, "
+                    "attempt_count, heartbeat_at, lease_until, last_error) "
+                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET source_metadata=EXCLUDED.source_metadata, started_at=EXCLUDED.started_at, "
+                    "completed_at=EXCLUDED.completed_at, stats=EXCLUDED.stats, status=EXCLUDED.status, "
+                    "attempt_count=EXCLUDED.attempt_count, heartbeat_at=EXCLUDED.heartbeat_at, lease_until=EXCLUDED.lease_until, "
+                    "last_error=EXCLUDED.last_error",
                     (run_id, run.get("adapter") or "MANUAL", json.dumps({"source": run.get("source") or {}, "programmeSlug": run.get("programmeSlug"),
-                                                                           "format": run.get("format"), "filename": run.get("filename")} ),
+                                                                           "format": run.get("format"), "filename": run.get("filename"),
+                                                                           "entityType": run.get("entityType"), "entityTypes": run.get("entityTypes") or [],
+                                                                           "queuedAt": run.get("queuedAt"), "featureCount": run.get("featureCount"),
+                                                                           "errors": run.get("errors") or [], "manifest": run.get("manifest"),
+                                                                           "conflationCandidateCount": run.get("conflationCandidateCount", 0)}),
                      run.get("startedAt") or run.get("queuedAt") or now(), run.get("completedAt"), json.dumps(run.get("stats") or {}),
-                     run.get("status") or "QUEUED"),
+                     run.get("status") or "QUEUED", int(run.get("attemptCount") or 0), run.get("heartbeatAt"),
+                     run.get("leaseUntil"), run.get("lastError")),
                 )
             for candidate in self.data.get("importCandidates", {}).values():
                 entity = candidate.get("entity") or {}
@@ -174,6 +183,33 @@ class GeodataStore(Store):
             category_rows = connection.execute(
                 "SELECT entity_id::text, category_code, is_primary FROM geodata_entity_category ORDER BY entity_id, is_primary DESC, category_code"
             ).fetchall()
+            import_rows = connection.execute(
+                "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
+                "attempt_count, heartbeat_at, lease_until, last_error FROM import_run"
+            ).fetchall()
+        import_runs = self.data.setdefault("importRuns", {})
+        for row in import_rows:
+            metadata = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
+            run = import_runs.setdefault(row[0], {"id": row[0]})
+            # Relational state is authoritative for lifecycle and timestamps;
+            # preserve compatibility-only fields such as manifest and errors.
+            run.update({
+                "id": row[0], "adapter": row[1], "source": metadata.get("source") or run.get("source") or {},
+                "programmeSlug": metadata.get("programmeSlug", run.get("programmeSlug")),
+                "format": metadata.get("format", run.get("format") or "GEOJSON"),
+                "filename": metadata.get("filename", run.get("filename")),
+                "entityType": metadata.get("entityType", run.get("entityType")),
+                "entityTypes": metadata.get("entityTypes") or run.get("entityTypes") or [],
+                "queuedAt": metadata.get("queuedAt", run.get("queuedAt")),
+                "featureCount": metadata.get("featureCount", run.get("featureCount")),
+                "status": row[6], "startedAt": row[3].isoformat().replace("+00:00", "Z") if row[3] else run.get("startedAt"),
+                "completedAt": row[4].isoformat().replace("+00:00", "Z") if row[4] else run.get("completedAt"),
+                "stats": row[5] if isinstance(row[5], dict) else json.loads(row[5] or "{}"),
+                "attemptCount": row[7] or 0,
+                "heartbeatAt": row[8].isoformat().replace("+00:00", "Z") if row[8] else None,
+                "leaseUntil": row[9].isoformat().replace("+00:00", "Z") if row[9] else None,
+                "lastError": row[10],
+            })
         sources = {row[0]: row for row in source_rows}
         categories = {}
         for entity_id, category_code, _ in category_rows:

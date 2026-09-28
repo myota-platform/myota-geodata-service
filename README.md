@@ -114,6 +114,12 @@ File uploads use `POST /v1/geodata/imports/upload` with a base64
 payload, filename, and the same category/source metadata. Both paths return
 `202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
 pre-processed candidate persistence run in a bounded background import worker.
+Each run stores its source document in SeaweedFS, claims a PostgreSQL lease,
+and refreshes a heartbeat while it is working. On service restart, queued runs
+and runs with an expired lease are automatically resumed from object storage;
+unrecoverable runs are marked `FAILED` with a visible reason instead of being
+left indefinitely in `PROCESSING`. This makes the import history a durable
+operational status view rather than a process-local queue snapshot.
 Each candidate is checked against existing entities; identical geometry or a
 centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
 and a list of comparison geometries. This is a review warning, not an automatic

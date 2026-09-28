@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
+import json
 import math
 import os
 import re
+import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -446,7 +449,8 @@ class GeoHandler(JsonHandler):
         run.update({"status": "COMPLETED" if not result.get("errors") else "COMPLETED_WITH_ERRORS", "completedAt": now(),
                     "stats": {key: len(result.get(key, [])) for key in ("preprocessed", "created", "updated", "skipped", "errors", "disappeared")},
                     "errors": result.get("errors", []), "manifest": result.get("manifest"),
-                    "conflationCandidateCount": len(result.get("conflationCandidates", []))})
+                    "conflationCandidateCount": len(result.get("conflationCandidates", [])),
+                    "heartbeatAt": None, "leaseUntil": None, "lastError": None})
         run["status"] = "PREPROCESSED" if not result.get("errors") else "PREPROCESSED_WITH_ERRORS"
         GeoHandler.store.event("geodata.import.preprocessed.v1", "import_run", run_id, result)
         return run
@@ -455,46 +459,167 @@ class GeoHandler(JsonHandler):
     def _fail_import_run(run_id: str, error: Exception) -> dict[str, Any]:
         run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
         run.update({"status": "FAILED", "completedAt": now(), "errors": [{"message": str(error)}],
-                    "stats": {"preprocessed": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1, "disappeared": 0}})
+                    "stats": {"preprocessed": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1, "disappeared": 0},
+                    "heartbeatAt": None, "leaseUntil": None, "lastError": str(error)})
         GeoHandler.store.event("geodata.import.failed.v1", "import_run", run_id, {"importRunId": run_id, "error": str(error)})
         return run
 
     @staticmethod
-    def _queue_import(body: dict[str, Any], p: dict[str, str], filename: str | None,
-                      loader: Any) -> dict[str, Any]:
-        run_id, record = GeoHandler._create_import_run(body, filename)
+    def _store_import_source(run_id: str, body: dict[str, Any], content: bytes, filename: str | None) -> dict[str, Any]:
+        """Store a recovery source for pasted/manual imports in object storage."""
+        from storage import ObjectStore
 
-        def process() -> None:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename or "import.geojson")
+        bucket = "myota-geodata-imports"
+        object_key = f"geodata-import-sources/{run_id}-{safe_name}"
+        stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
+        return {**(body.get("source") or {}), "bucket": bucket, "objectKey": object_key,
+                "sha256": stored["sha256"], "size": stored["size"], "recoverySource": True}
+
+    @staticmethod
+    def _claim_import_run(run_id: str) -> bool:
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            return False
+        attempt = int(run.get("attemptCount") or 0) + 1
+        if GeoHandler.store.durable:
+            lease_seconds = max(60, int(os.environ.get("MYOTA_IMPORT_LEASE_SECONDS", "900")))
+            with GeoHandler.store.transaction() as connection:
+                claimed = connection.execute(
+                    "UPDATE import_run SET status='PROCESSING', attempt_count=attempt_count + 1, "
+                    "heartbeat_at=now(), lease_until=now() + make_interval(secs => %s), last_error=NULL "
+                    "WHERE id=%s AND status IN ('QUEUED', 'PROCESSING') "
+                    "AND (status='QUEUED' OR lease_until IS NULL OR lease_until <= now()) RETURNING id",
+                    (lease_seconds, run_id),
+                ).fetchone()
+            if not claimed:
+                return False
+            run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
+                        "heartbeatAt": now(), "lastError": None})
+            run["leaseUntil"] = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+        else:
+            run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
+                        "heartbeatAt": now(), "lastError": None})
+        return True
+
+    @staticmethod
+    def _heartbeat_import_run(run_id: str, stop: threading.Event) -> None:
+        interval = max(15, int(os.environ.get("MYOTA_IMPORT_HEARTBEAT_SECONDS", "30")))
+        lease_seconds = max(60, int(os.environ.get("MYOTA_IMPORT_LEASE_SECONDS", "900")))
+        while not stop.wait(interval):
             try:
-                with GeoHandler.store.lock:
-                    run = GeoHandler.store.data["importRuns"][run_id]
-                    run.update({"status": "PROCESSING", "startedAt": now()})
-                    GeoHandler.store.persist(include_import_state=True)
-                features = loader()
-                prepared = GeoHandler._prepare_import_body(body, features)
-                with GeoHandler.store.lock:
-                    GeoHandler.store.data["importRuns"][run_id]["featureCount"] = len(features)
-                result = GeoHandler._import_features({**prepared, "features": features}, run_id)
-                with GeoHandler.store.lock:
-                    GeoHandler._complete_import_run(run_id, result)
-                    GeoHandler.store.persist(include_import_state=True)
-            except Exception as error:  # imports must report failure in the run, not fail the HTTP request
-                with GeoHandler.store.lock:
-                    GeoHandler._fail_import_run(run_id, error)
-                    GeoHandler.store.persist(include_import_state=True)
+                if GeoHandler.store.durable:
+                    with GeoHandler.store.transaction() as connection:
+                        connection.execute(
+                            "UPDATE import_run SET heartbeat_at=now(), lease_until=now() + make_interval(secs => %s) "
+                            "WHERE id=%s AND status='PROCESSING'", (lease_seconds, run_id))
+                run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+                if run:
+                    run["heartbeatAt"] = now()
+            except Exception:
+                # A heartbeat failure must not hide the original import error.
+                continue
+
+    @staticmethod
+    def _process_import_run(run_id: str, body: dict[str, Any], loader: Any) -> None:
+        if not GeoHandler._claim_import_run(run_id):
+            return
+        stop = threading.Event()
+        heartbeat = threading.Thread(target=GeoHandler._heartbeat_import_run, args=(run_id, stop),
+                                     name=f"geodata-import-heartbeat-{run_id[:8]}", daemon=True)
+        heartbeat.start()
+        try:
+            with GeoHandler.store.lock:
+                GeoHandler.store.persist(include_import_state=True)
+            features = loader()
+            prepared = GeoHandler._prepare_import_body(body, features)
+            with GeoHandler.store.lock:
+                GeoHandler.store.data["importRuns"][run_id]["featureCount"] = len(features)
+            result = GeoHandler._import_features({**prepared, "features": features}, run_id)
+            with GeoHandler.store.lock:
+                GeoHandler._complete_import_run(run_id, result)
+                GeoHandler.store.persist(include_import_state=True)
+        except Exception as error:  # imports must report failure in the run, not fail the HTTP request
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, error)
+                GeoHandler.store.persist(include_import_state=True)
+        finally:
+            stop.set()
+            heartbeat.join(timeout=2)
+
+    @staticmethod
+    def _recover_import_run(run_id: str) -> None:
+        """Resume a queued/stale run from its immutable object-storage source."""
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            return
+        source = run.get("source") or {}
+        bucket, object_key = source.get("bucket"), source.get("objectKey")
+        if not bucket or not object_key:
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, RuntimeError("import source is not recoverable; no object-storage source was recorded"))
+                GeoHandler.store.persist(include_import_state=True)
+            return
+        from storage import ObjectStore
+        content = ObjectStore().get(bucket, object_key)
+        if content is None:
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, RuntimeError("import source is not recoverable; object is missing from storage"))
+                GeoHandler.store.persist(include_import_state=True)
+            return
+        format_code = str(run.get("format") or "GEOJSON").upper()
+        filename = run.get("filename") or "import.geojson"
+        body = {"adapter": run.get("adapter") or "MANUAL", "format": format_code,
+                "source": source, "filename": filename, "programmeSlug": run.get("programmeSlug"),
+                "entityType": run.get("entityType"), "entityTypes": run.get("entityTypes") or []}
+        try:
+            loader = lambda: parse_uploaded(format_code, content, filename)
+            GeoHandler._process_import_run(run_id, body, loader)
+        except Exception as error:
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, error)
+                GeoHandler.store.persist(include_import_state=True)
+
+    @staticmethod
+    def recover_import_runs() -> None:
+        """Requeue abandoned durable jobs once their execution lease expires."""
+        if not GeoHandler.store.durable:
+            return
+        with GeoHandler.store.transaction() as connection:
+            rows = connection.execute(
+                "SELECT id::text, status, lease_until FROM import_run "
+                "WHERE status='QUEUED' OR (status='PROCESSING' AND (lease_until IS NULL OR lease_until <= now()))"
+            ).fetchall()
+        for run_id, status, _lease_until in rows:
+            run = GeoHandler.store.data.setdefault("importRuns", {}).setdefault(run_id, {"id": run_id})
+            if status == "PROCESSING":
+                run.update({"status": "QUEUED", "heartbeatAt": None, "leaseUntil": None,
+                            "lastError": "Previous import worker lease expired; run was recovered"})
+            GeoHandler.store.persist(include_import_state=True)
+            GeoHandler.import_executor.submit(GeoHandler._recover_import_run, run_id)
+
+    @staticmethod
+    def _queue_import(body: dict[str, Any], p: dict[str, str], filename: str | None,
+                      loader: Any, source_content: bytes | None = None) -> dict[str, Any]:
+        run_id, record = GeoHandler._create_import_run(body, filename)
+        if source_content is not None and not (body.get("source") or {}).get("objectKey") and GeoHandler.store.durable:
+            source = GeoHandler._store_import_source(run_id, body, source_content, filename)
+            body = {**body, "source": source}
+            record["source"] = source
 
         # Persist the QUEUED record before the worker can finish, preventing a
         # fast worker from being overwritten by the request handler's final save.
         if p.get("_http"):
             GeoHandler.store.persist(include_import_state=True)
-        GeoHandler.import_executor.submit(process)
-        return {**record, "queued": True, "_status": 202}
+        GeoHandler.import_executor.submit(GeoHandler._process_import_run, run_id, body, loader)
+        return {**record, "status": "QUEUED", "queued": True, "_status": 202}
 
     @staticmethod
     def _start_import(body: dict[str, Any], features: list[dict[str, Any]], p: dict[str, str], filename: str | None = None) -> dict[str, Any]:
         body = GeoHandler._prepare_import_body({**body, "features": features}, features)
         if p.get("_http"):
-            return GeoHandler._queue_import(body, p, filename, lambda: features)
+            source_content = json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":")).encode("utf-8")
+            return GeoHandler._queue_import(body, p, filename, lambda: features, source_content)
         run_id, _ = GeoHandler._create_import_run(body, filename)
         result = GeoHandler._import_features(body, run_id)
         run = GeoHandler._complete_import_run(run_id, result)
@@ -528,7 +653,7 @@ class GeoHandler(JsonHandler):
             return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._start_import(body, parse_text(format_code, content), p, body.get("filename")))
         prepared = GeoHandler._prepare_import_body({**body, "format": format_code})
         return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._queue_import(
-            prepared, p, body.get("filename"), lambda: parse_text(format_code, content)))
+            prepared, p, body.get("filename"), lambda: parse_text(format_code, content), content.encode("utf-8")))
 
     @staticmethod
     def upload_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -1241,6 +1366,7 @@ def seed() -> None:
         enrich_entity_location(GeoHandler.store.items[park["id"]])
     for entity in GeoHandler.store.items.values():
         enrich_entity_location(entity)
+    GeoHandler.recover_import_runs()
 
 
 if __name__ == "__main__":
