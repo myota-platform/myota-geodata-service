@@ -89,3 +89,17 @@ class ObjectStore:
             self._ensure_bucket(client, bucket)
             client.put_object(Bucket=bucket, Key=object_key, Body=content, ContentType=content_type)
         return {"sha256": checksum, "size": len(content), "storedAt": object_key}
+
+    def get(self, bucket: str, object_key: str) -> bytes | None:
+        """Read a durable import source for restart recovery."""
+        if self.local_root:
+            path = self._local_path(bucket, object_key)
+            return path.read_bytes() if path.exists() else None
+        client = self._s3()
+        if not client:
+            return None
+        try:
+            response = client.get_object(Bucket=bucket, Key=object_key)
+            return response["Body"].read()
+        except Exception:
+            return None
