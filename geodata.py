@@ -730,6 +730,50 @@ class GeoHandler(JsonHandler):
         return GeoHandler._import_run_view(run)
 
     @staticmethod
+    def mark_import_processed(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        """Finalize a run after review and discard its staged records."""
+        GeoHandler._authorize_import(p)
+        run_id = p["runId"]
+        body = p.get("_body") or {}
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            raise KeyError(f"import run {run_id} not found")
+        status = str(run.get("status") or "").upper()
+        if status in {"QUEUED", "PROCESSING"}:
+            raise ValueError("an import cannot be finalized while it is still processing")
+        if status == "PROCESSED":
+            return {**GeoHandler._import_run_view(run), "finalized": True}
+
+        actor = body.get("processedBy") or body.get("actor") or "administrator"
+        candidates = GeoHandler.store.data.setdefault("importCandidates", {})
+        queues = GeoHandler.store.data.setdefault("importProcessingQueues", {})
+        candidate_ids = [candidate_id for candidate_id, candidate in candidates.items()
+                         if candidate.get("importRunId") == run_id]
+        queue_ids = [queue_id for queue_id, queue in queues.items()
+                     if queue.get("importRunId") == run_id]
+        processed_at = now()
+        if GeoHandler.store.durable:
+            with GeoHandler.store.transaction() as connection:
+                connection.execute("DELETE FROM geodata_import_processing_queue WHERE import_run_id = %s", (run_id,))
+                connection.execute("DELETE FROM geodata_import_candidate WHERE import_run_id = %s", (run_id,))
+                connection.execute(
+                    "UPDATE import_run SET status='PROCESSED', processed_at=now(), processed_by=%s, "
+                    "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s", (actor, run_id))
+        for candidate_id in candidate_ids:
+            candidates.pop(candidate_id, None)
+        for queue_id in queue_ids:
+            queues.pop(queue_id, None)
+        run.update({"status": "PROCESSED", "processedAt": processed_at, "processedBy": actor,
+                    "lastError": None, "heartbeatAt": None, "leaseUntil": None,
+                    "stagedRecordsDiscarded": len(candidate_ids), "processingQueuesDiscarded": len(queue_ids)})
+        GeoHandler.store.event("geodata.import.processed.v1", "import_run", run_id,
+                               {"importRunId": run_id, "processedBy": actor,
+                                "stagedRecordsDiscarded": len(candidate_ids),
+                                "processingQueuesDiscarded": len(queue_ids)})
+        GeoHandler.store.persist(include_import_state=True)
+        return {**GeoHandler._import_run_view(run), "finalized": True}
+
+    @staticmethod
     def list_import_candidates(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         run_id = p["runId"]
@@ -1315,6 +1359,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/imports/upload"): GeoHandler.upload_import,
     ("POST", "/v1/geodata/imports/{runId}/candidates/validate"): GeoHandler.validate_import_candidates,
     ("POST", "/v1/geodata/imports/{runId}/process"): GeoHandler.process_import_candidates,
+    ("POST", "/v1/geodata/imports/{runId}/processed"): GeoHandler.mark_import_processed,
     ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
     ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
     ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,

@@ -117,6 +117,20 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(candidate["possibleDuplicates"][0]["entityId"], existing_id)
         self.assertLess(candidate["possibleDuplicates"][0]["distanceMeters"], 50)
 
+    def test_mark_import_processed_discards_staged_records_and_keeps_summary(self):
+        result = GeoHandler.enqueue_import(None, {"_body": {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+            "source": {"name": "finalized import", "license": "CC0"},
+            "features": [{"type": "Feature", "properties": {"name": "Staged trail"},
+                          "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}],
+        }})
+        run_id = result["importRunId"]
+        self.assertEqual(GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": "?pageSize=10"})["total"], 1)
+        finalized = GeoHandler.mark_import_processed(None, {"runId": run_id, "_body": {"processedBy": "admin-1"}})
+        self.assertEqual(finalized["status"], "PROCESSED")
+        self.assertEqual(finalized["stagedRecordsDiscarded"], 1)
+        self.assertEqual(GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": "?pageSize=10"})["total"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

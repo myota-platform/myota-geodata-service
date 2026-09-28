@@ -148,6 +148,13 @@ confirmed candidate counts so the admin web can keep a dedicated
 pre-processing queue separate from Geodata Review. Only explicit promotion
 creates or updates reviewable entities.
 
+After review, `POST /v1/geodata/imports/{runId}/processed` explicitly finalizes
+the run. The operation is idempotent, records the administrator and timestamp,
+deletes all staged candidate and promotion-queue rows for that run, and keeps
+the import summary in `PROCESSED` history. Already materialized entities are
+not deleted. The admin UI also opens a Leaflet location preview when a
+pre-processed record's name is clicked.
+
 During review, `POST /v1/geodata/entities/{entityId}/entity-type` changes the
 ordered shared Master data category list, regardless of whether
 `programmeSlug` is set. The first category remains the compatibility

@@ -107,12 +107,12 @@ class GeodataStore(Store):
                     continue
                 connection.execute(
                     "INSERT INTO import_run(id, adapter_code, source_metadata, started_at, completed_at, stats, status, "
-                    "attempt_count, heartbeat_at, lease_until, last_error) "
-                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s) "
+                    "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by) "
+                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (id) DO UPDATE SET source_metadata=EXCLUDED.source_metadata, started_at=EXCLUDED.started_at, "
                     "completed_at=EXCLUDED.completed_at, stats=EXCLUDED.stats, status=EXCLUDED.status, "
                     "attempt_count=EXCLUDED.attempt_count, heartbeat_at=EXCLUDED.heartbeat_at, lease_until=EXCLUDED.lease_until, "
-                    "last_error=EXCLUDED.last_error",
+                    "last_error=EXCLUDED.last_error, processed_at=EXCLUDED.processed_at, processed_by=EXCLUDED.processed_by",
                     (run_id, run.get("adapter") or "MANUAL", json.dumps({"source": run.get("source") or {}, "programmeSlug": run.get("programmeSlug"),
                                                                            "format": run.get("format"), "filename": run.get("filename"),
                                                                            "entityType": run.get("entityType"), "entityTypes": run.get("entityTypes") or [],
@@ -121,7 +121,7 @@ class GeodataStore(Store):
                                                                            "conflationCandidateCount": run.get("conflationCandidateCount", 0)}),
                      run.get("startedAt") or run.get("queuedAt") or now(), run.get("completedAt"), json.dumps(run.get("stats") or {}),
                      run.get("status") or "QUEUED", int(run.get("attemptCount") or 0), run.get("heartbeatAt"),
-                     run.get("leaseUntil"), run.get("lastError")),
+                     run.get("leaseUntil"), run.get("lastError"), run.get("processedAt"), run.get("processedBy")),
                 )
             for candidate in self.data.get("importCandidates", {}).values():
                 entity = candidate.get("entity") or {}
@@ -185,7 +185,7 @@ class GeodataStore(Store):
             ).fetchall()
             import_rows = connection.execute(
                 "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
-                "attempt_count, heartbeat_at, lease_until, last_error FROM import_run"
+                "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by FROM import_run"
             ).fetchall()
         import_runs = self.data.setdefault("importRuns", {})
         for row in import_rows:
@@ -209,6 +209,8 @@ class GeodataStore(Store):
                 "heartbeatAt": row[8].isoformat().replace("+00:00", "Z") if row[8] else None,
                 "leaseUntil": row[9].isoformat().replace("+00:00", "Z") if row[9] else None,
                 "lastError": row[10],
+                "processedAt": row[11].isoformat().replace("+00:00", "Z") if row[11] else None,
+                "processedBy": row[12],
             })
         sources = {row[0]: row for row in source_rows}
         categories = {}

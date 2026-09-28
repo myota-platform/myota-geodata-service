@@ -30,6 +30,8 @@ ordered SQL files define the `myota_geo` database:
 11. `011_import_recovery.sql` adds execution attempts, heartbeat/lease
    timestamps, and the last recovery error used to resume abandoned imports
    safely after a service restart.
+12. `012_import_finalization.sql` records who finalized an import and when,
+   while allowing staged candidate and queue data to be removed after review.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
