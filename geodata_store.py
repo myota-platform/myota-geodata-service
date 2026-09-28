@@ -93,12 +93,14 @@ class GeodataStore(Store):
              json.dumps(provenance.get("sourceFeature") or source)),
         )
 
-    def _sync_relational(self) -> None:
+    def _sync_relational(self, include_import_state: bool = False) -> None:
         if not self.durable:
             return
         with self.transaction() as connection:
             for entity in self.items.values():
                 self._upsert_entity(connection, entity)
+            if not include_import_state:
+                return
             for run in self.data.get("importRuns", {}).values():
                 run_id = _uuid(run.get("id"))
                 if not run_id:
@@ -198,6 +200,6 @@ class GeodataStore(Store):
                 })
             self.items[row[0]] = entity
 
-    def persist(self) -> None:
-        self._sync_relational()
+    def persist(self, include_import_state: bool = False) -> None:
+        self._sync_relational(include_import_state)
         super().persist()

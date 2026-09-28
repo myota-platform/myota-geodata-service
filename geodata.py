@@ -469,7 +469,7 @@ class GeoHandler(JsonHandler):
                 with GeoHandler.store.lock:
                     run = GeoHandler.store.data["importRuns"][run_id]
                     run.update({"status": "PROCESSING", "startedAt": now()})
-                    GeoHandler.store.persist()
+                    GeoHandler.store.persist(include_import_state=True)
                 features = loader()
                 prepared = GeoHandler._prepare_import_body(body, features)
                 with GeoHandler.store.lock:
@@ -477,16 +477,16 @@ class GeoHandler(JsonHandler):
                 result = GeoHandler._import_features({**prepared, "features": features}, run_id)
                 with GeoHandler.store.lock:
                     GeoHandler._complete_import_run(run_id, result)
-                    GeoHandler.store.persist()
+                    GeoHandler.store.persist(include_import_state=True)
             except Exception as error:  # imports must report failure in the run, not fail the HTTP request
                 with GeoHandler.store.lock:
                     GeoHandler._fail_import_run(run_id, error)
-                    GeoHandler.store.persist()
+                    GeoHandler.store.persist(include_import_state=True)
 
         # Persist the QUEUED record before the worker can finish, preventing a
         # fast worker from being overwritten by the request handler's final save.
         if p.get("_http"):
-            GeoHandler.store.persist()
+            GeoHandler.store.persist(include_import_state=True)
         GeoHandler.import_executor.submit(process)
         return {**record, "queued": True, "_status": 202}
 
@@ -638,7 +638,7 @@ class GeoHandler(JsonHandler):
         GeoHandler.store.event("geodata.import.candidates.validated.v1", "import_run", run_id,
                                {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
         if p.get("_http"):
-            GeoHandler.store.persist()
+            GeoHandler.store.persist(include_import_state=True)
         return {"importRunId": run_id, "candidateIds": selected, "validationStatus": "CONFIRMED", "_status": 200}
 
     @staticmethod
@@ -650,7 +650,7 @@ class GeoHandler(JsonHandler):
             if queue.get("status") == "COMPLETED":
                 return
             queue.update({"status": "PROCESSING", "startedAt": now()})
-            GeoHandler.store.persist()
+            GeoHandler.store.persist(include_import_state=True)
         created, updated, errors = [], [], []
         candidates = GeoHandler.store.data.setdefault("importCandidates", {})
         for candidate_id in queue["candidateIds"]:
@@ -665,7 +665,7 @@ class GeoHandler(JsonHandler):
                     was_existing = entity_id in GeoHandler.store.items
                     GeoHandler._materialize_import_candidate(candidate, queue["targetStatus"], queue["requestedBy"], queue.get("note"))
                     (updated if was_existing else created).append(entity_id)
-                    GeoHandler.store.persist()
+                    GeoHandler.store.persist(include_import_state=True)
             except (TypeError, ValueError) as error:
                 errors.append({"candidateId": candidate_id, "message": str(error)})
         with GeoHandler.store.lock:
@@ -686,7 +686,7 @@ class GeoHandler(JsonHandler):
             GeoHandler.store.event("geodata.import.processing.completed.v1", "import_processing_queue", queue_id,
                                    {"queueId": queue_id, "importRunId": queue["importRunId"], "status": queue["status"],
                                     "targetStatus": queue["targetStatus"], **queue["result"]})
-            GeoHandler.store.persist()
+            GeoHandler.store.persist(include_import_state=True)
 
     @staticmethod
     def process_import_candidates(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -718,7 +718,7 @@ class GeoHandler(JsonHandler):
                                 "targetStatus": target_status, "requestedBy": body["processorId"],
                                 "natsSubject": "myota.geodata.import.process.v1"})
         if p.get("_http"):
-            GeoHandler.store.persist()
+            GeoHandler.store.persist(include_import_state=True)
             GeoHandler.import_executor.submit(GeoHandler._process_import_queue, queue_id)
         else:
             GeoHandler._process_import_queue(queue_id)
