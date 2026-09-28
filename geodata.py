@@ -1154,7 +1154,7 @@ class GeoHandler(JsonHandler):
         GeoHandler._authorize_gis_admin(p, entity, "geodata.delete")
         authorization = p.get("Authorization", "")
         claims = verify_token(authorization[7:]) if authorization.startswith("Bearer ") else {}
-        global_admin = "*" in set(claims.get("scp", [])) or any(role.get("role") in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"} for role in claims.get("roles", []))
+        global_admin = any(role.get("role") in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"} for role in claims.get("roles", []))
         if not global_admin and entity.get("status") != "REJECTED":
             raise ValueError("only rejected entities can be permanently deleted")
         entity_id = entity["id"]
