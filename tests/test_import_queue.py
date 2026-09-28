@@ -49,6 +49,9 @@ class ImportQueueTests(unittest.TestCase):
         candidates = GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": f"?pageSize=10"})
         self.assertEqual(candidates["total"], 1)
         candidate_id = candidates["items"][0]["id"]
+        listed_runs = GeoHandler.list_imports(None, {"_path": "?pageSize=10"})
+        listed_run = next(item for item in listed_runs["items"] if item["id"] == run_id)
+        self.assertEqual(listed_run["candidateCounts"]["pending"], 1)
         with patch.object(GeoHandler, "_authorize_import"):
             validation = GeoHandler.validate_import_candidates(None, {"runId": run_id, "_body": {
                 "candidateIds": [candidate_id], "reviewerId": "admin-1", "note": "Checked in import queue",

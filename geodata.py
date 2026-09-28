@@ -577,22 +577,32 @@ class GeoHandler(JsonHandler):
         return GeoHandler.enqueue_import(_, p)
 
     @staticmethod
+    def _import_run_view(run: dict[str, Any]) -> dict[str, Any]:
+        """Return a run with candidate-queue counts for the imports page."""
+        run_id = run.get("id") or run.get("importRunId")
+        candidates = [candidate for candidate in GeoHandler.store.data.setdefault("importCandidates", {}).values()
+                      if candidate.get("importRunId") == run_id]
+        counts = {
+            "total": len(candidates),
+            "pending": sum(candidate.get("validationStatus") == "PENDING" for candidate in candidates),
+            "confirmed": sum(candidate.get("validationStatus") == "CONFIRMED" for candidate in candidates),
+            "processed": sum(candidate.get("validationStatus") == "PROCESSED" for candidate in candidates),
+            "rejected": sum(candidate.get("validationStatus") == "REJECTED" for candidate in candidates),
+        }
+        return {**run, "candidateCounts": counts}
+
+    @staticmethod
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
-        return page_result(list(GeoHandler.store.data.setdefault("importRuns", {}).values()), query)
+        runs = [GeoHandler._import_run_view(run) for run in GeoHandler.store.data.setdefault("importRuns", {}).values()]
+        return page_result(runs, query)
 
     @staticmethod
     def get_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         run = GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
         candidates = [candidate for candidate in GeoHandler.store.data.setdefault("importCandidates", {}).values()
                       if candidate.get("importRunId") == p["runId"]]
-        return {**run, "candidateCounts": {
-            "total": len(candidates),
-            "pending": sum(candidate.get("validationStatus") == "PENDING" for candidate in candidates),
-            "confirmed": sum(candidate.get("validationStatus") == "CONFIRMED" for candidate in candidates),
-            "processed": sum(candidate.get("validationStatus") == "PROCESSED" for candidate in candidates),
-            "rejected": sum(candidate.get("validationStatus") == "REJECTED" for candidate in candidates),
-        }}
+        return GeoHandler._import_run_view(run)
 
     @staticmethod
     def list_import_candidates(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
