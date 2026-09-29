@@ -779,7 +779,7 @@ class GeoHandler(JsonHandler):
         query = parse_qs(urlparse(p.get("_path", "")).query)
         run_id = p["runId"]
         candidates = [GeoHandler._candidate_view(candidate) for candidate in GeoHandler.store.data.setdefault("importCandidates", {}).values()
-                      if candidate.get("importRunId") == run_id]
+                      if candidate.get("importRunId") == run_id and candidate.get("validationStatus", "PENDING") == "PENDING"]
         candidates.sort(key=lambda candidate: (candidate.get("ordinal") or 0, candidate["id"]))
         return page_result(candidates, query)
 
@@ -793,23 +793,40 @@ class GeoHandler(JsonHandler):
             raise ValueError("candidateIds must be a non-empty list")
         run_id = p["runId"]
         candidates = GeoHandler.store.data.setdefault("importCandidates", {})
+        requested_status = str(body.get("validationStatus") or "VALID").upper()
+        if requested_status not in {"VALID", "CONFIRMED", "REJECTED", "INVALID"}:
+            raise ValueError("validationStatus must be VALID or REJECTED")
         selected = []
         for candidate_id in candidate_ids:
             candidate = candidates.get(str(candidate_id))
             if not candidate or candidate.get("importRunId") != run_id:
                 raise ValueError(f"candidate {candidate_id} does not belong to import run")
-            if candidate.get("validationStatus") == "PROCESSED":
-                continue
-            candidate["validationStatus"] = "CONFIRMED"
-            candidate["validationNote"] = body.get("note")
-            candidate["validatedBy"] = body["reviewerId"]
-            candidate["validatedAt"] = now()
             selected.append(str(candidate_id))
-        GeoHandler.store.event("geodata.import.candidates.validated.v1", "import_run", run_id,
-                               {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
+        if requested_status in {"REJECTED", "INVALID"}:
+            if GeoHandler.store.durable:
+                with GeoHandler.store.transaction() as connection:
+                    for candidate_id in selected:
+                        connection.execute("DELETE FROM geodata_import_candidate WHERE id = %s", (candidate_id,))
+            for candidate_id in selected:
+                candidates.pop(candidate_id, None)
+            GeoHandler.store.event("geodata.import.candidates.rejected.v1", "import_run", run_id,
+                                   {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
+            response_status = "REJECTED"
+        else:
+            for candidate_id in selected:
+                candidate = candidates[candidate_id]
+                if candidate.get("validationStatus") == "PROCESSED":
+                    continue
+                candidate["validationStatus"] = "CONFIRMED"
+                candidate["validationNote"] = body.get("note")
+                candidate["validatedBy"] = body["reviewerId"]
+                candidate["validatedAt"] = now()
+            GeoHandler.store.event("geodata.import.candidates.validated.v1", "import_run", run_id,
+                                   {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
+            response_status = "CONFIRMED"
         if p.get("_http"):
             GeoHandler.store.persist(include_import_state=True)
-        return {"importRunId": run_id, "candidateIds": selected, "validationStatus": "CONFIRMED", "_status": 200}
+        return {"importRunId": run_id, "candidateIds": selected, "validationStatus": response_status, "_status": 200}
 
     @staticmethod
     def _process_import_queue(queue_id: str) -> None:
@@ -834,6 +851,10 @@ class GeoHandler(JsonHandler):
                     entity_id = candidate.get("entity", {}).get("id")
                     was_existing = entity_id in GeoHandler.store.items
                     GeoHandler._materialize_import_candidate(candidate, queue["targetStatus"], queue["requestedBy"], queue.get("note"))
+                    if GeoHandler.store.durable:
+                        with GeoHandler.store.transaction() as connection:
+                            connection.execute("DELETE FROM geodata_import_candidate WHERE id = %s", (candidate_id,))
+                    candidates.pop(candidate_id, None)
                     (updated if was_existing else created).append(entity_id)
                     GeoHandler.store.persist(include_import_state=True)
             except (TypeError, ValueError) as error:

@@ -108,6 +108,22 @@ class ImportQueueTests(unittest.TestCase):
         entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
         self.assertEqual(entity["status"], "APPROVED")
 
+    def test_rejected_records_are_removed_from_the_import(self):
+        result = GeoHandler.enqueue_import(None, {"_body": {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+            "source": {"name": "rejected import"},
+            "features": [{"type": "Feature", "properties": {"name": "Rejected trail"},
+                          "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}],
+        }})
+        run_id = result["importRunId"]
+        candidate_id = result["preprocessed"][0]
+        rejected = GeoHandler.validate_import_candidates(None, {"runId": run_id, "_body": {
+            "candidateIds": [candidate_id], "validationStatus": "REJECTED", "reviewerId": "admin-1",
+        }})
+        self.assertEqual(rejected["validationStatus"], "REJECTED")
+        self.assertEqual(GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": "?pageSize=10"})["total"], 0)
+        self.assertNotIn(candidate_id, GeoHandler.store.data["importCandidates"])
+
     def test_preprocessing_marks_existing_entity_within_fifty_metres(self):
         existing_id = "existing-seville-park"
         GeoHandler.store.items[existing_id] = {

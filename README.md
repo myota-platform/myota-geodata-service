@@ -133,8 +133,11 @@ Use `GET /v1/geodata/imports/{runId}` to retrieve the durable run summary.
 It includes status/timestamps, source manifest information, candidate counts,
 and counts for pre-processed, created, updated, skipped, disappeared, and
 failed features. Use `GET /v1/geodata/imports/{runId}/candidates` for a compact
-paged validation queue. `POST .../candidates/validate` confirms selected
-records. `POST /v1/geodata/imports/{runId}/process` requires confirmed IDs and
+paged validation queue containing only pending records. `POST
+.../candidates/validate` confirms selected records for later promotion or
+removes them when `validationStatus=REJECTED`. Confirmed, rejected, and
+processed records are not returned by the queue; successful promotion deletes
+the staged record. `POST /v1/geodata/imports/{runId}/process` requires confirmed IDs and
 an explicit `CANDIDATE` or `APPROVED` target; it emits
 `geodata.import.processing.queued.v1` to the
 `myota.geodata.import.process.v1` subject. The local service runs a bounded
