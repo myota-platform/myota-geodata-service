@@ -316,7 +316,8 @@ class GeoHandler(JsonHandler):
                 if not feature.get("geometry"):
                     skipped.append({"sourceRef": source_ref, "reason": "MISSING_GEOMETRY"})
                     continue
-                geometry = normalize_geometry(feature["geometry"], props.get("crs"))
+                source_crs = raw_feature.get("crs") or raw_feature.get("spatialReference") or props.get("crs")
+                geometry = normalize_geometry(feature["geometry"], source_crs)
                 attachments = validate_attachments(raw_feature.get("attachments") or props.get("attachments"))
                 existing = next((item for item in GeoHandler.store.items.values()
                                  if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == programme_slug), None)
@@ -334,7 +335,7 @@ class GeoHandler(JsonHandler):
                           "centroid": geometry_centroid(geometry), "jurisdiction": props.get("jurisdiction"), "sourceRef": source_ref,
                           "attachments": attachments, "candidateSource": candidate_source,
                           "provenance": {"adapter": adapter, "source": source, "sourceKey": source_key,
-                                         "sourceFeature": raw_feature, "importRunId": run_id, "sourceHash": digest(raw_feature),
+                                         "sourceFeature": raw_feature, "sourceCrs": source_crs, "importRunId": run_id, "sourceHash": digest(raw_feature),
                                          "license": source.get("license"), "attribution": source.get("attribution"),
                                          "retrievedAt": source.get("retrievedAt", occurred_at)},
                           "review": existing.get("review") if existing else None,

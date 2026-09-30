@@ -1,3 +1,4 @@
+import importlib.util
 import unittest
 
 from geodata import GeoHandler
@@ -32,6 +33,16 @@ class GeometryWayTests(unittest.TestCase):
             [[-5.99, 37.39], [-5.98, 37.40]], [[-5.97, 37.41], [-5.96, 37.42]]
         ]})
         self.assertEqual(geometry["type"], "MultiLineString")
+
+    @unittest.skipUnless(importlib.util.find_spec("pyproj"), "pyproj is installed in the service image")
+    def test_projected_epsg_geometry_is_reprojected_to_wgs84(self):
+        from pyproj import Transformer
+
+        source = (-5.99, 37.39)
+        projected = Transformer.from_crs("EPSG:4326", "EPSG:25830", always_xy=True).transform(*source)
+        geometry = normalize_geometry({"type": "Point", "coordinates": list(projected)}, "EPSG:25830")
+        self.assertAlmostEqual(geometry["coordinates"][0], source[0], places=5)
+        self.assertAlmostEqual(geometry["coordinates"][1], source[1], places=5)
 
     def test_osm_style_way_record_is_importable(self):
         feature = normalize("MANUAL", {"type": "way", "id": "way/42", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})

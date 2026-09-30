@@ -91,6 +91,18 @@ The original `ea7klk/mpota` repository remains untouched. Its charter and planne
 
 ## Dataset imports
 
+### Coordinate reference systems
+
+Imported geometries are stored and validated as WGS84 longitude/latitude
+(EPSG:4326). The intake pipeline reads the declared CRS from GeoJSON or
+ArcGIS-style `spatialReference` metadata and reprojects supported source CRSs
+with `pyproj` before validation. Shapefile ZIP uploads use the matching `.prj`
+sidecar when present. Common EPSG forms and OGC URNs are accepted, including
+local projected systems such as ETRS89 / UTM 30N (EPSG:25830), which is useful
+for Spanish municipal GIS data. The original declaration is retained as
+`provenance.sourceCrs` for auditability. A source without CRS metadata is
+treated as WGS84 for backwards compatibility.
+
 Dataset intake is platform-wide and is not assigned to a programme. Each
 import selects one or more categories from the shared Master data catalogue; programme
 assignment is a later eligibility decision. The admin page reads all category

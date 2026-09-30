@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
@@ -102,16 +103,59 @@ def _map_coordinates(value: Any, mapper: Any) -> Any:
     return value
 
 
-def normalize_geometry(geometry: dict[str, Any] | None, crs: str | None = None) -> dict[str, Any]:
+def _normalize_crs_identifier(value: Any) -> str:
+    """Return a pyproj-compatible CRS identifier from common GIS metadata."""
+    if value is None or value == "":
+        return "EPSG:4326"
+    if isinstance(value, dict):
+        properties = value.get("properties") or {}
+        value = (value.get("name") or value.get("href") or value.get("wkid") or
+                 value.get("latestWkid") or properties.get("name") or
+                 properties.get("href") or properties.get("wkid") or
+                 properties.get("latestWkid"))
+        if not value:
+            return "EPSG:4326"
+    if isinstance(value, (int, float)) and int(value) == value:
+        return f"EPSG:{int(value)}"
+    text = str(value).strip()
+    upper = text.upper()
+    if upper in {"CRS84", "OGC:CRS84", "URN:OGC:DEF:CRS:OGC:1.3:CRS84"}:
+        return "CRS84"
+    match = re.search(r"(?:EPSG(?::|/|::)|/EPSG/[^/]*/|EPSG\.XML#)(\d+)$", upper)
+    if match:
+        return f"EPSG:{match.group(1)}"
+    if text.isdigit():
+        return f"EPSG:{text}"
+    return text
+
+
+def _reproject_to_wgs84(coordinates: Any, source_crs: str) -> Any:
+    """Reproject nested GeoJSON coordinates while preserving optional Z values."""
+    if source_crs in {"EPSG:3857", "EPSG:900913"}:
+        return _map_coordinates(coordinates, _mercator_to_wgs84)
+    try:
+        from pyproj import Transformer
+        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+    except ImportError as exc:
+        raise ValueError(f"CRS {source_crs} requires the pyproj dependency") from exc
+    except Exception as exc:
+        raise ValueError(f"unsupported CRS {source_crs}") from exc
+
+    def transform(point: list[float]) -> list[float]:
+        longitude, latitude = transformer.transform(point[0], point[1])
+        return [float(longitude), float(latitude), *point[2:]]
+
+    return _map_coordinates(coordinates, transform)
+
+
+def normalize_geometry(geometry: dict[str, Any] | None, crs: Any | None = None) -> dict[str, Any]:
     if not geometry:
         raise ValueError("a geometry is required")
     normalized = dict(geometry)
     normalized.pop("crs", None)
-    source_crs = str(crs or "EPSG:4326").upper()
-    if source_crs in {"EPSG:3857", "EPSG:900913"}:
-        normalized["coordinates"] = _map_coordinates(normalized.get("coordinates"), _mercator_to_wgs84)
-    elif source_crs not in {value.upper() for value in SUPPORTED_CRS}:
-        raise ValueError(f"unsupported CRS {crs}; use EPSG:4326 or EPSG:3857")
+    source_crs = _normalize_crs_identifier(crs).upper()
+    if source_crs not in {value.upper() for value in SUPPORTED_CRS}:
+        normalized["coordinates"] = _reproject_to_wgs84(normalized.get("coordinates"), source_crs)
     return validate_geometry(normalized)
 
 

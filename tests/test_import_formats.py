@@ -8,6 +8,10 @@ class ImportFormatTests(unittest.TestCase):
         features = parse_text("GEOJSON", '{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[-5.99,37.39]},"properties":{"name":"Sevilla"}}]}')
         self.assertEqual(features[0]["geometry"]["type"], "Point")
 
+    def test_geojson_document_crs_is_carried_to_each_feature(self):
+        features = parse_text("GEOJSON", '{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"EPSG:25830"}},"features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[235000,4140000]},"properties":{}}]}')
+        self.assertEqual(features[0]["crs"]["properties"]["name"], "EPSG:25830")
+
     def test_kml_point_and_polygon(self):
         content = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><name>Park</name><Point><coordinates>-5.99,37.39</coordinates></Point></Placemark></Document></kml>'
         features = parse_kml(content)

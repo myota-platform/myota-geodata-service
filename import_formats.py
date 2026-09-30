@@ -32,17 +32,29 @@ def _geojson(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, dict):
         raise ValueError("GeoJSON document must be an object")
     kind = value.get("type")
+    document_crs = value.get("crs") or value.get("spatialReference")
+
+    def with_document_crs(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not document_crs:
+            return features
+        result = []
+        for feature in features:
+            copied = dict(feature)
+            copied.setdefault("crs", document_crs)
+            result.append(copied)
+        return result
+
     if kind == "FeatureCollection":
         features = value.get("features")
         if not isinstance(features, list):
             raise ValueError("GeoJSON FeatureCollection must contain a features array")
-        return features
+        return with_document_crs(features)
     if kind == "Feature":
-        return [value]
+        return with_document_crs([value])
     if isinstance(value.get("geometry"), dict):
-        return [_feature(value["geometry"], value.get("properties"), value.get("id"))]
+        return with_document_crs([_feature(value["geometry"], value.get("properties"), value.get("id"))])
     if kind in {"Point", "LineString", "MultiLineString", "Polygon", "MultiPolygon"}:
-        return [_feature(value)]
+        return with_document_crs([_feature(value)])
     raise ValueError("unsupported GeoJSON document type")
 
 
@@ -164,8 +176,13 @@ def parse_uploaded(format_code: str, content: bytes, filename: str = "upload") -
                 reader = shapefile.Reader(shp=io.BytesIO(raw),
                                           shx=io.BytesIO(archive.read(stem + ".shx")) if stem + ".shx" in archive.namelist() else None,
                                           dbf=io.BytesIO(archive.read(stem + ".dbf")) if stem + ".dbf" in archive.namelist() else None)
+                projection_name = next((name for name in archive.namelist()
+                                        if str(PurePosixPath(name)).with_suffix("").casefold() == stem.casefold()
+                                        and name.lower().endswith(".prj")), None)
+                source_crs = archive.read(projection_name).decode("utf-8", "replace") if projection_name else None
         else:
             raise ValueError("upload a .zip containing the .shp, .shx, and .dbf sidecars")
         fields = [field[0] for field in reader.fields[1:]]
-        return [_feature(shape.__geo_interface__, dict(zip(fields, record))) for shape, record in zip(reader.shapes(), reader.records())]
+        return [{**_feature(shape.__geo_interface__, dict(zip(fields, record))), **({"crs": source_crs} if source_crs else {})}
+                for shape, record in zip(reader.shapes(), reader.records())]
     raise ValueError(f"binary format {code} is accepted for queued processing but has no local decoder")

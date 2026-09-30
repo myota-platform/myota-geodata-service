@@ -28,7 +28,7 @@ class Adapter:
         raw_geometry = feature.get("geometry")
         if not raw_geometry and is_way_record and feature.get("coordinates") is not None:
             raw_geometry = {"type": "LineString", "coordinates": feature["coordinates"]}
-        geometry = normalize_geometry(raw_geometry, feature.get("crs") or properties.get("crs")) if raw_geometry else None
+        geometry = normalize_geometry(raw_geometry, feature.get("crs") or feature.get("spatialReference") or properties.get("crs")) if raw_geometry else None
         return {"type": "Feature", "geometry": geometry, "properties": properties}
 
 
@@ -73,7 +73,7 @@ class GovernmentGISAdapter(Adapter):
                 geometry = {"type": "Polygon", "coordinates": geometry["rings"]}
             elif "x" in geometry and "y" in geometry:
                 geometry = {"type": "Point", "coordinates": [geometry["x"], geometry["y"]]}
-        normalized = normalize_geometry(geometry, feature.get("crs") or properties.get("crs")) if geometry else None
+        normalized = normalize_geometry(geometry, feature.get("crs") or feature.get("spatialReference") or properties.get("crs")) if geometry else None
         properties["sourceFormat"] = source_format
         properties.setdefault("sourceRef", properties.get("objectId") or properties.get("OBJECTID") or properties.get("id"))
         properties.setdefault("sourceRecordType", "local-government GIS feature")
