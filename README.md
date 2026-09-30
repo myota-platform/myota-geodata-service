@@ -139,6 +139,13 @@ remain visibly queued instead of being incorrectly marked failed.
 Unrecoverable runs are marked `FAILED` with a visible reason instead of being
 left indefinitely in `PROCESSING`. This makes the import history a durable
 operational status view rather than a process-local queue snapshot.
+
+Entity lifecycle, geometry, and category changes are persisted to the relational
+PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;
+on restart, relational entity columns are authoritative. Local Sevilla sample
+records are insert-only seed data, so approving a sample or editing its geometry
+is never undone by service startup.
+
 Each candidate is checked against existing entities; identical geometry or a
 centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
 and a list of comparison geometries. This is a review warning, not an automatic
