@@ -168,6 +168,11 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(result["items"][-1]["id"], "run-17")
         self.assertEqual(result["nextPage"], 2)
 
+    def test_import_reads_refresh_durable_run_projection(self):
+        with patch.object(GeoHandler.store, "refresh_import_runs") as refresh:
+            GeoHandler.list_imports(None, {"_path": "?pageSize=10"})
+        refresh.assert_called_once_with()
+
     def test_confirmed_records_can_be_promoted_directly_to_approved(self):
         body = {
             "adapter": "MANUAL", "format": "GEOJSON", "entityType": "MUNICIPAL_PARK",

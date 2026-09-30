@@ -751,6 +751,7 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler.store.refresh_import_runs()
         query = parse_qs(urlparse(p.get("_path", "")).query)
         runs = [GeoHandler._import_run_view(run) for run in GeoHandler.store.data.setdefault("importRuns", {}).values()]
         runs.sort(key=lambda run: run.get("queuedAt") or run.get("startedAt") or "", reverse=True)
@@ -758,6 +759,7 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def get_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler.store.refresh_import_runs()
         run = GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
         candidates = [candidate for candidate in GeoHandler.store.data.setdefault("importCandidates", {}).values()
                       if candidate.get("importRunId") == p["runId"]]

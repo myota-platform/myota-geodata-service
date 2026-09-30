@@ -240,6 +240,41 @@ class GeodataStore(Store):
                 })
             self.items[row[0]] = entity
 
+    def refresh_import_runs(self) -> None:
+        """Refresh import lifecycle state from PostgreSQL for read endpoints."""
+        if not self.durable:
+            return
+        with self.transaction() as connection:
+            rows = connection.execute(
+                "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
+                "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by FROM import_run"
+            ).fetchall()
+        with self.lock:
+            import_runs = self.data.setdefault("importRuns", {})
+            for row in rows:
+                metadata = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
+                run = import_runs.setdefault(row[0], {"id": row[0]})
+                run.update({
+                    "id": row[0], "adapter": row[1], "source": metadata.get("source") or run.get("source") or {},
+                    "programmeSlug": metadata.get("programmeSlug", run.get("programmeSlug")),
+                    "format": metadata.get("format", run.get("format") or "GEOJSON"),
+                    "filename": metadata.get("filename", run.get("filename")),
+                    "entityType": metadata.get("entityType", run.get("entityType")),
+                    "entityTypes": metadata.get("entityTypes") or run.get("entityTypes") or [],
+                    "queuedAt": metadata.get("queuedAt", run.get("queuedAt")),
+                    "featureCount": metadata.get("featureCount", run.get("featureCount")),
+                    "binaryObjectPending": bool(metadata.get("binaryObjectPending", run.get("binaryObjectPending", False))),
+                    "status": row[6], "startedAt": row[3].isoformat().replace("+00:00", "Z") if row[3] else run.get("startedAt"),
+                    "completedAt": row[4].isoformat().replace("+00:00", "Z") if row[4] else run.get("completedAt"),
+                    "stats": row[5] if isinstance(row[5], dict) else json.loads(row[5] or "{}"),
+                    "attemptCount": row[7] or 0,
+                    "heartbeatAt": row[8].isoformat().replace("+00:00", "Z") if row[8] else None,
+                    "leaseUntil": row[9].isoformat().replace("+00:00", "Z") if row[9] else None,
+                    "lastError": row[10],
+                    "processedAt": row[11].isoformat().replace("+00:00", "Z") if row[11] else None,
+                    "processedBy": row[12],
+                })
+
     def persist(self, include_import_state: bool = False) -> None:
         self._sync_relational(include_import_state)
         super().persist()
