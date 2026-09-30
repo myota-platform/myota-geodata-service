@@ -129,8 +129,12 @@ class ObjectStore:
             if not client:
                 raise RuntimeError("boto3 is not installed")
             self._ensure_bucket(client, bucket)
-            client.upload_file(str(source), bucket, object_key,
-                               ExtraArgs={"ContentType": content_type})
+            # SeaweedFS accepts a streaming PUT reliably for large source
+            # objects. Avoid boto3's multipart-finalization path here; it can
+            # leave a browser request pending without creating the object.
+            with source.open("rb") as stream:
+                client.put_object(Bucket=bucket, Key=object_key, Body=stream,
+                                  ContentLength=size, ContentType=content_type)
         return {"sha256": sha256, "size": size, "storedAt": object_key}
 
     def get(self, bucket: str, object_key: str) -> bytes | None:
