@@ -25,60 +25,86 @@ def _value(entity: dict[str, Any], field: str, *aliases: str) -> Any:
     return None
 
 
+_CHILD_TYPES = {
+    "continent": {"countries": "country"},
+    "country": {"subdivisions": "subdivision", "cities": "city"},
+    "subdivision": {"provinces": "province", "cities": "city"},
+    "province": {"cities": "city"},
+    "city": {},
+}
+
+
 def _upsert(container: dict[tuple[str, str], dict[str, Any]], name: Any, code: Any,
-            children_key: str) -> dict[str, Any] | None:
+            node_type: str) -> dict[str, Any] | None:
     name = str(name or "").strip()
     if not name:
         return None
     code = str(code or "").strip().upper() or None
     key = (code or "", name.casefold())
     if key not in container:
-        container[key] = {"name": name, "code": code, children_key: {}}
+        container[key] = {"name": name, "code": code}
+        for child_key in _CHILD_TYPES[node_type]:
+            container[key][child_key] = {}
     elif not container[key].get("code") and code:
         container[key]["code"] = code
     return container[key]
 
 
-def _sorted_nodes(nodes: dict[tuple[str, str], dict[str, Any]], children_key: str) -> list[dict[str, Any]]:
+def _sorted_nodes(nodes: dict[tuple[str, str], dict[str, Any]], node_type: str) -> list[dict[str, Any]]:
     result = []
     for node in nodes.values():
-        value = {key: item for key, item in node.items() if key != children_key}
-        value[children_key] = _sorted_nodes(node[children_key], {
-            "countries": "subdivisions", "subdivisions": "provinces", "provinces": "__leaf__"
-        }[children_key]) if children_key != "provinces" else [
-            {key: item for key, item in child.items() if key != "__leaf__"} for child in sorted(
-                node[children_key].values(), key=lambda item: (str(item.get("name") or "").casefold(), str(item.get("code") or ""))
-            )
-        ]
+        child_keys = _CHILD_TYPES[node_type]
+        value = {key: item for key, item in node.items() if key not in child_keys}
+        for child_key, child_type in child_keys.items():
+            value[child_key] = _sorted_nodes(node[child_key], child_type)
         result.append(value)
     return sorted(result, key=lambda item: (str(item.get("name") or "").casefold(), str(item.get("code") or "")))
+
+
+def _city_names(entity: dict[str, Any]) -> list[str]:
+    """Return the searchable city/municipality names for one entity."""
+    names = []
+    for field in ("city", "municipality"):
+        value = _value(entity, field)
+        value = str(value or "").strip()
+        if value and value.casefold() not in {item.casefold() for item in names}:
+            names.append(value)
+    return names
 
 
 def build_location_tree(entities: Iterable[dict[str, Any]]) -> dict[str, Any]:
     continents: dict[tuple[str, str], dict[str, Any]] = {}
     for entity in entities:
-        continent = _upsert(continents, _value(entity, "continent"), _value(entity, "continentCode"), "countries")
+        continent = _upsert(continents, _value(entity, "continent"), _value(entity, "continentCode"), "continent")
         if not continent:
             continue
         countries = continent["countries"]
-        country = _upsert(countries, _value(entity, "country"), _value(entity, "countryCode"), "subdivisions")
+        country = _upsert(countries, _value(entity, "country"), _value(entity, "countryCode"), "country")
         if not country:
             continue
+        city_names = _city_names(entity)
+        for city_name in city_names:
+            _upsert(country["cities"], city_name, None, "city")
         subdivisions = country["subdivisions"]
         subdivision = _upsert(
             subdivisions,
             _value(entity, "region", "subdivision"),
             _value(entity, "regionCode", "subdivisionCode"),
-            "provinces",
+            "subdivision",
         )
         if not subdivision:
             continue
-        _upsert(subdivision["provinces"], _value(entity, "province"), _value(entity, "provinceCode"), "__leaf__")
+        for city_name in city_names:
+            _upsert(subdivision["cities"], city_name, None, "city")
+        province = _upsert(subdivision["provinces"], _value(entity, "province"), _value(entity, "provinceCode"), "province")
+        if province:
+            for city_name in city_names:
+                _upsert(province["cities"], city_name, None, "city")
 
     return {
         "provider": "BIGDATACLOUD",
         "codeStandards": {"continent": "provider ISO continent code", "country": "ISO 3166-1", "subdivision": "ISO 3166-2"},
-        "continents": _sorted_nodes(continents, "countries"),
+        "continents": _sorted_nodes(continents, "continent"),
     }
 
 
@@ -86,9 +112,10 @@ def _flatten(nodes: Iterable[dict[str, Any]], child_key: str) -> list[dict[str, 
     result = []
     for node in nodes:
         result.append(node)
-        result.extend(_flatten(node.get(child_key, []), {
-            "countries": "subdivisions", "subdivisions": "provinces", "provinces": "__leaf__"
-        }[child_key]) if child_key != "provinces" else node.get(child_key, []))
+        child_type = {
+            "countries": "subdivisions", "subdivisions": "provinces", "provinces": "cities"
+        }[child_key]
+        result.extend(_flatten(node.get(child_key, []), child_type) if child_key != "provinces" else node.get(child_key, []))
     return result
 
 
