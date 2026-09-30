@@ -110,8 +110,9 @@ Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
 it submits ordinary GeoJSON through the `OSM` adapter so OSM tags are filtered,
 attribution is preserved, and source references remain available for review.
-File uploads use `POST /v1/geodata/imports/upload` with a base64
-payload, filename, and the same category/source metadata. Both paths return
+File uploads use `POST /v1/geodata/imports/upload` as a multipart request with
+a `metadata` JSON part and a `file` part. The legacy JSON `contentBase64`
+payload remains supported for non-browser clients. Both paths return
 `202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
 pre-processed candidate persistence run in a bounded background import worker.
 Each run stores its source document in SeaweedFS, claims a PostgreSQL lease,

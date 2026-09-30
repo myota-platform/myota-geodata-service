@@ -13,6 +13,8 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.policy import default as email_default
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Iterator
 
@@ -215,13 +217,18 @@ class Store:
             return result
 
 
-def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def _request_length(handler: BaseHTTPRequestHandler) -> int:
     try:
         length = int(handler.headers.get("Content-Length", "0"))
     except ValueError as exc:
         raise ValueError("invalid Content-Length") from exc
     if length > MAX_BODY_BYTES:
         raise ValueError(f"request body exceeds {MAX_BODY_BYTES} bytes")
+    return length
+
+
+def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    length = _request_length(handler)
     if length == 0:
         return {}
     try:
@@ -231,6 +238,43 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("JSON body must be an object")
     return value
+
+
+def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    """Read metadata and a binary file without converting it to Base64."""
+    length = _request_length(handler)
+    if length == 0:
+        raise ValueError("multipart request body must not be empty")
+    content_type = handler.headers.get("Content-Type", "")
+    envelope = (f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii")
+    message = BytesParser(policy=email_default).parsebytes(envelope + handler.rfile.read(length))
+    if not message.is_multipart():
+        raise ValueError("invalid multipart request")
+    result: dict[str, Any] = {}
+    for part in message.iter_parts():
+        field_name = part.get_param("name", header="content-disposition")
+        if not field_name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename or field_name == "file":
+            result["_uploadBytes"] = payload
+            result["_uploadFilename"] = filename or "upload"
+            continue
+        value = payload.decode(part.get_content_charset() or "utf-8")
+        if field_name == "metadata":
+            try:
+                metadata = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("metadata must contain valid JSON") from exc
+            if not isinstance(metadata, dict):
+                raise ValueError("metadata must be a JSON object")
+            result.update(metadata)
+        else:
+            result[field_name] = value
+    if "_uploadBytes" not in result:
+        raise ValueError("multipart request must include a file")
+    return result
 
 
 class JsonHandler(BaseHTTPRequestHandler):
@@ -303,7 +347,11 @@ class JsonHandler(BaseHTTPRequestHandler):
                     break
             if matched:
                 try:
-                    body = read_json(self) if method == "POST" else {}
+                    if method == "POST":
+                        content_type = self.headers.get("Content-Type", "")
+                        body = read_multipart(self) if content_type.lower().startswith("multipart/form-data") else read_json(self)
+                    else:
+                        body = {}
                     result = fn(self, {**params, "_body": body, "_path": self.path,
                                        "Idempotency-Key": self.headers.get("Idempotency-Key"),
                                        "Authorization": self.headers.get("Authorization", ""),

@@ -93,6 +93,22 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(GeoHandler.store.data["importRuns"][result["id"]]["status"], "QUEUED")
         persist.assert_called_once_with(include_import_state=True)
 
+    def test_multipart_file_bytes_keep_pending_run_durable(self):
+        body = {
+            "adapter": "MANUAL", "format": "OSM_PBF", "entityType": "TRAIL",
+            "source": {"name": "multipart OSM extract"}, "filename": "seville.osm.pbf",
+            "_uploadBytes": b"bytes", "_uploadFilename": "seville.osm.pbf",
+        }
+        with patch.object(GeoHandler, "_authorize_import"), \
+             patch("storage.ObjectStore.scan_content", return_value={"status": "CLEAN", "sha256": "hash", "size": 5}), \
+             patch("storage.ObjectStore.put", return_value={"sha256": "hash", "size": 5}), \
+             patch("geodata.parse_uploaded", side_effect=ValueError("binary parser pending")), \
+             patch.object(GeoHandler.store, "persist") as persist:
+            result = GeoHandler.upload_import(None, {"_body": body, "_http": "1"})
+        self.assertEqual(result["status"], "QUEUED")
+        self.assertEqual(GeoHandler.store.data["importRuns"][result["id"]]["status"], "QUEUED")
+        persist.assert_called_once_with(include_import_state=True)
+
     def test_recovery_uses_normalized_format_for_pasted_kml(self):
         run_id = "run-recovery-format"
         GeoHandler.store.data["importRuns"] = {run_id: {

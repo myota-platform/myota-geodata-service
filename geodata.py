@@ -687,14 +687,22 @@ class GeoHandler(JsonHandler):
     def upload_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         GeoHandler._authorize_import(p)
         body = {**p["_body"]}
-        require(body, "adapter", "source", "filename", "contentBase64")
+        upload_bytes = body.pop("_uploadBytes", None)
+        upload_filename = body.pop("_uploadFilename", None)
+        if upload_bytes is not None:
+            body["filename"] = upload_filename or body.get("filename") or "upload"
+        require(body, "adapter", "source", "filename")
         categories = entity_type_codes(body.get("entityTypes") or body.get("entityTypeCodes"), body.get("entityType"))
         if not categories:
             raise ValueError("entityTypes must contain at least one shared entity category code")
         body["entityTypes"], body["entityType"] = categories, categories[0]
-        import base64
-        try: content = base64.b64decode(body["contentBase64"], validate=True)
-        except Exception as exc: raise ValueError("contentBase64 must be valid base64") from exc
+        if upload_bytes is not None:
+            content = upload_bytes
+        else:
+            require(body, "contentBase64")
+            import base64
+            try: content = base64.b64decode(body["contentBase64"], validate=True)
+            except Exception as exc: raise ValueError("contentBase64 must be valid base64") from exc
         format_code = str(body.get("format") or body["filename"].rsplit(".", 1)[-1]).upper()
         if format_code == "JSON": format_code = "GEOJSON"
         if format_code == "SHP": format_code = "SHAPEFILE"
