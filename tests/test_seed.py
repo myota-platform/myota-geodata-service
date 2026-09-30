@@ -14,6 +14,7 @@ class SeedDataTests(unittest.TestCase):
                     "name": "Parque de los Príncipes",
                     "sourceRef": "osm-way-28604482",
                     "status": "APPROVED",
+                    "geometry": {"type": "Point", "coordinates": [-6.01, 37.37]},
                 }
             }
             with patch.object(GeoHandler.store, "hydrate"), \
@@ -23,6 +24,10 @@ class SeedDataTests(unittest.TestCase):
             self.assertEqual(
                 GeoHandler.store.items["00000000-0000-4000-8000-000000000203"]["status"],
                 "APPROVED",
+            )
+            self.assertEqual(
+                GeoHandler.store.items["00000000-0000-4000-8000-000000000203"]["geometry"],
+                {"type": "Point", "coordinates": [-6.01, 37.37]},
             )
         finally:
             GeoHandler.store.items = previous_items
