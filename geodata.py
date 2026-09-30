@@ -47,6 +47,8 @@ def entity_categories(entity: dict[str, Any]) -> list[str]:
 class GeoHandler(JsonHandler):
     service = "geodata-service"
     store = GeodataStore("geodata", "GEO_DATABASE_URL")
+    upload_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_UPLOAD_WORKERS", "2"))),
+                                          thread_name_prefix="geodata-upload")
     import_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_IMPORT_WORKERS", "2"))),
                                           thread_name_prefix="geodata-import")
 
@@ -466,6 +468,71 @@ class GeoHandler(JsonHandler):
         return run
 
     @staticmethod
+    def _finish_uploaded_import(run_id: str, body: dict[str, Any], upload_path: str,
+                                object_key: str, bucket: str, format_code: str,
+                                filename: str, scan: dict[str, Any]) -> None:
+        """Finish durable storage after the upload HTTP request has returned."""
+        try:
+            from storage import ObjectStore
+            stored = ObjectStore().put_file(bucket, object_key, upload_path, "application/octet-stream",
+                                            sha256=str(scan["sha256"]), size=int(scan["size"]))
+            source = {**(body.get("source") or {}), "objectKey": object_key, "bucket": bucket,
+                      "sha256": stored["sha256"], "scan": scan}
+            with GeoHandler.store.lock:
+                run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+                run.update({"source": source, "status": "QUEUED", "uploadSpoolPath": None,
+                            "uploadCompletedAt": now(), "lastError": None})
+                GeoHandler.store.persist(include_import_state=True)
+
+            if format_code in TEXT_FORMATS or format_code in {"WFS", "ARCGIS_FEATURESERVER", "SHAPEFILE", "SHP"}:
+                prepared = GeoHandler._prepare_import_body({**body, "format": format_code, "source": source})
+                loader = lambda: parse_uploaded(
+                    format_code, ObjectStore().get(bucket, object_key) or b"", filename)
+                GeoHandler.import_executor.submit(GeoHandler._process_import_run, run_id, prepared, loader)
+                return
+
+            if format_code in {"OSM_PBF", "PARKSERVE_US"}:
+                with GeoHandler.store.lock:
+                    run = GeoHandler.store.data["importRuns"][run_id]
+                    run.update({"binaryObjectPending": True, "status": "QUEUED"})
+                    GeoHandler.store.persist(include_import_state=True)
+                return
+
+            raise ValueError(f"unsupported upload format {format_code}")
+        except Exception as error:
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, error)
+                GeoHandler.store.persist(include_import_state=True)
+        finally:
+            Path(upload_path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _resume_pending_upload(run_id: str) -> None:
+        """Resume a spooled upload after a geodata service restart."""
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            return
+        upload_path = run.get("uploadSpoolPath")
+        if not upload_path or not Path(upload_path).is_file():
+            with GeoHandler.store.lock:
+                GeoHandler._fail_import_run(run_id, RuntimeError("upload spool file is missing after restart"))
+                GeoHandler.store.persist(include_import_state=True)
+            return
+        source = run.get("source") or {}
+        filename = run.get("filename") or "upload"
+        scan = source.get("scan") or {}
+        if not scan.get("sha256") or not scan.get("size"):
+            from storage import ObjectStore
+            scan = ObjectStore.scan_path(upload_path, filename)
+        bucket = source.get("bucket") or "myota-geodata-imports"
+        object_key = source.get("objectKey") or f"geodata-imports/{new_id()}-{filename.replace('/', '_')}"
+        body = {"adapter": run.get("adapter") or "MANUAL", "format": run.get("format") or "GEOJSON",
+                "source": source, "filename": filename, "programmeSlug": run.get("programmeSlug"),
+                "entityType": run.get("entityType"), "entityTypes": run.get("entityTypes") or []}
+        GeoHandler._finish_uploaded_import(run_id, body, upload_path, object_key, bucket,
+                                            str(body["format"]).upper(), filename, scan)
+
+    @staticmethod
     def _store_import_source(run_id: str, body: dict[str, Any], content: bytes, filename: str | None) -> dict[str, Any]:
         """Store a recovery source for pasted/manual imports in object storage."""
         from storage import ObjectStore
@@ -609,7 +676,7 @@ class GeoHandler(JsonHandler):
         with GeoHandler.store.transaction() as connection:
             rows = connection.execute(
                 "SELECT id::text, status, lease_until FROM import_run "
-                "WHERE status IN ('QUEUED', 'PROCESSING')"
+                "WHERE status IN ('UPLOAD_PENDING', 'QUEUED', 'PROCESSING')"
             ).fetchall()
         recovered_ids = []
         with GeoHandler.store.lock:
@@ -618,14 +685,16 @@ class GeoHandler(JsonHandler):
                 if status == "PROCESSING":
                     run.update({"status": "QUEUED", "heartbeatAt": None, "leaseUntil": None,
                                 "lastError": "Previous geodata service instance stopped; run was recovered"})
-                recovered_ids.append(run_id)
+                recovered_ids.append((run_id, status))
             if recovered_ids:
                 # Persist the requeue before submitting any background work.
                 # This makes a second restart during startup recover the same
                 # durable state rather than leaving PROCESSING rows behind.
                 GeoHandler.store.persist(include_import_state=True)
-        for run_id in recovered_ids:
-            GeoHandler.import_executor.submit(GeoHandler._recover_import_run, run_id)
+        for run_id, status in recovered_ids:
+            executor = GeoHandler.upload_executor if status == "UPLOAD_PENDING" else GeoHandler.import_executor
+            callback = GeoHandler._resume_pending_upload if status == "UPLOAD_PENDING" else GeoHandler._recover_import_run
+            executor.submit(callback, run_id)
 
     @staticmethod
     def _queue_import(body: dict[str, Any], p: dict[str, str], filename: str | None,
@@ -710,20 +779,39 @@ class GeoHandler(JsonHandler):
         format_code = str(body.get("format") or body["filename"].rsplit(".", 1)[-1]).upper()
         if format_code == "JSON": format_code = "GEOJSON"
         if format_code == "SHP": format_code = "SHAPEFILE"
+        defer_upload_cleanup = False
         try:
             from storage import ObjectStore
             scan = ObjectStore.scan_path(upload_path, body["filename"]) if upload_path else ObjectStore.scan_content(content, body["filename"])
-            object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
             bucket = "myota-geodata-imports"
-            stored = (ObjectStore().put_file(bucket, object_key, upload_path, "application/octet-stream",
-                                              sha256=str(scan["sha256"]), size=int(scan["size"]))
-                      if upload_path else ObjectStore().put(bucket, object_key, content, "application/octet-stream"))
+            if upload_path:
+                # Return after the upload has been spooled and scanned. The
+                # durable object-storage handoff continues in the background
+                # so a large browser request is not held open by SeaweedFS.
+                run_id, record = GeoHandler._create_import_run({**body, "format": format_code}, body["filename"])
+                object_key = f"geodata-imports/{run_id}-{body['filename'].replace('/', '_')}"
+                source = {**body["source"], "bucket": bucket, "objectKey": object_key,
+                          "sha256": scan["sha256"], "scan": scan}
+                record.update({"status": "UPLOAD_PENDING", "source": source, "uploadSpoolPath": upload_path})
+                with GeoHandler.store.lock:
+                    GeoHandler.store.data.setdefault("importRuns", {})[run_id].update(record)
+                    GeoHandler.store.persist(include_import_state=True)
+                GeoHandler.upload_executor.submit(GeoHandler._finish_uploaded_import, run_id,
+                                                  {**body, "format": format_code, "source": source},
+                                                  upload_path, object_key, bucket, format_code,
+                                                  body["filename"], scan)
+                defer_upload_cleanup = True
+                public_record = {key: value for key, value in record.items() if key != "uploadSpoolPath"}
+                return {**public_record, "status": "UPLOAD_PENDING", "queued": True, "_status": 202}
+
+            object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
+            stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
             body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
         except ImportError:
             digest = scan["sha256"] if upload_path else __import__("hashlib").sha256(content).hexdigest()
             body = {**body, "source": {**body["source"], "sha256": digest}}
         finally:
-            if upload_path:
+            if upload_path and not defer_upload_cleanup:
                 Path(upload_path).unlink(missing_ok=True)
         if format_code in TEXT_FORMATS or format_code in {"WFS", "ARCGIS_FEATURESERVER", "SHAPEFILE", "SHP"}:
             prepared = GeoHandler._prepare_import_body({**body, "format": format_code})
@@ -769,7 +857,8 @@ class GeoHandler(JsonHandler):
             "processed": sum(candidate.get("validationStatus") == "PROCESSED" for candidate in candidates),
             "rejected": sum(candidate.get("validationStatus") == "REJECTED" for candidate in candidates),
         }
-        return {**run, "candidateCounts": counts}
+        public_run = {key: value for key, value in run.items() if key != "uploadSpoolPath"}
+        return {**public_run, "candidateCounts": counts}
 
     @staticmethod
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:

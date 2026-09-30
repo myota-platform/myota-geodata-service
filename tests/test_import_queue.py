@@ -1,3 +1,5 @@
+import os
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -108,6 +110,29 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(result["status"], "QUEUED")
         self.assertEqual(GeoHandler.store.data["importRuns"][result["id"]]["status"], "QUEUED")
         persist.assert_called_once_with(include_import_state=True)
+
+    def test_spooled_file_returns_before_storage_handoff(self):
+        body = {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+            "source": {"name": "large multipart dataset"}, "filename": "seville.geojson",
+        }
+        with tempfile.NamedTemporaryFile(suffix=".part", delete=False) as upload:
+            upload.write(b'{"type":"FeatureCollection","features":[]}')
+            upload_path = upload.name
+        try:
+            scan = {"status": "CLEAN", "sha256": "hash", "size": os.path.getsize(upload_path)}
+            with patch.object(GeoHandler, "_authorize_import"), \
+                 patch("storage.ObjectStore.scan_path", return_value=scan), \
+                 patch.object(GeoHandler.upload_executor, "submit") as submit, \
+                 patch.object(GeoHandler.store, "persist") as persist:
+                result = GeoHandler.upload_import(None, {"_body": {**body, "_uploadPath": upload_path}, "_http": "1"})
+            self.assertEqual(result["status"], "UPLOAD_PENDING")
+            self.assertEqual(result["_status"], 202)
+            submit.assert_called_once()
+            persist.assert_called_once_with(include_import_state=True)
+            self.assertTrue(os.path.exists(upload_path))
+        finally:
+            os.unlink(upload_path)
 
     def test_recovery_uses_normalized_format_for_pasted_kml(self):
         run_id = "run-recovery-format"
