@@ -221,15 +221,16 @@ class GeodataStore(Store):
         for entity_id, category_code, _ in category_rows:
             categories.setdefault(entity_id, []).append(category_code)
         for row in rows:
-            if row[0] in self.items:
-                assigned = categories.get(row[0]) or [row[2]]
-                self.items[row[0]]["entityType"] = assigned[0]
-                self.items[row[0]]["entityTypes"] = assigned
-                self.items[row[0]]["entityTypeCodes"] = list(assigned)
-                continue
             properties = row[6] if isinstance(row[6], dict) else json.loads(row[6] or "{}")
-            entity = {**properties, "id": row[0], "programmeSlug": row[1], "entityType": row[2], "name": row[3],
-                      "status": row[4], "geometry": row[5], "sourceState": row[7], "jurisdiction": row[8], "attachments": row[9] or []}
+            # The relational entity row is authoritative for lifecycle fields.
+            # service_state is retained as a compatibility snapshot, but it may
+            # lag behind a status mutation when a process is restarted between
+            # the relational write and the snapshot write. Always overlay the
+            # durable columns, including for entities already present there.
+            entity = {**self.items.get(row[0], {}), **properties, "id": row[0],
+                      "programmeSlug": row[1], "entityType": row[2], "name": row[3],
+                      "status": row[4], "geometry": row[5], "sourceState": row[7],
+                      "jurisdiction": row[8], "attachments": row[9] or []}
             entity["entityTypes"] = categories.get(row[0]) or [row[2]]
             entity["entityTypeCodes"] = list(entity["entityTypes"])
             source = sources.get(row[0])
