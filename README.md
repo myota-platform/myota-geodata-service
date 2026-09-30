@@ -143,6 +143,15 @@ Each candidate is checked against existing entities; identical geometry or a
 centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
 and a list of comparison geometries. This is a review warning, not an automatic
 merge or rejection.
+
+During normalization, preprocessing also derives the canonical candidate display
+name from common GIS property aliases. Explicit `name` values take precedence,
+followed by fields such as `SITE_NAME`, `official_name`, `NOMBRE`,
+`DENOMINACION`, `title`, and `label`. Code, identifier, geometry, and
+administrative fields are not used as names. The original source properties are
+retained unchanged for provenance; when no usable alias exists the review UI
+continues to show `Unnamed candidate`.
+
 The deployment stores uploaded bytes in SeaweedFS and records
 `geodata.import.preprocessed.v1` in the durable outbox for NATS consumers.
 Shapefile uploads must be ZIP archives with their `.shp`, `.shx`, and `.dbf`

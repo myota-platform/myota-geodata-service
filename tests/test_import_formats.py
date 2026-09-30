@@ -1,6 +1,7 @@
 import unittest
 
 from import_formats import parse_gpx, parse_kml, parse_text
+from import_adapters import normalize
 
 
 class ImportFormatTests(unittest.TestCase):
@@ -22,6 +23,31 @@ class ImportFormatTests(unittest.TestCase):
         content = '<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg><trkpt lat="37.39" lon="-5.99"/><trkpt lat="37.40" lon="-5.98"/></trkseg></trk></gpx>'
         features = parse_gpx(content)
         self.assertEqual(features[0]["geometry"]["type"], "LineString")
+
+    def test_preprocessing_infers_site_name_alias_without_losing_source_property(self):
+        feature = normalize("MANUAL", {
+            "type": "Feature",
+            "properties": {
+                "site_code": "ES0000108",
+                "SITE_NAME": "Los Órganos",
+                "TIPO": "B",
+                "HECTAREAS": 152.404570654,
+                "AC": "CANARIAS",
+            },
+            "geometry": {"type": "Point", "coordinates": [-15.6, 28.3]},
+        })
+
+        self.assertEqual(feature["properties"]["name"], "Los Órganos")
+        self.assertEqual(feature["properties"]["SITE_NAME"], "Los Órganos")
+        self.assertEqual(feature["properties"]["site_code"], "ES0000108")
+
+    def test_government_gis_uses_common_name_aliases(self):
+        feature = normalize("GOVERNMENT_GIS", {
+            "type": "Feature",
+            "properties": {"NOMBRE": "Parque del Alamillo", "sourceFormat": "GEOJSON"},
+            "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]},
+        })
+        self.assertEqual(feature["properties"]["name"], "Parque del Alamillo")
 
 
 if __name__ == "__main__":
