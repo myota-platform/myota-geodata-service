@@ -38,6 +38,15 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def json_default(value: Any) -> str:
+    """Encode database timestamp values safely at JSON/API boundaries."""
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def new_id() -> str:
     return str(uuid.uuid4())
 
@@ -184,18 +193,18 @@ class Store:
             connection.execute(
                 "INSERT INTO service_state(service, state, updated_at) VALUES (%s, %s::jsonb, now()) "
                 "ON CONFLICT (service) DO UPDATE SET state = EXCLUDED.state, updated_at = now()",
-                (self.service, json.dumps({"items": self.items, "events": self.events, "data": self.data})))
+                (self.service, json.dumps({"items": self.items, "events": self.events, "data": self.data}, default=json_default)))
             for event in self.events:
                 connection.execute(
                     "INSERT INTO outbox_event(event_id, event_type, producer, aggregate_type, aggregate_id, payload, occurred_at) "
                     "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s) ON CONFLICT (event_id) DO NOTHING",
                     (event["eventId"], event["eventType"], event["producer"], event["aggregate"]["type"],
-                     event["aggregate"]["id"], json.dumps(event["payload"]), event["occurredAt"]))
+                     event["aggregate"]["id"], json.dumps(event["payload"], default=json_default), event["occurredAt"]))
             for key, response in self.idempotency.items():
                 connection.execute(
                     "INSERT INTO idempotency_record(service, key, response) VALUES (%s, %s, %s::jsonb) "
                     "ON CONFLICT (service, key) DO UPDATE SET response = EXCLUDED.response",
-                    (self.service, key, json.dumps(response)))
+                    (self.service, key, json.dumps(response, default=json_default)))
 
     def close(self) -> None:
         if self._pool is not None:
@@ -361,7 +370,7 @@ class JsonHandler(BaseHTTPRequestHandler):
         return self.headers.get("X-Request-ID") or new_id()
 
     def _send(self, status: int, payload: Any) -> None:
-        data = b"" if status == 204 else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        data = b"" if status == 204 else json.dumps(payload, separators=(",", ":"), default=json_default).encode("utf-8")
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
