@@ -44,6 +44,23 @@ class GeometryWayTests(unittest.TestCase):
         self.assertAlmostEqual(geometry["coordinates"][0], source[0], places=5)
         self.assertAlmostEqual(geometry["coordinates"][1], source[1], places=5)
 
+    @unittest.skipUnless(importlib.util.find_spec("pyproj"), "pyproj is installed in the service image")
+    def test_import_reprojects_declared_crs_once(self):
+        from pyproj import Transformer
+
+        projected = Transformer.from_crs("EPSG:4326", "EPSG:25830", always_xy=True).transform(-5.99, 37.39)
+        result = GeoHandler._import_features({
+            "adapter": "MANUAL",
+            "source": {"name": "projected-fixture", "license": "CC0"},
+            "features": [{"type": "Feature", "crs": {"type": "name", "properties": {"name": "EPSG:25830"}},
+                          "properties": {"name": "Projected Sevilla point"},
+                          "geometry": {"type": "Point", "coordinates": list(projected)}}],
+        }, "crs-test-run")
+        candidate = GeoHandler.store.data["importCandidates"][result["preprocessed"][0]]
+        self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][0], -5.99, places=5)
+        self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][1], 37.39, places=5)
+        self.assertEqual(candidate["entity"]["provenance"]["sourceCrs"]["properties"]["name"], "EPSG:25830")
+
     def test_osm_style_way_record_is_importable(self):
         feature = normalize("MANUAL", {"type": "way", "id": "way/42", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})
         self.assertEqual(feature["geometry"]["type"], "LineString")

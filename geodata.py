@@ -317,7 +317,10 @@ class GeoHandler(JsonHandler):
                     skipped.append({"sourceRef": source_ref, "reason": "MISSING_GEOMETRY"})
                     continue
                 source_crs = raw_feature.get("crs") or raw_feature.get("spatialReference") or props.get("crs")
-                geometry = normalize_geometry(feature["geometry"], source_crs)
+                # Adapters normalize and reproject source geometry at the intake
+                # boundary. Validate the normalized WGS84 value here without
+                # applying the source transformation a second time.
+                geometry = normalize_geometry(feature["geometry"])
                 attachments = validate_attachments(raw_feature.get("attachments") or props.get("attachments"))
                 existing = next((item for item in GeoHandler.store.items.values()
                                  if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == programme_slug), None)
