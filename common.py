@@ -6,9 +6,11 @@ import base64
 import errno
 import hashlib
 import hmac
+import io
 import os
 import secrets
 import threading
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -21,7 +23,7 @@ from typing import Any, Callable, Iterator
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
 # sizeable pasted FeatureCollection. Deployments may lower this explicitly,
 # but the service default must not reject ordinary large dataset intake.
-MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", "33554432"))
+MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", str(1024 * 1024 * 1024)))
 
 
 def require_durable_database(dsn_env: str | None, dsn: str) -> None:
@@ -241,38 +243,100 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 
 
 def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    """Read metadata and a binary file without converting it to Base64."""
+    """Read metadata and spool a binary file without converting it to Base64."""
     length = _request_length(handler)
     if length == 0:
         raise ValueError("multipart request body must not be empty")
     content_type = handler.headers.get("Content-Type", "")
-    envelope = (f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii")
-    message = BytesParser(policy=email_default).parsebytes(envelope + handler.rfile.read(length))
-    if not message.is_multipart():
-        raise ValueError("invalid multipart request")
+    content_header = BytesParser(policy=email_default).parsebytes(
+        f"Content-Type: {content_type}\r\n\r\n".encode("ascii"))
+    boundary = content_header.get_boundary()
+    if not boundary:
+        raise ValueError("multipart request is missing its boundary")
+
+    class MultipartReader:
+        def __init__(self, stream: Any) -> None:
+            self.stream, self.buffer = stream, b""
+
+        def fill(self) -> None:
+            chunk = self.stream.read(8 * 1024 * 1024)
+            if not chunk:
+                raise ValueError("multipart request ended unexpectedly")
+            self.buffer += chunk
+
+        def read(self, size: int) -> bytes:
+            while len(self.buffer) < size:
+                self.fill()
+            value, self.buffer = self.buffer[:size], self.buffer[size:]
+            return value
+
+        def readline(self) -> bytes:
+            while b"\r\n" not in self.buffer:
+                self.fill()
+            index = self.buffer.index(b"\r\n")
+            value, self.buffer = self.buffer[:index], self.buffer[index + 2:]
+            return value
+
+        def read_part(self, delimiter: bytes, sink: Any) -> None:
+            keep = len(delimiter) - 1
+            while True:
+                index = self.buffer.find(delimiter)
+                if index >= 0:
+                    sink.write(self.buffer[:index])
+                    self.buffer = self.buffer[index + len(delimiter):]
+                    return
+                if len(self.buffer) > keep:
+                    sink.write(self.buffer[:-keep])
+                    self.buffer = self.buffer[-keep:]
+                self.fill()
+
+    reader = MultipartReader(handler.rfile)
+    if reader.readline() != f"--{boundary}".encode("ascii"):
+        raise ValueError("invalid multipart opening boundary")
+    delimiter = b"\r\n--" + boundary.encode("ascii")
     result: dict[str, Any] = {}
-    for part in message.iter_parts():
-        field_name = part.get_param("name", header="content-disposition")
+    while True:
+        header_lines = []
+        while True:
+            line = reader.readline()
+            if not line:
+                break
+            header_lines.append(line)
+        headers = BytesParser(policy=email_default).parsebytes(b"\r\n".join(header_lines) + b"\r\n")
+        disposition = headers.get("Content-Disposition", "")
+        field_name = headers.get_param("name", header="content-disposition")
+        filename = headers.get_filename()
         if not field_name:
-            continue
-        payload = part.get_payload(decode=True) or b""
-        filename = part.get_filename()
+            raise ValueError("multipart part is missing its field name")
         if filename or field_name == "file":
-            result["_uploadBytes"] = payload
-            result["_uploadFilename"] = filename or "upload"
-            continue
-        value = payload.decode(part.get_content_charset() or "utf-8")
-        if field_name == "metadata":
+            temporary = tempfile.NamedTemporaryFile(prefix="myota-geodata-upload-", suffix=".part", delete=False)
             try:
-                metadata = json.loads(value)
-            except json.JSONDecodeError as exc:
-                raise ValueError("metadata must contain valid JSON") from exc
-            if not isinstance(metadata, dict):
-                raise ValueError("metadata must be a JSON object")
-            result.update(metadata)
+                with temporary:
+                    reader.read_part(delimiter, temporary)
+                result["_uploadPath"] = temporary.name
+                result["_uploadFilename"] = filename or "upload"
+            except Exception:
+                os.unlink(temporary.name)
+                raise
         else:
-            result[field_name] = value
-    if "_uploadBytes" not in result:
+            value = io.BytesIO()
+            reader.read_part(delimiter, value)
+            if value.tell() > 4 * 1024 * 1024:
+                raise ValueError("multipart metadata part is too large")
+            if field_name == "metadata":
+                try:
+                    metadata = json.loads(value.getvalue().decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("metadata must contain valid JSON") from exc
+                if not isinstance(metadata, dict):
+                    raise ValueError("metadata must be a JSON object")
+                result.update(metadata)
+        suffix = reader.read(2)
+        if suffix == b"--":
+            break
+        if suffix != b"\r\n":
+            raise ValueError("invalid multipart boundary suffix")
+    if "_uploadPath" not in result:
         raise ValueError("multipart request must include a file")
     return result
 

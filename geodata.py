@@ -7,6 +7,7 @@ import math
 import os
 import re
 import threading
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -688,8 +689,9 @@ class GeoHandler(JsonHandler):
         GeoHandler._authorize_import(p)
         body = {**p["_body"]}
         upload_bytes = body.pop("_uploadBytes", None)
+        upload_path = body.pop("_uploadPath", None)
         upload_filename = body.pop("_uploadFilename", None)
-        if upload_bytes is not None:
+        if upload_bytes is not None or upload_path is not None:
             body["filename"] = upload_filename or body.get("filename") or "upload"
         require(body, "adapter", "source", "filename")
         categories = entity_type_codes(body.get("entityTypes") or body.get("entityTypeCodes"), body.get("entityType"))
@@ -698,6 +700,8 @@ class GeoHandler(JsonHandler):
         body["entityTypes"], body["entityType"] = categories, categories[0]
         if upload_bytes is not None:
             content = upload_bytes
+        elif upload_path is not None:
+            content = None
         else:
             require(body, "contentBase64")
             import base64
@@ -708,19 +712,29 @@ class GeoHandler(JsonHandler):
         if format_code == "SHP": format_code = "SHAPEFILE"
         try:
             from storage import ObjectStore
-            scan = ObjectStore.scan_content(content, body["filename"])
+            scan = ObjectStore.scan_path(upload_path, body["filename"]) if upload_path else ObjectStore.scan_content(content, body["filename"])
             object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
             bucket = "myota-geodata-imports"
-            stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
+            stored = (ObjectStore().put_file(bucket, object_key, upload_path, "application/octet-stream",
+                                              sha256=str(scan["sha256"]), size=int(scan["size"]))
+                      if upload_path else ObjectStore().put(bucket, object_key, content, "application/octet-stream"))
             body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
         except ImportError:
-            body = {**body, "source": {**body["source"], "sha256": __import__("hashlib").sha256(content).hexdigest()}}
+            digest = scan["sha256"] if upload_path else __import__("hashlib").sha256(content).hexdigest()
+            body = {**body, "source": {**body["source"], "sha256": digest}}
+        finally:
+            if upload_path:
+                Path(upload_path).unlink(missing_ok=True)
         if format_code in TEXT_FORMATS or format_code in {"WFS", "ARCGIS_FEATURESERVER", "SHAPEFILE", "SHP"}:
             prepared = GeoHandler._prepare_import_body({**body, "format": format_code})
+            if upload_path:
+                loader = lambda: parse_uploaded(format_code, ObjectStore().get(body["source"]["bucket"], body["source"]["objectKey"]) or b"", body["filename"])
+            else:
+                loader = lambda: parse_uploaded(format_code, content, body["filename"])
             return GeoHandler.store.once(p.get("Idempotency-Key"), lambda: GeoHandler._queue_import(
-                prepared, p, body["filename"], lambda: parse_uploaded(format_code, content, body["filename"])))
+                prepared, p, body["filename"], loader))
         try:
-            parse_uploaded(format_code, content, body["filename"])
+            parse_uploaded(format_code, content or b"", body["filename"])
         except ValueError:
             if format_code not in {"OSM_PBF", "PARKSERVE_US"}:
                 raise

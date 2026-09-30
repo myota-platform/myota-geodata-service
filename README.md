@@ -150,8 +150,11 @@ an explicit `CANDIDATE` or `APPROVED` target; it emits
 `myota.geodata.import.process.v1` subject. The local service runs a bounded
 fallback worker, while production NATS consumers process the same durable
 queue idempotently. The default
-request limit is 32 MiB (`MYOTA_MAX_BODY_BYTES`); deployments may set a lower
-bounded value. The admin web treats the text area as optional when a file is
+request and upload limits default to 1 GiB (`MYOTA_MAX_BODY_BYTES` and
+`MYOTA_UPLOAD_MAX_BYTES`); deployments may set lower bounded values. Multipart
+uploads are spooled to a temporary file and streamed into object storage, so
+the gateway does not need a second in-memory copy of a large source document.
+The admin web treats the text area as optional when a file is
 selected and links each recent run to this summary. Active `QUEUED`,
 `PROCESSING`, and `PREPROCESSED` runs are exposed with their pending and
 confirmed candidate counts so the admin web can keep a dedicated
