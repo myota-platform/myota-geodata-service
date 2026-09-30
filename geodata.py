@@ -474,7 +474,11 @@ class GeoHandler(JsonHandler):
         object_key = f"geodata-import-sources/{run_id}-{safe_name}"
         stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
         return {**(body.get("source") or {}), "bucket": bucket, "objectKey": object_key,
-                "sha256": stored["sha256"], "size": stored["size"], "recoverySource": True}
+                "sha256": stored["sha256"], "size": stored["size"], "recoverySource": True,
+                # The queued source is a normalized FeatureCollection even
+                # when the original pasted document was KML or GPX. Keep the
+                # parser format explicit so a restart can replay it safely.
+                "recoveryFormat": "GEOJSON"}
 
     @staticmethod
     def _claim_import_run(run_id: str) -> bool:
@@ -553,6 +557,14 @@ class GeoHandler(JsonHandler):
         run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
         if not run:
             return
+        if run.get("binaryObjectPending"):
+            # OSM PBF and ParkServe binary uploads are durable, but their
+            # parser is supplied by a separate adapter. Keep them queued for
+            # that worker instead of converting a restart into a false error.
+            with GeoHandler.store.lock:
+                run["lastError"] = "binary import is queued for an available parser adapter"
+                GeoHandler.store.persist(include_import_state=True)
+            return
         source = run.get("source") or {}
         bucket, object_key = source.get("bucket"), source.get("objectKey")
         if not bucket or not object_key:
@@ -567,7 +579,7 @@ class GeoHandler(JsonHandler):
                 GeoHandler._fail_import_run(run_id, RuntimeError("import source is not recoverable; object is missing from storage"))
                 GeoHandler.store.persist(include_import_state=True)
             return
-        format_code = str(run.get("format") or "GEOJSON").upper()
+        format_code = str(source.get("recoveryFormat") or run.get("format") or "GEOJSON").upper()
         filename = run.get("filename") or "import.geojson"
         body = {"adapter": run.get("adapter") or "MANUAL", "format": format_code,
                 "source": source, "filename": filename, "programmeSlug": run.get("programmeSlug"),
@@ -582,20 +594,36 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def recover_import_runs() -> None:
-        """Requeue abandoned durable jobs once their execution lease expires."""
+        """Requeue durable jobs abandoned by the previous service instance.
+
+        This is called once after service hydration during startup. A service
+        restart means no in-process importer from the previous instance can
+        still be running, so PROCESSING rows are requeued immediately instead
+        of waiting for the normal lease timeout. The claim/update in
+        _claim_import_run still prevents duplicate execution after the
+        recovery queue is submitted.
+        """
         if not GeoHandler.store.durable:
             return
         with GeoHandler.store.transaction() as connection:
             rows = connection.execute(
                 "SELECT id::text, status, lease_until FROM import_run "
-                "WHERE status='QUEUED' OR (status='PROCESSING' AND (lease_until IS NULL OR lease_until <= now()))"
+                "WHERE status IN ('QUEUED', 'PROCESSING')"
             ).fetchall()
-        for run_id, status, _lease_until in rows:
-            run = GeoHandler.store.data.setdefault("importRuns", {}).setdefault(run_id, {"id": run_id})
-            if status == "PROCESSING":
-                run.update({"status": "QUEUED", "heartbeatAt": None, "leaseUntil": None,
-                            "lastError": "Previous import worker lease expired; run was recovered"})
-            GeoHandler.store.persist(include_import_state=True)
+        recovered_ids = []
+        with GeoHandler.store.lock:
+            for run_id, status, _lease_until in rows:
+                run = GeoHandler.store.data.setdefault("importRuns", {}).setdefault(run_id, {"id": run_id})
+                if status == "PROCESSING":
+                    run.update({"status": "QUEUED", "heartbeatAt": None, "leaseUntil": None,
+                                "lastError": "Previous geodata service instance stopped; run was recovered"})
+                recovered_ids.append(run_id)
+            if recovered_ids:
+                # Persist the requeue before submitting any background work.
+                # This makes a second restart during startup recover the same
+                # durable state rather than leaving PROCESSING rows behind.
+                GeoHandler.store.persist(include_import_state=True)
+        for run_id in recovered_ids:
             GeoHandler.import_executor.submit(GeoHandler._recover_import_run, run_id)
 
     @staticmethod
@@ -1438,7 +1466,6 @@ def seed() -> None:
         enrich_entity_location(GeoHandler.store.items[park["id"]])
     for entity in GeoHandler.store.items.values():
         enrich_entity_location(entity)
-    GeoHandler.recover_import_runs()
 
 
 if __name__ == "__main__":

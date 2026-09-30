@@ -116,8 +116,14 @@ payload, filename, and the same category/source metadata. Both paths return
 pre-processed candidate persistence run in a bounded background import worker.
 Each run stores its source document in SeaweedFS, claims a PostgreSQL lease,
 and refreshes a heartbeat while it is working. On service restart, queued runs
-and runs with an expired lease are automatically resumed from object storage;
-unrecoverable runs are marked `FAILED` with a visible reason instead of being
+and all runs left in `PROCESSING` by the previous service instance are
+immediately requeued and resumed from object storage; the startup requeue is
+persisted before workers are dispatched. This avoids waiting for the normal
+lease timeout after a restart. Pasted KML/GPX sources are replayed as their
+normalized GeoJSON snapshot, while uploaded files retain their original
+parser format. Durable binary uploads whose parser adapter is not available
+remain visibly queued instead of being incorrectly marked failed.
+Unrecoverable runs are marked `FAILED` with a visible reason instead of being
 left indefinitely in `PROCESSING`. This makes the import history a durable
 operational status view rather than a process-local queue snapshot.
 Each candidate is checked against existing entities; identical geometry or a

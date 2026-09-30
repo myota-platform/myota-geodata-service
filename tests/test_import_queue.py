@@ -93,6 +93,66 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(GeoHandler.store.data["importRuns"][result["id"]]["status"], "QUEUED")
         persist.assert_called_once_with(include_import_state=True)
 
+    def test_recovery_uses_normalized_format_for_pasted_kml(self):
+        run_id = "run-recovery-format"
+        GeoHandler.store.data["importRuns"] = {run_id: {
+            "id": run_id, "status": "QUEUED", "adapter": "MANUAL", "format": "KML",
+            "filename": "pasted.kml", "entityType": "TRAIL", "entityTypes": ["TRAIL"],
+            "source": {"bucket": "myota-geodata-imports", "objectKey": "sources/pasted",
+                       "recoveryFormat": "GEOJSON"},
+        }}
+        with patch("storage.ObjectStore.get", return_value=b'{"type":"FeatureCollection","features":[]}'), \
+             patch.object(GeoHandler, "_process_import_run") as process:
+            GeoHandler._recover_import_run(run_id)
+        process.assert_called_once()
+        self.assertEqual(process.call_args.args[1]["format"], "GEOJSON")
+        self.assertEqual(process.call_args.args[1]["filename"], "pasted.kml")
+
+    def test_binary_recovery_keeps_pending_run_queued(self):
+        run_id = "run-binary-recovery"
+        GeoHandler.store.data["importRuns"] = {run_id: {
+            "id": run_id, "status": "QUEUED", "format": "OSM_PBF", "binaryObjectPending": True,
+            "source": {"bucket": "myota-geodata-imports", "objectKey": "sources/pbf"},
+        }}
+        with patch.object(GeoHandler, "_process_import_run") as process, \
+             patch.object(GeoHandler.store, "persist") as persist:
+            GeoHandler._recover_import_run(run_id)
+        process.assert_not_called()
+        self.assertEqual(GeoHandler.store.data["importRuns"][run_id]["status"], "QUEUED")
+        self.assertIn("queued for an available parser", GeoHandler.store.data["importRuns"][run_id]["lastError"])
+        persist.assert_called_once_with(include_import_state=True)
+
+    def test_startup_recovery_requeues_processing_runs_before_dispatch(self):
+        run_id = "run-startup-recovery"
+        GeoHandler.store.data["importRuns"] = {run_id: {
+            "id": run_id, "status": "PROCESSING", "format": "GEOJSON",
+            "source": {"bucket": "myota-geodata-imports", "objectKey": "sources/geojson"},
+        }}
+
+        class Cursor:
+            def fetchall(self):
+                return [(run_id, "PROCESSING", None)]
+
+            def execute(self, *_args):
+                return self
+
+        class Transaction:
+            def __enter__(self):
+                return Cursor()
+
+            def __exit__(self, *_args):
+                return False
+
+        with patch.object(GeoHandler.store, "dsn", "test-dsn"), \
+             patch.object(GeoHandler.store, "transaction", return_value=Transaction()), \
+             patch.object(GeoHandler.store, "persist") as persist, \
+             patch.object(GeoHandler.import_executor, "submit") as submit:
+            GeoHandler.recover_import_runs()
+        self.assertEqual(GeoHandler.store.data["importRuns"][run_id]["status"], "QUEUED")
+        self.assertIsNone(GeoHandler.store.data["importRuns"][run_id]["leaseUntil"])
+        submit.assert_called_once_with(GeoHandler._recover_import_run, run_id)
+        persist.assert_called_once_with(include_import_state=True)
+
     def test_import_history_returns_newest_runs_first(self):
         GeoHandler.store.data["importRuns"] = {
             f"run-{index}": {
