@@ -142,9 +142,9 @@ operational status view rather than a process-local queue snapshot.
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
 PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;
-on restart, relational entity columns are authoritative. Local Sevilla sample
-records are insert-only seed data, so approving a sample or editing its geometry
-is never undone by service startup.
+on restart, relational entity columns are authoritative. The service does not
+create built-in geodata entities at startup; local catalogues must be populated
+through the import or community-proposal workflows.
 
 Each candidate is checked against existing entities; identical geometry or a
 centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
