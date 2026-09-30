@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as email_default
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
@@ -255,13 +256,16 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         raise ValueError("multipart request is missing its boundary")
 
     class MultipartReader:
-        def __init__(self, stream: Any) -> None:
-            self.stream, self.buffer = stream, b""
+        def __init__(self, stream: Any, remaining: int) -> None:
+            self.stream, self.buffer, self.remaining = stream, b"", remaining
 
         def fill(self) -> None:
-            chunk = self.stream.read(8 * 1024 * 1024)
+            if self.remaining <= 0:
+                raise ValueError("multipart request ended unexpectedly")
+            chunk = self.stream.read(min(8 * 1024 * 1024, self.remaining))
             if not chunk:
                 raise ValueError("multipart request ended unexpectedly")
+            self.remaining -= len(chunk)
             self.buffer += chunk
 
         def read(self, size: int) -> bytes:
@@ -290,7 +294,7 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
                     self.buffer = self.buffer[-keep:]
                 self.fill()
 
-    reader = MultipartReader(handler.rfile)
+    reader = MultipartReader(handler.rfile, length)
     if reader.readline() != f"--{boundary}".encode("ascii"):
         raise ValueError("invalid multipart opening boundary")
     delimiter = b"\r\n--" + boundary.encode("ascii")
@@ -309,7 +313,11 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         if not field_name:
             raise ValueError("multipart part is missing its field name")
         if filename or field_name == "file":
-            temporary = tempfile.NamedTemporaryFile(prefix="myota-geodata-upload-", suffix=".part", delete=False)
+            spool_dir = os.environ.get("MYOTA_UPLOAD_SPOOL_DIR", "").strip() or None
+            if spool_dir:
+                Path(spool_dir).mkdir(parents=True, exist_ok=True)
+            temporary = tempfile.NamedTemporaryFile(prefix="myota-geodata-upload-", suffix=".part",
+                                                     dir=spool_dir, delete=False)
             try:
                 with temporary:
                     reader.read_part(delimiter, temporary)
