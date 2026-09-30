@@ -694,6 +694,11 @@ class GeoHandler(JsonHandler):
                       "queuedAt": now(), "binaryObjectPending": True}
             GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
             GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id, **record})
+            # Binary uploads cannot be parsed by the synchronous adapter yet,
+            # but they must still appear in the durable preprocessing queue.
+            # Persist before returning so a service restart cannot make the
+            # uploaded file disappear from Import History/Pre-processing.
+            GeoHandler.store.persist(include_import_state=True)
             return {**record, "queued": True, "_status": 202}
         raise ValueError(f"unsupported upload format {format_code}")
 
