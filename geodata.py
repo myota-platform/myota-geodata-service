@@ -1568,7 +1568,10 @@ def seed() -> None:
     ]
     for park in parks:
         existing = GeoHandler.store.items.get(park["id"])
-        if existing and not str(existing.get("sourceRef", "")).startswith(("demo-", "osm-way-")):
+        # Seed data is a fallback for an empty local catalogue. Once a sample
+        # entity exists, its lifecycle and any administrator edits are durable
+        # user data and must never be replaced during process startup.
+        if existing:
             continue
         retrieved_at = existing.get("provenance", {}).get("source", {}).get("retrievedAt") if existing else None
         source = {"name": "OpenStreetMap", "license": "ODbL 1.0", "retrievedAt": retrieved_at or now(), "url": park["osmUrl"]}
