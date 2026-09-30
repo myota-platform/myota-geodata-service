@@ -557,7 +557,7 @@ class GeoHandler(JsonHandler):
         run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
         if not run:
             return
-        if run.get("binaryObjectPending"):
+        if run.get("binaryObjectPending") or str(run.get("format") or "").upper() in {"OSM_PBF", "PARKSERVE_US"}:
             # OSM PBF and ParkServe binary uploads are durable, but their
             # parser is supplied by a separate adapter. Keep them queued for
             # that worker instead of converting a restart into a false error.

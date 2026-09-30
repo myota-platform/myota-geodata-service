@@ -111,7 +111,9 @@ class ImportQueueTests(unittest.TestCase):
     def test_binary_recovery_keeps_pending_run_queued(self):
         run_id = "run-binary-recovery"
         GeoHandler.store.data["importRuns"] = {run_id: {
-            "id": run_id, "status": "QUEUED", "format": "OSM_PBF", "binaryObjectPending": True,
+            # Older rows may predate the persisted binaryObjectPending flag;
+            # the format itself must still keep them queued.
+            "id": run_id, "status": "QUEUED", "format": "OSM_PBF",
             "source": {"bucket": "myota-geodata-imports", "objectKey": "sources/pbf"},
         }}
         with patch.object(GeoHandler, "_process_import_run") as process, \
