@@ -56,6 +56,35 @@ class GeoHandler(JsonHandler):
     deletion_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_DELETION_WORKERS", "2"))),
                                             thread_name_prefix="geodata-deletion")
 
+    @classmethod
+    def metrics_extra(cls) -> dict[str, float]:
+        """Return counts from the durable catalogue and import lifecycle."""
+        try:
+            cls.store.refresh_import_runs()
+        except Exception:
+            # The scrape must stay available while PostGIS is restarting.
+            return {"myota_geodata_metrics_database_unavailable": 1}
+        with cls.store.lock:
+            entities = list(cls.store.items.values())
+            runs = list((cls.store.data.get("importRuns") or {}).values())
+            candidates = list((cls.store.data.get("importCandidates") or {}).values())
+        result: dict[str, float] = {
+            "myota_geodata_entities_total": float(len(entities)),
+            "myota_geodata_entity_categories_total": float(len({code for entity in entities for code in entity_categories(entity)})),
+            "myota_geodata_import_runs_total": float(len(runs)),
+            "myota_geodata_import_candidates_total": float(len(candidates)),
+        }
+        for status in ("CANDIDATE", "APPROVED", "RETIRED", "REJECTED"):
+            result[f'myota_geodata_entities_by_status_total{{status="{status}"}}'] = float(sum(str(entity.get("status", "")).upper() == status for entity in entities))
+        geometry_types = ("Point", "LineString", "MultiLineString", "Polygon", "MultiPolygon")
+        for geometry_type in geometry_types:
+            result[f'myota_geodata_entities_by_geometry_total{{geometry_type="{geometry_type}"}}'] = float(sum((entity.get("geometry") or {}).get("type") == geometry_type for entity in entities))
+        for status in ("QUEUED", "PROCESSING", "PREPROCESSED", "PREPROCESSED_WITH_ERRORS", "PROCESSED", "FAILED"):
+            result[f'myota_geodata_import_runs_by_status_total{{status="{status}"}}'] = float(sum(str(run.get("status", "")).upper() == status for run in runs))
+        for validation in ("PENDING", "CONFIRMED", "REJECTED", "PROCESSED"):
+            result[f'myota_geodata_import_candidates_by_validation_total{{status="{validation}"}}'] = float(sum(str(candidate.get("validationStatus", "PENDING")).upper() == validation for candidate in candidates))
+        return result
+
     @staticmethod
     def _authorize_review(p: dict[str, str], entity: dict[str, Any]) -> None:
         if not p.get("_http"):

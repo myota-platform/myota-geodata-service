@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from metrics import METRICS
+from otel import telemetry_for
 
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
 # sizeable pasted FeatureCollection. Deployments may lower this explicitly,
@@ -379,6 +380,9 @@ class JsonHandler(BaseHTTPRequestHandler):
         route = getattr(self, "current_route", None)
         route_name = route[1] if route else getattr(self, "path", "unknown").split("?", 1)[0]
         METRICS.inc("myota_http_requests_total", {"service": self.service, "method": getattr(self, "command", "UNKNOWN"), "route": route_name, "status": status})
+        request_telemetry = getattr(self, "_otel_request", None)
+        if request_telemetry:
+            request_telemetry.finish(status, route_name)
         if route in self.deprecated_routes:
             METRICS.inc("myota_legacy_route_requests_total", {"service": self.service, "method": route[0], "route": route[1]})
         data = b"" if status == 204 else json.dumps(payload, separators=(",", ":"), default=json_default).encode("utf-8")
@@ -411,7 +415,10 @@ class JsonHandler(BaseHTTPRequestHandler):
                             "requestId": self.request_id, "correlationId": self.correlation_id})
 
     def _send_metrics(self) -> None:
-        data = METRICS.render().encode("utf-8")
+        data = METRICS.render(type(self).metrics_extra()).encode("utf-8")
+        request_telemetry = getattr(self, "_otel_request", None)
+        if request_telemetry:
+            request_telemetry.finish(200, "/metrics")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -440,6 +447,7 @@ class JsonHandler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         self.request_id, self.correlation_id = self._request_id(), self.headers.get("X-Correlation-ID") or new_id()
         self.command = method
+        self._otel_request = telemetry_for(self.service).start_request(method, self.path.split("?", 1)[0])
         if self.path.split("?", 1)[0] == "/metrics":
             self._send_metrics()
             return

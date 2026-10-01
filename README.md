@@ -35,6 +35,10 @@ large-scale source workers, public data publication, stewardship workflow, and
 production operations are tracked in the
 [charter gap analysis](https://github.com/myota-platform/myota-docs/blob/main/docs/charter-gap-analysis.md).
 
+The `/metrics` endpoint exposes durable entity, geometry, category, import-run
+and preprocessing-candidate counts. With `MYOTA_OTEL_ENABLED=1`, HTTP request
+metrics and traces are exported to the OpenTelemetry Collector.
+
 ## Run the vertical slice
 
 ```bash

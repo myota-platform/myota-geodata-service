@@ -26,10 +26,12 @@ class MetricsRegistry:
         with self._lock:
             self._counters[key] += 1
 
-    def render(self) -> str:
+    def render(self, extra: Mapping[str, float] | None = None) -> str:
         with self._lock:
             rows = list(self._counters.items())
-        return "\n".join(f"{name}{_labels(dict(labels))} {value:g}" for (name, labels), value in sorted(rows)) + "\n"
+        lines = [f"{name}{_labels(dict(labels))} {value:g}" for (name, labels), value in sorted(rows)]
+        lines += [f"{name} {float(value):g}" for name, value in sorted((extra or {}).items())]
+        return "\n".join(lines) + "\n"
 
 
 METRICS = MetricsRegistry()
