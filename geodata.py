@@ -403,7 +403,12 @@ class GeoHandler(JsonHandler):
                 import_candidates[candidate_id] = candidate
                 preprocessed.append(candidate_id)
                 records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
-            except (TypeError, ValueError) as error:
+            except Exception as error:
+                # A malformed or otherwise unprocessable feature must not
+                # invalidate the rest of the dataset. Keep the record-level
+                # error in the run summary and continue staging independent
+                # features for administrator validation. Database/source
+                # failures outside this loop still fail the whole run.
                 errors.append({"index": index, "message": str(error)})
         seen_refs = {record["sourceRef"] for record in records}
         disappeared = GeoHandler._apply_disappearance(programme_slug, source_key, adapter, seen_refs,

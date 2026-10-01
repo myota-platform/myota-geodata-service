@@ -116,8 +116,12 @@ Dataset intake is platform-wide and is not assigned to a programme. Each
 import selects one or more categories from the shared Master data catalogue; programme
 assignment is a later eligibility decision. The admin page reads all category
 definitions from `GET /v1/entity-types`, including categories not currently
-assigned to any programme. Imports stop at `PREPROCESSED` and require
-administrator confirmation before they create or update an entity.
+assigned to any programme. Imports stop at `PREPROCESSED` (or
+`PREPROCESSED_WITH_ERRORS`) and require administrator confirmation before they
+create or update an entity. Preprocessing is record-isolated: successfully
+normalized features remain available as pending candidates when other features
+fail. The run summary records failed feature indexes and messages, and only
+those failed features are omitted from the validation queue.
 
 Use the admin web's **Geodata imports** page rather than the review page. Select
 the shared feature categories before submitting; programme assignment is not

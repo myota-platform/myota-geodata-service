@@ -79,6 +79,35 @@ class ImportQueueTests(unittest.TestCase):
                 "source": {"name": "empty"}, "content": "   ",
             }})
 
+    def test_preprocessing_keeps_valid_entities_when_one_feature_errors(self):
+        body = {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+            "source": {"name": "mixed-quality import", "license": "CC0"},
+            "features": [
+                {"type": "Feature", "properties": {"name": "Valid trail"},
+                 "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}},
+                {"type": "Feature", "properties": {"name": "Broken trail"},
+                 "geometry": {"type": "LineString", "coordinates": [[-5.97, 37.39], [-5.96, 37.40]]}},
+            ],
+        }
+
+        def enrich(entity, force=False):
+            if entity["name"] == "Broken trail":
+                raise RuntimeError("reverse geocoder failed for this feature")
+            return entity
+
+        with patch("geodata.enrich_entity_location", side_effect=enrich):
+            result = GeoHandler.enqueue_import(None, {"_body": body})
+
+        run = GeoHandler.store.data["importRuns"][result["importRunId"]]
+        self.assertEqual(run["status"], "PREPROCESSED_WITH_ERRORS")
+        self.assertEqual(run["stats"]["preprocessed"], 1)
+        self.assertEqual(run["stats"]["errors"], 1)
+        candidates = GeoHandler.list_import_candidates(None, {"runId": result["importRunId"], "_path": "?pageSize=10"})
+        self.assertEqual(candidates["total"], 1)
+        self.assertEqual(candidates["items"][0]["name"], "Valid trail")
+        self.assertIn("reverse geocoder failed", run["errors"][0]["message"])
+
     def test_binary_upload_keeps_pending_run_durable(self):
         body = {
             "adapter": "MANUAL", "format": "OSM_PBF", "entityType": "TRAIL",
