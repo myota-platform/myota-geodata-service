@@ -1212,6 +1212,12 @@ class GeoHandler(JsonHandler):
         feature = dict(body["feature"])
         feature["attachments"] = body.get("attachments", feature.get("attachments"))
         properties = feature.get("properties") or {}
+        # The preferred proposal contract carries shared categories at the
+        # request level. Preserve compatibility with older clients that put
+        # them in feature properties before normalizing the candidate.
+        request_categories = body.get("entityTypes") or body.get("entityTypeCodes") or body.get("entityType")
+        if request_categories and not (properties.get("entityTypes") or properties.get("entityTypeCodes") or properties.get("entityType")):
+            properties["entityTypes"] = request_categories
         categories = entity_type_codes(properties.get("entityTypes") or properties.get("entityTypeCodes"), properties.get("entityType"))
         if not categories:
             raise ValueError("entityTypes must contain at least one shared entity category code")
