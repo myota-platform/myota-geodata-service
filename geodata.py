@@ -11,6 +11,8 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from common import JsonHandler, new_id, now, page_result, require, verify_token
 from geodata_pipeline import (MAX_IMPORT_FEATURES, conflation_score, digest, geometry_bbox, geometry_centroid,
@@ -51,6 +53,8 @@ class GeoHandler(JsonHandler):
                                           thread_name_prefix="geodata-upload")
     import_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_IMPORT_WORKERS", "2"))),
                                           thread_name_prefix="geodata-import")
+    deletion_executor = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("MYOTA_DELETION_WORKERS", "2"))),
+                                            thread_name_prefix="geodata-deletion")
 
     @staticmethod
     def _authorize_review(p: dict[str, str], entity: dict[str, Any]) -> None:
@@ -118,6 +122,17 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def _query_bounds(query: dict[str, list[str]]) -> tuple[float, float, float, float] | None:
         keys = ("minLon", "minLat", "maxLon", "maxLat")
+        if query.get("bbox") and not any(key in query for key in keys):
+            values = [value.strip() for value in query["bbox"][0].split(",")]
+            if len(values) != 4:
+                raise ValueError("bbox must contain minLon,minLat,maxLon,maxLat")
+            try:
+                bounds = tuple(float(value) for value in values)
+            except ValueError as exc:
+                raise ValueError("bbox must contain numeric coordinates") from exc
+            if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+                raise ValueError("map bounds must have minimum values below maximum values")
+            return bounds
         if not any(key in query for key in keys):
             return None
         try:
@@ -739,6 +754,8 @@ class GeoHandler(JsonHandler):
     def enqueue_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         GeoHandler._authorize_import(p)
         body = {**p["_body"]}
+        if any(key in body for key in ("_uploadBytes", "_uploadPath", "contentBase64")) or (body.get("source") or {}).get("objectKey"):
+            return GeoHandler.upload_import(_, p)
         require(body, "adapter", "source")
         if not entity_type_codes(body.get("entityTypes") or body.get("entityTypeCodes"), body.get("entityType")):
             raise ValueError("entityTypes must contain at least one shared entity category code")
@@ -775,6 +792,12 @@ class GeoHandler(JsonHandler):
             content = upload_bytes
         elif upload_path is not None:
             content = None
+        elif (body.get("source") or {}).get("objectKey"):
+            from storage import ObjectStore
+            object_source = body["source"]
+            content = ObjectStore().get(object_source.get("bucket", "myota-geodata-imports"), object_source["objectKey"])
+            if content is None:
+                raise ValueError("source object was not found")
         else:
             require(body, "contentBase64")
             import base64
@@ -808,9 +831,12 @@ class GeoHandler(JsonHandler):
                 public_record = {key: value for key, value in record.items() if key != "uploadSpoolPath"}
                 return {**public_record, "status": "UPLOAD_PENDING", "queued": True, "_status": 202}
 
-            object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
-            stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
-            body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
+            if not (body.get("source") or {}).get("objectKey"):
+                object_key = f"geodata-imports/{new_id()}-{body['filename'].replace('/', '_')}"
+                stored = ObjectStore().put(bucket, object_key, content, "application/octet-stream")
+                body = {**body, "source": {**body["source"], "objectKey": object_key, "bucket": bucket, "sha256": stored["sha256"], "scan": scan}}
+            else:
+                body = {**body, "source": {**body["source"], "bucket": body["source"].get("bucket", bucket), "sha256": scan["sha256"], "scan": scan}}
         except ImportError:
             digest = scan["sha256"] if upload_path else __import__("hashlib").sha256(content).hexdigest()
             body = {**body, "source": {**body["source"], "sha256": digest}}
@@ -1510,6 +1536,125 @@ class GeoHandler(JsonHandler):
                                {"entityId": entity_id, "deletedBy": p.get("_body", {}).get("deletedBy"), "previousStatus": entity.get("status")})
         return {"entityId": entity_id, "deleted": True, "previousStatus": entity.get("status"), "_status": 204}
 
+    @staticmethod
+    def patch_entity_metadata(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = dict(p.get("_body") or {})
+        editor_id = body.get("editorId")
+        require(body, "editorId")
+        supported = {"editorId", "name", "location", "manualFields", "note"}
+        unknown = set(body) - supported
+        if unknown:
+            raise ValueError(f"unsupported entity metadata fields: {', '.join(sorted(unknown))}")
+        entity = GeoHandler.store.items[p["entityId"]]
+        result = entity
+        if "name" in body:
+            result = GeoHandler.change_entity_name(None, {**p, "_body": {"name": body["name"], "editorId": editor_id, "note": body.get("note")}})
+        if "location" in body:
+            location_body = {"location": body["location"], "editorId": editor_id, "note": body.get("note")}
+            if "manualFields" in body:
+                location_body["manualFields"] = body["manualFields"]
+            result = GeoHandler.update_location(None, {**p, "_body": location_body})
+        if "name" not in body and "location" not in body:
+            raise ValueError("at least one editable metadata field is required: name or location")
+        return result
+
+    @staticmethod
+    def put_entity_categories(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = dict(p.get("_body") or {})
+        categories = body.get("entityTypes") or body.get("entityTypeCodes") or body.get("entityType")
+        return GeoHandler.change_entity_type(None, {**p, "_body": {"entityTypes": categories, "editorId": body.get("editorId"), "note": body.get("note")}})
+
+    @staticmethod
+    def review_resource(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = dict(p.get("_body") or {})
+        status = body.get("status") or body.get("decision")
+        if status:
+            return GeoHandler.set_status(None, {**p, "_body": {"status": status, "reviewerId": body.get("reviewerId"), "note": body.get("note")}})
+        raise ValueError("review status or decision is required")
+
+    @staticmethod
+    def _activity_request(p: dict[str, str], path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not p.get("_http"):
+            return {"qsoCount": 0, "activationCount": 0, "awardProgressCount": 0}
+        url = os.environ.get("MYOTA_ACTIVITY_URL", "http://activity:8004").rstrip("/") + path
+        headers = {"Accept": "application/json", "User-Agent": "MyOTA-geodata-service/1.0"}
+        if p.get("Authorization"):
+            headers["Authorization"] = p["Authorization"]
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request = Request(url, data=data, method=method, headers=headers)
+        try:
+            with urlopen(request, timeout=15) as response:  # nosec B310 - deployment-controlled internal URL
+                return json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"activity service request failed: {exc}") from exc
+
+    @staticmethod
+    def create_deletion_job(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = p.get("_body") or {}
+        require(body, "entityId", "requestedBy")
+        entity = GeoHandler.store.items[body["entityId"]]
+        GeoHandler._authorize_gis_admin(p, entity, "geodata.delete")
+        authorization = p.get("Authorization", "")
+        claims = verify_token(authorization[7:]) if authorization.startswith("Bearer ") else {}
+        global_admin = any(role.get("role") in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"} for role in claims.get("roles", []))
+        if not global_admin and entity.get("status") != "REJECTED":
+            raise ValueError("only global administrators can delete non-rejected entities")
+        impact = GeoHandler._activity_request(p, f"/v1/activations/admin/entities/{entity['id']}/deletion-impact")
+        job = {"id": new_id(), "entityId": entity["id"], "status": "AWAITING_CONFIRMATION",
+               "requestedBy": body["requestedBy"], "impact": impact, "confirmationRequired": True,
+               "createdAt": now(), "updatedAt": now()}
+        GeoHandler.store.data.setdefault("entityDeletionJobs", {})[job["id"]] = job
+        GeoHandler.store.event("geodata.entity-deletion-job.created.v1", "entity_deletion_job", job["id"], job)
+        GeoHandler.store.persist()
+        return {**job, "_status": 201}
+
+    @staticmethod
+    def get_deletion_job(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        return GeoHandler.store.data.setdefault("entityDeletionJobs", {})[p["jobId"]]
+
+    @staticmethod
+    def _execute_deletion_job(job_id: str, p: dict[str, str]) -> None:
+        jobs = GeoHandler.store.data.setdefault("entityDeletionJobs", {})
+        job = jobs.get(job_id)
+        if not job:
+            return
+        job.update({"status": "PROCESSING", "updatedAt": now()})
+        GeoHandler.store.persist()
+        try:
+            cascade = GeoHandler._activity_request(p, f"/v1/activations/admin/entities/{job['entityId']}/cascade-delete", "POST",
+                                                    {"deletedBy": p.get("_body", {}).get("deletedBy") or job["requestedBy"]})
+            deleted = GeoHandler.delete_entity(None, {**p, "entityId": job["entityId"],
+                                                       "_body": {"deletedBy": p.get("_body", {}).get("deletedBy") or job["requestedBy"]}})
+            job.update({"status": "COMPLETED", "cascade": cascade, "deleted": deleted,
+                        "completedAt": now(), "updatedAt": now()})
+            GeoHandler.store.event("geodata.entity-deletion-job.completed.v1", "entity_deletion_job", job_id, job)
+        except Exception as exc:  # pragma: no cover - exercised by service integration failures
+            job.update({"status": "FAILED", "error": str(exc), "updatedAt": now()})
+            GeoHandler.store.event("geodata.entity-deletion-job.failed.v1", "entity_deletion_job", job_id, job)
+        GeoHandler.store.persist()
+
+    @staticmethod
+    def confirm_deletion_job(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        body = p.get("_body") or {}
+        require(body, "confirmation", "deletedBy")
+        if str(body["confirmation"]).upper() != "DELETE":
+            raise ValueError("confirmation must be DELETE")
+        job = GeoHandler.store.data.setdefault("entityDeletionJobs", {})[p["jobId"]]
+        if job.get("status") == "COMPLETED":
+            return job
+        if job.get("status") != "AWAITING_CONFIRMATION":
+            raise ValueError("deletion job is not awaiting confirmation")
+        job.update({"status": "QUEUED", "confirmedBy": body["deletedBy"], "confirmedAt": now(), "updatedAt": now()})
+        request_context = {**p, "_body": body}
+        if p.get("_http"):
+            GeoHandler.deletion_executor.submit(GeoHandler._execute_deletion_job, job["id"], request_context)
+            return {**job, "queued": True, "_status": 202}
+        GeoHandler._execute_deletion_job(job["id"], request_context)
+        return job
+
     delete_rejected_entity = delete_entity
 
 
@@ -1535,15 +1680,36 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
     ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
     ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,
+    ("POST", "/v1/geodata/proposals"): GeoHandler.draw_proposal,
     ("POST", "/v1/geodata/conflation/{candidateId}/resolve"): GeoHandler.resolve_conflation,
     ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
+    ("POST", "/v1/geodata/entities/{entityId}/reviews"): GeoHandler.review_resource,
     ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
     ("POST", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
+    ("PUT", "/v1/geodata/entities/{entityId}/geometry"): GeoHandler.update_geometry,
+    ("PATCH", "/v1/geodata/entities/{entityId}"): GeoHandler.patch_entity_metadata,
+    ("PUT", "/v1/geodata/entities/{entityId}/categories"): GeoHandler.put_entity_categories,
     ("POST", "/v1/geodata/entities/{entityId}/location"): GeoHandler.update_location,
     ("POST", "/v1/geodata/entities/{entityId}/entity-type"): GeoHandler.change_entity_type,
     ("POST", "/v1/geodata/entities/{entityId}/name"): GeoHandler.change_entity_name,
     ("POST", "/v1/geodata/entities/{entityId}/geometry-type"): GeoHandler.change_geometry_type,
     ("POST", "/v1/geodata/entities/{entityId}/delete"): GeoHandler.delete_entity,
+    ("POST", "/v1/geodata/entity-deletion-jobs"): GeoHandler.create_deletion_job,
+    ("GET", "/v1/geodata/entity-deletion-jobs/{jobId}"): GeoHandler.get_deletion_job,
+    ("POST", "/v1/geodata/entity-deletion-jobs/{jobId}/confirm"): GeoHandler.confirm_deletion_job,
+}
+
+GeoHandler.deprecated_routes = {
+    ("POST", "/v1/geodata/imports/manual"),
+    ("POST", "/v1/geodata/imports/upload"),
+    ("POST", "/v1/geodata/proposals/draw"),
+    ("POST", "/v1/geodata/entities/{entityId}/review"),
+    ("POST", "/v1/geodata/entities/{entityId}/status"),
+    ("POST", "/v1/geodata/entities/{entityId}/geometry"),
+    ("POST", "/v1/geodata/entities/{entityId}/location"),
+    ("POST", "/v1/geodata/entities/{entityId}/entity-type"),
+    ("POST", "/v1/geodata/entities/{entityId}/name"),
+    ("POST", "/v1/geodata/entities/{entityId}/delete"),
 }
 
 

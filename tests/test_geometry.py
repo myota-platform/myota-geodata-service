@@ -148,6 +148,35 @@ class GeometryWayTests(unittest.TestCase):
         finally:
             GeoHandler.store.items = self.previous_items
 
+    def test_phase2_resource_aliases_cover_review_metadata_categories_and_bbox(self):
+        reviewed = GeoHandler.review_resource(None, {"entityId": "entity-1", "_body": {
+            "status": "APPROVED", "reviewerId": "admin", "note": "Resource review"
+        }})
+        self.assertEqual(reviewed["status"], "APPROVED")
+        changed = GeoHandler.patch_entity_metadata(None, {"entityId": "entity-1", "_body": {
+            "editorId": "admin", "name": "Sevilla trail resource", "note": "Resource metadata"
+        }})
+        self.assertEqual(changed["name"], "Sevilla trail resource")
+        categorised = GeoHandler.put_entity_categories(None, {"entityId": "entity-1", "_body": {
+            "entityTypes": ["TRAIL", "MUNICIPAL_PARK"], "editorId": "admin"
+        }})
+        self.assertEqual(categorised["entityTypes"], ["TRAIL", "MUNICIPAL_PARK"])
+        GeoHandler.store.items["entity-1"]["geometry"] = {"type": "Point", "coordinates": [-5.99, 37.39]}
+        listed = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?bbox=-6.00,37.38,-5.98,37.40&pageSize=10"})
+        self.assertEqual([item["id"] for item in listed["items"]], ["entity-1"])
+
+    def test_deletion_job_requires_confirmation_and_cascades_entity(self):
+        GeoHandler.store.items["entity-1"]["status"] = "REJECTED"
+        job = GeoHandler.create_deletion_job(None, {"_body": {
+            "entityId": "entity-1", "requestedBy": "admin"
+        }})
+        self.assertEqual(job["status"], "AWAITING_CONFIRMATION")
+        completed = GeoHandler.confirm_deletion_job(None, {"jobId": job["id"], "_body": {
+            "confirmation": "DELETE", "deletedBy": "admin"
+        }})
+        self.assertEqual(completed["status"], "COMPLETED")
+        self.assertNotIn("entity-1", GeoHandler.store.items)
+
 
 if __name__ == "__main__":
     unittest.main()

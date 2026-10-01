@@ -362,6 +362,7 @@ class JsonHandler(BaseHTTPRequestHandler):
     service = "myota-service"
     routes: dict[tuple[str, str], Callable[["JsonHandler", dict[str, str]], Any]] = {}
     store = Store()
+    deprecated_routes: set[tuple[str, str]] = set()
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -379,7 +380,10 @@ class JsonHandler(BaseHTTPRequestHandler):
             self.send_header("X-Correlation-ID", self.correlation_id)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Correlation-ID")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+            if getattr(self, "current_route", None) in self.deprecated_routes:
+                self.send_header("Deprecation", "true")
+                self.send_header("Sunset", os.environ.get("MYOTA_LEGACY_ROUTE_SUNSET", "2027-04-01T00:00:00Z"))
             self.send_header("API-Version", "v1")
             self.end_headers()
             if data:
@@ -406,6 +410,15 @@ class JsonHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch("POST")
 
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
+
+    def do_PATCH(self) -> None:
+        self._dispatch("PATCH")
+
+    def do_DELETE(self) -> None:
+        self._dispatch("DELETE")
+
     def _dispatch(self, method: str) -> None:
         self.request_id, self.correlation_id = self._request_id(), self.headers.get("X-Correlation-ID") or new_id()
         if self.path == "/healthz":
@@ -428,7 +441,8 @@ class JsonHandler(BaseHTTPRequestHandler):
                     break
             if matched:
                 try:
-                    if method == "POST":
+                    self.current_route = (method, pattern)
+                    if method in {"POST", "PUT", "PATCH", "DELETE"}:
                         content_type = self.headers.get("Content-Type", "")
                         body = read_multipart(self) if content_type.lower().startswith("multipart/form-data") else read_json(self)
                     else:
@@ -439,7 +453,7 @@ class JsonHandler(BaseHTTPRequestHandler):
                                        "User-Agent": self.headers.get("User-Agent", ""),
                                        "Remote-Addr": self.client_address[0], "_http": "1"})
                     status = result.pop("_status", 200) if isinstance(result, dict) else 200
-                    if method == "POST":
+                    if method in {"POST", "PUT", "PATCH", "DELETE"}:
                         self.store.persist()
                     self._send(status, result)
                 except ValueError as exc:

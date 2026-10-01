@@ -23,6 +23,11 @@ separate decision.
   country subdivision, optional province/county, and city/municipality.
 - Lifecycle transitions are API-owned and audited; QGIS is a controlled
   graphical editing tool, not an approval bypass.
+- Phase 2 resource APIs are available for consolidated imports, proposals,
+  metadata, categories, geometry, reviews, bbox-filtered entity collections,
+  and confirmed cross-service deletion jobs. Existing action routes remain
+  aliases with deprecation headers; see the
+  [Phase 2 resource model](https://github.com/myota-platform/myota-docs/blob/main/docs/api-phase2-geodata-resource-model.md).
 
 Unit tests may use an in-memory adapter. Durable Compose/Kubernetes operation
 uses PostgreSQL/PostGIS and SeaweedFS through myota-deploy. The remaining
