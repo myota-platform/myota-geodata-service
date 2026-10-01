@@ -20,6 +20,7 @@ from email.policy import default as email_default
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from metrics import METRICS
 
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
 # sizeable pasted FeatureCollection. Deployments may lower this explicitly,
@@ -364,6 +365,10 @@ class JsonHandler(BaseHTTPRequestHandler):
     store = Store()
     deprecated_routes: set[tuple[str, str]] = set()
 
+    @classmethod
+    def metrics_extra(cls) -> dict[str, float]:
+        return {}
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -371,6 +376,11 @@ class JsonHandler(BaseHTTPRequestHandler):
         return self.headers.get("X-Request-ID") or new_id()
 
     def _send(self, status: int, payload: Any) -> None:
+        route = getattr(self, "current_route", None)
+        route_name = route[1] if route else getattr(self, "path", "unknown").split("?", 1)[0]
+        METRICS.inc("myota_http_requests_total", {"service": self.service, "method": getattr(self, "command", "UNKNOWN"), "route": route_name, "status": status})
+        if route in self.deprecated_routes:
+            METRICS.inc("myota_legacy_route_requests_total", {"service": self.service, "method": route[0], "route": route[1]})
         data = b"" if status == 204 else json.dumps(payload, separators=(",", ":"), default=json_default).encode("utf-8")
         try:
             self.send_response(status)
@@ -400,6 +410,14 @@ class JsonHandler(BaseHTTPRequestHandler):
                             "status": status, "code": code, "detail": detail,
                             "requestId": self.request_id, "correlationId": self.correlation_id})
 
+    def _send_metrics(self) -> None:
+        data = METRICS.render().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_OPTIONS(self) -> None:
         self.request_id, self.correlation_id = self._request_id(), self.headers.get("X-Correlation-ID") or new_id()
         self._send(204, {})
@@ -421,6 +439,10 @@ class JsonHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         self.request_id, self.correlation_id = self._request_id(), self.headers.get("X-Correlation-ID") or new_id()
+        self.command = method
+        if self.path.split("?", 1)[0] == "/metrics":
+            self._send_metrics()
+            return
         if self.path == "/healthz":
             self._send(200, {"status": "ok", "service": self.service, "time": now(), "durable": self.store.durable})
             return
