@@ -1637,7 +1637,7 @@ class GeoHandler(JsonHandler):
         global_admin = any(role.get("role") in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"} for role in claims.get("roles", []))
         if not global_admin and entity.get("status") != "REJECTED":
             raise ValueError("only global administrators can delete non-rejected entities")
-        impact = GeoHandler._activity_request(p, f"/v1/activations/admin/entities/{entity['id']}/deletion-impact")
+        impact = GeoHandler._activity_request(p, f"/v1/activations/entity-deletion-impacts/{entity['id']}")
         job = {"id": new_id(), "entityId": entity["id"], "status": "AWAITING_CONFIRMATION",
                "requestedBy": body["requestedBy"], "impact": impact, "confirmationRequired": True,
                "createdAt": now(), "updatedAt": now()}
@@ -1659,8 +1659,8 @@ class GeoHandler(JsonHandler):
         job.update({"status": "PROCESSING", "updatedAt": now()})
         GeoHandler.store.persist()
         try:
-            cascade = GeoHandler._activity_request(p, f"/v1/activations/admin/entities/{job['entityId']}/cascade-delete", "POST",
-                                                    {"deletedBy": p.get("_body", {}).get("deletedBy") or job["requestedBy"]})
+            cascade = GeoHandler._activity_request(p, "/v1/activations/entity-deletion-cascades", "POST",
+                                                    {"entityId": job["entityId"], "deletedBy": p.get("_body", {}).get("deletedBy") or job["requestedBy"]})
             deleted = GeoHandler.delete_entity(None, {**p, "entityId": job["entityId"],
                                                        "_body": {"deletedBy": p.get("_body", {}).get("deletedBy") or job["requestedBy"]}})
             job.update({"status": "COMPLETED", "cascade": cascade, "deleted": deleted,
