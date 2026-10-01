@@ -1703,6 +1703,7 @@ GeoHandler.deprecated_routes = {
     ("POST", "/v1/geodata/imports/manual"),
     ("POST", "/v1/geodata/imports/upload"),
     ("POST", "/v1/geodata/proposals/draw"),
+    ("GET", "/v1/geodata/bbox"),
     ("POST", "/v1/geodata/entities/{entityId}/review"),
     ("POST", "/v1/geodata/entities/{entityId}/status"),
     ("POST", "/v1/geodata/entities/{entityId}/geometry"),
