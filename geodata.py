@@ -1056,8 +1056,6 @@ class GeoHandler(JsonHandler):
                     candidate = candidates.get(candidate_id)
                     if not candidate:
                         raise ValueError("pre-processed candidate no longer exists")
-                    if candidate.get("validationStatus") != "CONFIRMED":
-                        raise ValueError("candidate must be confirmed before processing")
                     entity_id = candidate.get("entity", {}).get("id")
                     was_existing = entity_id in GeoHandler.store.items
                     GeoHandler._materialize_import_candidate(candidate, queue["targetStatus"], queue["requestedBy"], queue.get("note"))
@@ -1105,8 +1103,6 @@ class GeoHandler(JsonHandler):
             candidate = candidates.get(str(candidate_id))
             if not candidate or candidate.get("importRunId") != p["runId"]:
                 raise ValueError(f"candidate {candidate_id} does not belong to import run")
-            if candidate.get("validationStatus") != "CONFIRMED":
-                raise ValueError("all selected candidates must be confirmed before processing")
             if target_status == "APPROVED":
                 GeoHandler._authorize_review(p, candidate.get("entity") or {})
         queue_id = new_id()

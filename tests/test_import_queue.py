@@ -261,6 +261,27 @@ class ImportQueueTests(unittest.TestCase):
         entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
         self.assertEqual(entity["status"], "APPROVED")
 
+    def test_pending_records_can_be_promoted_without_a_confirmation_step(self):
+        result = GeoHandler.enqueue_import(None, {"_body": {
+            "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+            "source": {"name": "direct promotion import"},
+            "features": [{"type": "Feature", "properties": {"name": "Directly promoted trail"},
+                          "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}],
+        }})
+        run_id = result["importRunId"]
+        candidate_id = result["preprocessed"][0]
+        self.assertEqual(GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": "?pageSize=10"})["total"], 1)
+
+        queue = GeoHandler.process_import_candidates(None, {"runId": run_id, "_body": {
+            "candidateIds": [candidate_id], "targetStatus": "CANDIDATE", "processorId": "admin-1",
+        }})
+
+        self.assertEqual(queue["status"], "COMPLETED")
+        self.assertEqual(queue["result"]["errors"], [])
+        self.assertEqual(GeoHandler.list_import_candidates(None, {"runId": run_id, "_path": "?pageSize=10"})["total"], 0)
+        entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
+        self.assertEqual(entity["status"], "CANDIDATE")
+
     def test_rejected_records_are_removed_from_the_import(self):
         result = GeoHandler.enqueue_import(None, {"_body": {
             "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",

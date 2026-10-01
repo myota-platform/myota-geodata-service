@@ -182,11 +182,12 @@ It includes status/timestamps, source manifest information, candidate counts,
 and counts for pre-processed, created, updated, skipped, disappeared, and
 failed features. Use `GET /v1/geodata/imports/{runId}/candidates` for a compact
 paged validation queue containing only pending records. `POST
-.../candidates/validate` confirms selected records for later promotion or
-removes them when `validationStatus=REJECTED`. Confirmed, rejected, and
-processed records are not returned by the queue; successful promotion deletes
-the staged record. `POST /v1/geodata/imports/{runId}/process` requires confirmed IDs and
-an explicit `CANDIDATE` or `APPROVED` target; it emits
+.../candidates/validate` remains available for explicit confirmation or
+removes records when `validationStatus=REJECTED`. The admin import detail uses
+`POST /v1/geodata/imports/{runId}/process` directly: it accepts pending or
+previously confirmed IDs and an explicit `CANDIDATE` or `APPROVED` target.
+Successful promotion deletes the staged record; rejection also removes it from
+the import detail. The promotion request emits
 `geodata.import.processing.queued.v1` to the
 `myota.geodata.import.process.v1` subject. The local service runs a bounded
 fallback worker, while production NATS consumers process the same durable
