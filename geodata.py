@@ -401,6 +401,7 @@ class GeoHandler(JsonHandler):
                              "targetStatus": None, "processedEntityId": None, "processedAt": None,
                              "entity": entity}
                 import_candidates[candidate_id] = candidate
+                GeoHandler.store.mark_import_candidate_dirty(candidate_id)
                 preprocessed.append(candidate_id)
                 records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
             except Exception as error:
@@ -972,8 +973,10 @@ class GeoHandler(JsonHandler):
                     "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s", (actor, run_id))
         for candidate_id in candidate_ids:
             candidates.pop(candidate_id, None)
+            GeoHandler.store.mark_import_candidate_deleted(candidate_id)
         for queue_id in queue_ids:
             queues.pop(queue_id, None)
+            GeoHandler.store.mark_import_queue_deleted(queue_id)
         run.update({"status": "PROCESSED", "processedAt": processed_at, "processedBy": actor,
                     "lastError": None, "heartbeatAt": None, "leaseUntil": None,
                     "stagedRecordsDiscarded": len(candidate_ids), "processingQueuesDiscarded": len(queue_ids)})
@@ -1019,6 +1022,7 @@ class GeoHandler(JsonHandler):
                         connection.execute("DELETE FROM geodata_import_candidate WHERE id = %s", (candidate_id,))
             for candidate_id in selected:
                 candidates.pop(candidate_id, None)
+                GeoHandler.store.mark_import_candidate_deleted(candidate_id)
             GeoHandler.store.event("geodata.import.candidates.rejected.v1", "import_run", run_id,
                                    {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
             response_status = "REJECTED"
@@ -1031,6 +1035,7 @@ class GeoHandler(JsonHandler):
                 candidate["validationNote"] = body.get("note")
                 candidate["validatedBy"] = body["reviewerId"]
                 candidate["validatedAt"] = now()
+                GeoHandler.store.mark_import_candidate_dirty(candidate_id)
             GeoHandler.store.event("geodata.import.candidates.validated.v1", "import_run", run_id,
                                    {"importRunId": run_id, "candidateIds": selected, "reviewerId": body["reviewerId"]})
             response_status = "CONFIRMED"
@@ -1047,6 +1052,7 @@ class GeoHandler(JsonHandler):
             if queue.get("status") == "COMPLETED":
                 return
             queue.update({"status": "PROCESSING", "startedAt": now()})
+            GeoHandler.store.mark_import_queue_dirty(queue_id)
             GeoHandler.store.persist(include_import_state=True)
         created, updated, errors = [], [], []
         candidates = GeoHandler.store.data.setdefault("importCandidates", {})
@@ -1063,6 +1069,7 @@ class GeoHandler(JsonHandler):
                         with GeoHandler.store.transaction() as connection:
                             connection.execute("DELETE FROM geodata_import_candidate WHERE id = %s", (candidate_id,))
                     candidates.pop(candidate_id, None)
+                    GeoHandler.store.mark_import_candidate_deleted(candidate_id)
                     (updated if was_existing else created).append(entity_id)
                     GeoHandler.store.persist(include_import_state=True)
             except (TypeError, ValueError) as error:
@@ -1071,6 +1078,7 @@ class GeoHandler(JsonHandler):
             queue = GeoHandler.store.data["importProcessingQueues"][queue_id]
             queue.update({"status": "COMPLETED" if not errors else "FAILED", "completedAt": now(),
                           "result": {"created": created, "updated": updated, "errors": errors}})
+            GeoHandler.store.mark_import_queue_dirty(queue_id)
             run = GeoHandler.store.data.setdefault("importRuns", {}).get(queue["importRunId"])
             if run:
                 run.setdefault("stats", {}).update({"processed": len(created) + len(updated),
@@ -1110,6 +1118,7 @@ class GeoHandler(JsonHandler):
                  "targetStatus": target_status, "requestedBy": body["processorId"], "note": body.get("note"),
                  "status": "QUEUED", "requestedAt": now(), "startedAt": None, "completedAt": None, "result": {}}
         GeoHandler.store.data.setdefault("importProcessingQueues", {})[queue_id] = queue
+        GeoHandler.store.mark_import_queue_dirty(queue_id)
         GeoHandler.store.event("geodata.import.processing.queued.v1", "import_processing_queue", queue_id,
                                {"queueId": queue_id, "importRunId": p["runId"], "candidateIds": queue["candidateIds"],
                                 "targetStatus": target_status, "requestedBy": body["processorId"],

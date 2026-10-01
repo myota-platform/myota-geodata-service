@@ -36,6 +36,10 @@ class _Connection:
             return _Result(many=self.entity_rows)
         if "FROM import_run" in statement:
             return _Result(many=[])
+        if "FROM geodata_import_candidate" in statement:
+            return _Result(many=[])
+        if "FROM geodata_import_processing_queue" in statement:
+            return _Result(many=[])
         raise AssertionError(f"unexpected query: {statement}")
 
 

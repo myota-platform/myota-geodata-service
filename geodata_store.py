@@ -35,6 +35,29 @@ def _entity_categories(entity: dict[str, Any]) -> list[str]:
 
 
 class GeodataStore(Store):
+    def __init__(self, service: str = "geodata", dsn_env: str | None = None) -> None:
+        super().__init__(service, dsn_env)
+        self._dirty_import_candidate_ids: set[str] = set()
+        self._deleted_import_candidate_ids: set[str] = set()
+        self._dirty_import_queue_ids: set[str] = set()
+        self._deleted_import_queue_ids: set[str] = set()
+
+    def mark_import_candidate_dirty(self, candidate_id: str) -> None:
+        self._dirty_import_candidate_ids.add(str(candidate_id))
+        self._deleted_import_candidate_ids.discard(str(candidate_id))
+
+    def mark_import_candidate_deleted(self, candidate_id: str) -> None:
+        self._deleted_import_candidate_ids.add(str(candidate_id))
+        self._dirty_import_candidate_ids.discard(str(candidate_id))
+
+    def mark_import_queue_dirty(self, queue_id: str) -> None:
+        self._dirty_import_queue_ids.add(str(queue_id))
+        self._deleted_import_queue_ids.discard(str(queue_id))
+
+    def mark_import_queue_deleted(self, queue_id: str) -> None:
+        self._deleted_import_queue_ids.add(str(queue_id))
+        self._dirty_import_queue_ids.discard(str(queue_id))
+
     def _category_id(self, connection: Any, code: str, geometry_type: str) -> uuid.UUID:
         row = connection.execute(
             "SELECT id FROM entity_type WHERE programme_id IS NULL AND code = %s LIMIT 1", (code,)
@@ -125,7 +148,12 @@ class GeodataStore(Store):
                      run.get("status") or "QUEUED", int(run.get("attemptCount") or 0), run.get("heartbeatAt"),
                      run.get("leaseUntil"), run.get("lastError"), run.get("processedAt"), run.get("processedBy")),
                 )
-            for candidate in self.data.get("importCandidates", {}).values():
+            for candidate_id in self._deleted_import_candidate_ids:
+                connection.execute("DELETE FROM geodata_import_candidate WHERE id = %s", (_uuid(candidate_id),))
+            for candidate_id in self._dirty_import_candidate_ids:
+                candidate = self.data.get("importCandidates", {}).get(candidate_id)
+                if not candidate:
+                    continue
                 entity = candidate.get("entity") or {}
                 geometry = entity.get("geometry") or {}
                 candidate_id = _uuid(candidate.get("id"))
@@ -144,7 +172,12 @@ class GeodataStore(Store):
                      candidate.get("validationNote"), candidate.get("validatedBy"), candidate.get("validatedAt"), candidate.get("targetStatus"),
                      _uuid(candidate.get("processedEntityId")), candidate.get("processedAt")),
                 )
-            for queue in self.data.get("importProcessingQueues", {}).values():
+            for queue_id in self._deleted_import_queue_ids:
+                connection.execute("DELETE FROM geodata_import_processing_queue WHERE id = %s", (_uuid(queue_id),))
+            for queue_id in self._dirty_import_queue_ids:
+                queue = self.data.get("importProcessingQueues", {}).get(queue_id)
+                if not queue:
+                    continue
                 queue_id = _uuid(queue.get("id"))
                 run_id = _uuid(queue.get("importRunId"))
                 if not queue_id or not run_id:
@@ -175,6 +208,10 @@ class GeodataStore(Store):
         super().hydrate()
         if not self.durable:
             return
+        self._dirty_import_candidate_ids.clear()
+        self._deleted_import_candidate_ids.clear()
+        self._dirty_import_queue_ids.clear()
+        self._deleted_import_queue_ids.clear()
         with self.transaction() as connection:
             rows = connection.execute(
                 "SELECT id::text, programme_slug, entity_type_code, name, lifecycle_status, ST_AsGeoJSON(geom)::jsonb, public_properties, source_state, jurisdiction, attachments FROM geodata_entity"
@@ -188,6 +225,16 @@ class GeodataStore(Store):
             import_rows = connection.execute(
                 "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
                 "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by FROM import_run"
+            ).fetchall()
+            candidate_rows = connection.execute(
+                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, programme_slug, "
+                "entity_type_codes, candidate_source, source_ref, source_hash, provenance, entity_payload, "
+                "validation_status, validation_note, validated_by, validated_at, target_status, "
+                "processed_entity_id::text, processed_at FROM geodata_import_candidate"
+            ).fetchall()
+            queue_rows = connection.execute(
+                "SELECT id::text, import_run_id::text, candidate_ids, target_status, requested_by, status, "
+                "result, error, requested_at, started_at, completed_at FROM geodata_import_processing_queue"
             ).fetchall()
         import_runs = self.data.setdefault("importRuns", {})
         for row in import_rows:
@@ -216,6 +263,50 @@ class GeodataStore(Store):
                 "processedAt": row[11].isoformat().replace("+00:00", "Z") if row[11] else None,
                 "processedBy": row[12],
             })
+        snapshot_candidates = self.data.get("importCandidates") or {}
+        import_candidates: dict[str, dict[str, Any]] = {}
+        for row in candidate_rows:
+            entity = row[10] if isinstance(row[10], dict) else json.loads(row[10] or "{}")
+            if not entity.get("geometry"):
+                # The relational geometry is intentionally not selected here:
+                # entity_payload is the canonical normalized candidate payload.
+                continue
+            import_candidates[row[0]] = {
+                "id": row[0], "importRunId": row[1], "ordinal": row[2],
+                "existingEntityId": row[3], "candidateSource": row[7] or {},
+                "validationStatus": row[11], "validationNote": row[12],
+                "validatedBy": row[13], "validatedAt": row[14].isoformat().replace("+00:00", "Z") if row[14] else None,
+                "targetStatus": row[15], "processedEntityId": row[16],
+                "processedAt": row[17].isoformat().replace("+00:00", "Z") if row[17] else None,
+                "dedupeWarning": entity.get("dedupeWarning"),
+                "possibleDuplicates": entity.get("possibleDuplicates") or [], "entity": entity,
+            }
+        if not candidate_rows and snapshot_candidates:
+            # Older deployments kept staged records only in service_state. Keep
+            # them available for a one-time migration into the relational
+            # tables instead of silently losing an in-flight import on restart.
+            import_candidates = snapshot_candidates
+            self._dirty_import_candidate_ids.update(import_candidates)
+        self.data["importCandidates"] = import_candidates
+        snapshot_queues = self.data.get("importProcessingQueues") or {}
+        import_queues: dict[str, dict[str, Any]] = {}
+        for row in queue_rows:
+            import_queues[row[0]] = {
+                "id": row[0], "importRunId": row[1],
+                "candidateIds": row[2] if isinstance(row[2], list) else json.loads(row[2] or "[]"),
+                "targetStatus": row[3], "requestedBy": row[4], "status": row[5],
+                "result": row[6] if isinstance(row[6], dict) else json.loads(row[6] or "{}"),
+                "error": row[7],
+                "requestedAt": row[8].isoformat().replace("+00:00", "Z") if row[8] else None,
+                "startedAt": row[9].isoformat().replace("+00:00", "Z") if row[9] else None,
+                "completedAt": row[10].isoformat().replace("+00:00", "Z") if row[10] else None,
+            }
+        if not queue_rows and snapshot_queues:
+            import_queues = snapshot_queues
+            self._dirty_import_queue_ids.update(import_queues)
+        self.data["importProcessingQueues"] = import_queues
+        self._deleted_import_candidate_ids.clear()
+        self._deleted_import_queue_ids.clear()
         sources = {row[0]: row for row in source_rows}
         categories = {}
         for entity_id, category_code, _ in category_rows:
@@ -281,4 +372,13 @@ class GeodataStore(Store):
 
     def persist(self, include_import_state: bool = False) -> None:
         self._sync_relational(include_import_state)
-        super().persist()
+        # Candidate payloads are durable in PostGIS. Keep the compatibility
+        # snapshot small so a large import does not rewrite every staged
+        # feature on every review action.
+        compact_data = {key: value for key, value in self.data.items()
+                        if key not in {"importCandidates", "importProcessingQueues"}}
+        super().persist({"items": self.items, "events": self.events, "data": compact_data})
+        self._dirty_import_candidate_ids.clear()
+        self._deleted_import_candidate_ids.clear()
+        self._dirty_import_queue_ids.clear()
+        self._deleted_import_queue_ids.clear()

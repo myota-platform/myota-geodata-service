@@ -188,14 +188,15 @@ class Store:
             self.idempotency = {key: response for key, response in rows}
         self._hydrated = True
 
-    def persist(self) -> None:
+    def persist(self, state: dict[str, Any] | None = None) -> None:
         if not self.durable:
             return
+        snapshot = state if state is not None else {"items": self.items, "events": self.events, "data": self.data}
         with self.transaction() as connection:
             connection.execute(
                 "INSERT INTO service_state(service, state, updated_at) VALUES (%s, %s::jsonb, now()) "
                 "ON CONFLICT (service) DO UPDATE SET state = EXCLUDED.state, updated_at = now()",
-                (self.service, json.dumps({"items": self.items, "events": self.events, "data": self.data}, default=json_default)))
+                (self.service, json.dumps(snapshot, default=json_default)))
             for event in self.events:
                 connection.execute(
                     "INSERT INTO outbox_event(event_id, event_type, producer, aggregate_type, aggregate_id, payload, occurred_at) "
