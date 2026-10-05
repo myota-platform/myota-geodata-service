@@ -85,6 +85,58 @@ class GeoHandler(JsonHandler):
             result[f'myota_geodata_import_runs_by_status_total{{status="{status}"}}'] = float(sum(str(run.get("status", "")).upper() == status for run in runs))
         for validation in ("PENDING", "CONFIRMED", "REJECTED", "PROCESSED"):
             result[f'myota_geodata_import_candidates_by_validation_total{{status="{validation}"}}'] = float(sum(str(candidate.get("validationStatus", "PENDING")).upper() == validation for candidate in candidates))
+        queued = [run for run in runs if str(run.get("status", "")).upper() in {"QUEUED", "UPLOAD_PENDING"}]
+        processing = [run for run in runs if str(run.get("status", "")).upper() == "PROCESSING"]
+        result["myota_geodata_import_queue_depth"] = float(len(queued))
+        result["myota_geodata_import_processing_runs"] = float(len(processing))
+        result["myota_geodata_import_attempt_count_sum"] = float(sum(int(run.get("attemptCount") or 0) for run in runs))
+        result["myota_geodata_import_features_preprocessed_sum"] = float(sum(
+            int((run.get("stats") or {}).get("preprocessed", 0) or 0) for run in runs))
+        result["myota_geodata_import_features_promoted_sum"] = float(sum(
+            int((run.get("stats") or {}).get("created", 0) or 0) + int((run.get("stats") or {}).get("updated", 0) or 0)
+            for run in runs))
+
+        def seconds_since(value: Any) -> float | None:
+            if not value:
+                return None
+            try:
+                timestamp = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                timestamp = timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp
+                return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+            except (TypeError, ValueError):
+                return None
+
+        queue_ages = [age for run in queued if (age := seconds_since(run.get("queuedAt") or run.get("startedAt"))) is not None]
+        heartbeat_ages = [age for run in processing if (age := seconds_since(run.get("heartbeatAt") or run.get("startedAt"))) is not None]
+        result["myota_geodata_import_oldest_queued_age_seconds"] = max(queue_ages, default=0.0)
+        result["myota_geodata_import_oldest_processing_heartbeat_age_seconds"] = max(heartbeat_ages, default=0.0)
+
+        try:
+            pool_stats = cls.store._ensure_pool().get_stats()
+            result.update({
+                "myota_geodata_postgres_pool_connections": float(pool_stats.get("pool_size", 0)),
+                "myota_geodata_postgres_pool_available_connections": float(pool_stats.get("pool_available", 0)),
+                "myota_geodata_postgres_pool_waiting_requests": float(pool_stats.get("requests_waiting", 0)),
+                "myota_geodata_postgres_pool_wait_milliseconds_total": float(pool_stats.get("requests_wait_ms", 0)),
+            })
+            with cls.store.transaction() as connection:
+                row = connection.execute(
+                    "SELECT count(*) FILTER (WHERE state = 'active' AND pid <> pg_backend_pid()), "
+                    "count(*) FILTER (WHERE wait_event_type = 'Lock'), "
+                    "(SELECT setting::bigint FROM pg_settings WHERE name = 'max_connections') "
+                    "FROM pg_stat_activity WHERE datname = current_database()"
+                ).fetchone()
+                result["myota_geodata_postgres_active_connections"] = float(row[0] or 0)
+                result["myota_geodata_postgres_lock_waiting_connections"] = float(row[1] or 0)
+                result["myota_geodata_postgres_max_connections"] = float(row[2] or 0)
+                outbox = connection.execute(
+                    "SELECT count(*), COALESCE(extract(epoch FROM now() - min(occurred_at)), 0) "
+                    "FROM outbox_event WHERE published_at IS NULL"
+                ).fetchone()
+                result["myota_geodata_outbox_pending_events"] = float(outbox[0] or 0)
+                result["myota_geodata_outbox_oldest_pending_age_seconds"] = float(outbox[1] or 0)
+        except Exception:
+            result["myota_geodata_postgres_pool_metrics_available"] = 0.0
         return result
 
     @staticmethod

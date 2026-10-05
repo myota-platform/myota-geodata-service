@@ -448,7 +448,12 @@ class JsonHandler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         self.request_id, self.correlation_id = self._request_id(), self.headers.get("X-Correlation-ID") or new_id()
         self.command = method
-        self._otel_request = telemetry_for(self.service).start_request(method, self.path.split("?", 1)[0])
+        try:
+            request_body_size = max(0, int(self.headers.get("Content-Length", "0")))
+        except ValueError:
+            request_body_size = 0
+        self._otel_request = telemetry_for(self.service).start_request(
+            method, self.path.split("?", 1)[0], request_body_size)
         if self.path.split("?", 1)[0] == "/metrics":
             self._send_metrics()
             return

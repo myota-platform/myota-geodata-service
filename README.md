@@ -44,9 +44,42 @@ large-scale source workers, public data publication, stewardship workflow, and
 production operations are tracked in the
 [charter gap analysis](https://github.com/myota-platform/myota-docs/blob/main/docs/charter-gap-analysis.md).
 
-The `/metrics` endpoint exposes durable entity, geometry, category, import-run
-and preprocessing-candidate counts. With `MYOTA_OTEL_ENABLED=1`, HTTP request
-metrics and traces are exported to the OpenTelemetry Collector.
+The `/metrics` endpoint exposes durable entity, geometry, category, import,
+pre-processing, PostgreSQL pool/activity, lock-wait and outbox metrics. With
+`MYOTA_OTEL_ENABLED=1`, HTTP request rate/latency, active requests, request body
+size, and per-process CPU/memory telemetry are exported to the OpenTelemetry
+Collector.
+
+### Read-only load baseline (Grafana k6)
+
+`loadtests/geodata-baseline.js` is a small, read-only HTTP baseline for the
+production API. It samples up to 10 public entity records during k6 `setup`,
+then exercises health, paged catalogue, bounding-box catalogue, and entity
+detail reads. The sample IDs and bounding boxes exist only in the k6 process
+memory. The test does not create entities/imports, upload files, or write any
+application data, so successful completion leaves no fixture rows or objects
+to clean up. It does produce ordinary request telemetry in production, which
+is intentionally retained for operations.
+
+Install the external runner on macOS with Homebrew (`brew install k6`), as
+documented by [Grafana k6](https://grafana.com/docs/k6/latest/set-up/install-k6/).
+Run the conservative defaults (2 virtual users, 60 seconds):
+
+```bash
+MYOTA_ALLOW_PRODUCTION=YES k6 run loadtests/geodata-baseline.js
+```
+
+The target defaults to `https://api.myota.top`. Non-production targets can be
+selected with `MYOTA_BASE_URL`; production requires the explicit acknowledgement
+above. The script caps production runs at 4 virtual users and 5 minutes, and
+paces requests to at most about 2 per second per user. Tune
+`MYOTA_LOAD_TEST_VUS` (1–4) and `MYOTA_LOAD_TEST_DURATION` (1–300 seconds or
+1–5 minutes) only in coordination with the operator. The workload is closed
+loop and read-only; it is not a large-file upload test or a benchmark of
+synthetic database cardinality.
+
+View service, request-size, process, PostgreSQL-pool, import, and outbox metrics
+in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 
 ## Run the vertical slice
 
