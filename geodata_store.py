@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from common import Store, json_default, now
+from metrics import METRICS
 
 
 def _uuid(value: Any) -> uuid.UUID | None:
@@ -152,7 +154,11 @@ class GeodataStore(Store):
             return
         with self.transaction() as connection:
             for entity in self.items.values():
-                self._upsert_entity(connection, entity)
+                started = time.perf_counter()
+                try:
+                    self._upsert_entity(connection, entity)
+                finally:
+                    self._observe_postgis_query("entity_upsert", started)
             if not include_import_state:
                 return
             import_runs = self.data.get("importRuns", {})
@@ -238,6 +244,44 @@ class GeodataStore(Store):
             connection.execute("DELETE FROM entity_review WHERE entity_id = %s", (entity_uuid,))
             connection.execute("DELETE FROM conflation_candidate WHERE left_entity_id = %s OR right_entity_id = %s", (entity_uuid, entity_uuid))
             connection.execute("DELETE FROM geodata_entity WHERE id = %s", (entity_uuid,))
+
+    @staticmethod
+    def _observe_postgis_query(query: str, started: float) -> None:
+        duration = time.perf_counter() - started
+        METRICS.observe("myota_geodata_postgis_query_duration_seconds", duration, {"query": query})
+        try:
+            threshold_ms = max(0.0, float(os.environ.get("MYOTA_SLOW_QUERY_THRESHOLD_MS", "250")))
+        except ValueError:
+            threshold_ms = 250.0
+        if duration * 1000 >= threshold_ms:
+            METRICS.inc("myota_geodata_slow_queries_total", {"query": query})
+
+    def query_bbox(self, bounds: tuple[float, float, float, float], limit: int,
+                   programme: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        """Run the map query through the PostGIS GiST index and time the SQL."""
+        if not self.durable:
+            raise RuntimeError("PostGIS bounding-box query requires durable storage")
+        started = time.perf_counter()
+        try:
+            with self.transaction() as connection:
+                rows = connection.execute(
+                    "SELECT id::text, programme_slug, entity_type_code, name, lifecycle_status, "
+                    "ST_AsGeoJSON(geom)::jsonb, public_properties "
+                    "FROM geodata_entity "
+                    "WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326) "
+                    "AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326)) "
+                    "AND (%s IS NULL OR programme_slug = %s) "
+                    "AND (%s IS NULL OR lifecycle_status = %s) "
+                    "ORDER BY name, id LIMIT %s",
+                    (*bounds, *bounds, programme, programme, status, status, limit),
+                ).fetchall()
+            return [{
+                "id": row[0], "programmeSlug": row[1], "entityType": row[2], "name": row[3],
+                "status": row[4], "geometry": row[5],
+                "publicProperties": row[6] if isinstance(row[6], dict) else json.loads(row[6] or "{}"),
+            } for row in rows]
+        finally:
+            self._observe_postgis_query("bbox", started)
 
     def hydrate(self) -> None:
         super().hydrate()

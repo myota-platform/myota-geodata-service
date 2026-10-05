@@ -1042,6 +1042,115 @@ class GeoHandler(JsonHandler):
         return {**GeoHandler._import_run_view(run), "finalized": True}
 
     @staticmethod
+    def cleanup_load_test_run(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        """Permanently remove one explicitly tagged test run in non-production only."""
+        environment = os.environ.get("MYOTA_ENV", "").lower()
+        if os.environ.get("MYOTA_LOAD_TEST_CLEANUP_ENABLED") != "1" or environment not in {"development", "test", "staging"}:
+            raise PermissionError("load-test cleanup is disabled outside explicitly enabled non-production environments")
+        authorization = p.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            raise PermissionError("Bearer authentication is required")
+        claims = verify_token(authorization[7:])
+        roles = claims.get("roles", [])
+        if not isinstance(roles, list):
+            roles = []
+        scopes = claims.get("scp", [])
+        scopes = scopes if isinstance(scopes, list) else [scopes]
+        if not any((role.get("role") if isinstance(role, dict) else role) in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"}
+                   for role in roles) and "*" not in set(scopes):
+            raise PermissionError("global administrator access is required")
+
+        test_run_id = p["testRunId"]
+        if not re.fullmatch(r"lt-[A-Za-z0-9._-]{1,77}", test_run_id):
+            raise ValueError("testRunId must be a generated lt- fixture identifier")
+        confirmation = (p.get("_body") or {}).get("confirmation")
+        if confirmation != f"DELETE LOAD TEST DATA {test_run_id}":
+            raise ValueError("confirmation must exactly match DELETE LOAD TEST DATA <testRunId>")
+        GeoHandler.store.refresh_import_runs()
+        runs = GeoHandler.store.data.setdefault("importRuns", {})
+        matching_runs = {run_id: run for run_id, run in runs.items()
+                         if (run.get("source") or {}).get("loadTestRunId") == test_run_id}
+        if any(str(run.get("status", "")).upper() in {"UPLOAD_PENDING", "QUEUED", "PROCESSING"}
+               for run in matching_runs.values()):
+            raise ValueError("load-test runs must finish or fail before cleanup can remove them")
+
+        run_ids = set(matching_runs)
+        queues = GeoHandler.store.data.setdefault("importProcessingQueues", {})
+        matching_queues = {queue_id: queue for queue_id, queue in queues.items()
+                           if queue.get("importRunId") in run_ids}
+        if any(str(queue.get("status", "")).upper() in {"QUEUED", "PROCESSING"}
+               for queue in matching_queues.values()):
+            raise ValueError("load-test promotion queues must finish before cleanup can remove them")
+        entities = {entity_id: entity for entity_id, entity in GeoHandler.store.items.items()
+                    if (entity.get("provenance") or {}).get("importRunId") in run_ids
+                    and ((entity.get("provenance") or {}).get("source") or {}).get("loadTestRunId") == test_run_id}
+        # Do not leave cross-service activity or awards orphaned if a test
+        # fixture was accidentally used outside the intended geodata profile.
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="loadtest-cleanup-impact") as impact_pool:
+            impacts = impact_pool.map(
+                lambda entity: GeoHandler._activity_request(
+                    p, f"/v1/activations/entity-deletion-impacts/{entity['id']}"),
+                entities.values())
+            for impact in impacts:
+                if any(int(impact.get(field) or 0) for field in ("qsoCount", "activationCount", "awardProgressCount")):
+                    raise ValueError("a tagged load-test entity has activity; cleanup stopped to protect QSOs and awards")
+
+        from storage import ObjectStore
+        object_store = ObjectStore()
+        removed_objects = 0
+        for run in matching_runs.values():
+            source = run.get("source") or {}
+            object_key = source.get("objectKey")
+            bucket = source.get("bucket") or GEODATA_IMPORT_BUCKET
+            if object_key:
+                if bucket != GEODATA_IMPORT_BUCKET:
+                    raise ValueError("load-test cleanup refuses to delete an object outside the geodata import bucket")
+                object_store.delete(bucket, object_key)
+                removed_objects += 1
+            spool = run.get("uploadSpoolPath")
+            if spool:
+                spool_root = Path(os.environ.get("MYOTA_UPLOAD_SPOOL_DIR", "/tmp/myota-geodata-uploads")).resolve()
+                spool_path = Path(spool).resolve()
+                if not spool_path.is_relative_to(spool_root):
+                    raise ValueError("load-test spool path is outside the configured upload spool directory")
+                spool_path.unlink(missing_ok=True)
+
+        for entity_id in entities:
+            GeoHandler.store.delete_relational(entity_id)
+            GeoHandler.store.items.pop(entity_id, None)
+        candidates = GeoHandler.store.data.setdefault("importCandidates", {})
+        for candidate_id, candidate in list(candidates.items()):
+            if candidate.get("importRunId") in run_ids:
+                candidates.pop(candidate_id, None)
+                GeoHandler.store.mark_import_candidate_deleted(candidate_id)
+        for queue_id, queue in matching_queues.items():
+            if queue.get("importRunId") in run_ids:
+                queues.pop(queue_id, None)
+                GeoHandler.store.mark_import_queue_deleted(queue_id)
+        for run_id in run_ids:
+            runs.pop(run_id, None)
+            GeoHandler.store.data.setdefault("sourceManifests", {}).pop(run_id, None)
+
+        if GeoHandler.store.durable and run_ids:
+            with GeoHandler.store.transaction() as connection:
+                connection.execute("DELETE FROM import_run WHERE id = ANY(%s::uuid[])", (list(run_ids),))
+        removed_entity_ids = set(entities)
+        fixture_aggregates = run_ids | removed_entity_ids | set(matching_queues)
+        GeoHandler.store.events[:] = [event for event in GeoHandler.store.events
+                                      if event.get("aggregate", {}).get("id") not in fixture_aggregates]
+        if GeoHandler.store.durable and fixture_aggregates:
+            fixture_aggregate_ids = list(fixture_aggregates)
+            with GeoHandler.store.transaction() as connection:
+                connection.execute("DELETE FROM outbox_event WHERE aggregate_id = ANY(%s::text[])",
+                                   (fixture_aggregate_ids,))
+        GeoHandler.store.event("geodata.loadtest.cleaned.v1", "load_test_run", test_run_id,
+                               {"testRunId": test_run_id, "importsDeleted": len(run_ids),
+                                "entitiesDeleted": len(entities), "objectsDeleted": removed_objects})
+        GeoHandler.store.persist(include_import_state=True)
+        return {"testRunId": test_run_id, "importsDeleted": len(run_ids),
+                "entitiesDeleted": len(entities), "objectsDeleted": removed_objects, "cleaned": True}
+
+    @staticmethod
     def list_import_candidates(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         query = parse_qs(urlparse(p.get("_path", "")).query)
         run_id = p["runId"]
@@ -1232,27 +1341,44 @@ class GeoHandler(JsonHandler):
         programme = query.get("programme", [None])[0]
         status = query.get("status", [None])[0]
         max_features = min(1000, max(1, int(query.get("limit", ["500"])[0])))
-        features = []
-        for entity in GeoHandler.store.items.values():
-            if programme and entity.get("programmeSlug") != programme:
-                continue
-            if status and entity.get("status") != status:
-                continue
-            if not entity.get("geometry"):
-                continue
-            entity_box = geometry_bbox(entity["geometry"])
-            if entity_box[2] < bounds[0] or entity_box[0] > bounds[2] or entity_box[3] < bounds[1] or entity_box[1] > bounds[3]:
-                continue
-            features.append({"type": "Feature", "id": entity["id"], "geometry": entity["geometry"],
-                             "properties": {"name": entity["name"], "programmeSlug": entity["programmeSlug"], "status": entity["status"],
-                                            "entityType": entity.get("entityType"), "entityTypes": entity_categories(entity), "sourceRef": entity.get("sourceRef"),
-                                            "continentCode": entity.get("continentCode"), "countryCode": entity.get("countryCode"),
-                                            "regionCode": entity.get("regionCode"), "city": entity.get("city")}})
-        truncated = len(features) > max_features
-        return {"type": "FeatureCollection", "bbox": list(bounds), "features": features[:max_features],
-                "count": min(len(features), max_features), "truncated": truncated, "cacheTtlSeconds": 60,
+        if GeoHandler.store.durable:
+            entities = GeoHandler.store.query_bbox(bounds, max_features + 1, programme, status)
+            features = []
+            for entity in entities:
+                properties = entity.pop("publicProperties")
+                features.append({"type": "Feature", "id": entity["id"], "geometry": entity["geometry"],
+                                 "properties": {"name": entity["name"], "programmeSlug": entity["programmeSlug"],
+                                                "status": entity["status"], "entityType": entity.get("entityType"),
+                                                "entityTypes": properties.get("entityTypes") or entity.get("entityType"),
+                                                "sourceRef": properties.get("sourceRef"),
+                                                "continentCode": properties.get("continentCode"),
+                                                "countryCode": properties.get("countryCode"),
+                                                "regionCode": properties.get("regionCode"), "city": properties.get("city")}})
+            truncated = len(features) > max_features
+            features = features[:max_features]
+        else:
+            features = []
+            for entity in GeoHandler.store.items.values():
+                if programme and entity.get("programmeSlug") != programme:
+                    continue
+                if status and entity.get("status") != status:
+                    continue
+                if not entity.get("geometry"):
+                    continue
+                entity_box = geometry_bbox(entity["geometry"])
+                if entity_box[2] < bounds[0] or entity_box[0] > bounds[2] or entity_box[3] < bounds[1] or entity_box[1] > bounds[3]:
+                    continue
+                features.append({"type": "Feature", "id": entity["id"], "geometry": entity["geometry"],
+                                 "properties": {"name": entity["name"], "programmeSlug": entity["programmeSlug"], "status": entity["status"],
+                                                "entityType": entity.get("entityType"), "entityTypes": entity_categories(entity), "sourceRef": entity.get("sourceRef"),
+                                                "continentCode": entity.get("continentCode"), "countryCode": entity.get("countryCode"),
+                                                "regionCode": entity.get("regionCode"), "city": entity.get("city")}})
+            truncated = len(features) > max_features
+            features = features[:max_features]
+        return {"type": "FeatureCollection", "bbox": list(bounds), "features": features,
+                "count": len(features), "truncated": truncated, "cacheTtlSeconds": 60,
                 "cacheKey": digest({"bbox": bounds, "programme": programme, "status": status,
-                                     "entityVersions": sorted((entity["id"], entity.get("updatedAt")) for entity in GeoHandler.store.items.values())}),
+                                     "minute": int(datetime.now(timezone.utc).timestamp() // 60)}),
                 "performanceBudgetMs": 250}
 
     @staticmethod
@@ -1776,6 +1902,7 @@ GeoHandler.routes = {
     ("POST", "/v1/geodata/imports/{runId}/candidates/validate"): GeoHandler.validate_import_candidates,
     ("POST", "/v1/geodata/imports/{runId}/process"): GeoHandler.process_import_candidates,
     ("POST", "/v1/geodata/imports/{runId}/processed"): GeoHandler.mark_import_processed,
+    ("DELETE", "/v1/geodata/load-test-runs/{testRunId}"): GeoHandler.cleanup_load_test_run,
     ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
     ("POST", "/v1/geodata/refresh-schedules/{scheduleId}/run"): GeoHandler.refresh_import,
     ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,

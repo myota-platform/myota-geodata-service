@@ -45,7 +45,9 @@ production operations are tracked in the
 [charter gap analysis](https://github.com/myota-platform/myota-docs/blob/main/docs/charter-gap-analysis.md).
 
 The `/metrics` endpoint exposes durable entity, geometry, category, import,
-pre-processing, PostgreSQL pool/activity, lock-wait and outbox metrics. With
+pre-processing, PostgreSQL pool/activity, lock-wait and outbox metrics, plus
+timed PostGIS bounding-box and entity-upsert queries and broker-sourced
+JetStream consumer backlog. With
 `MYOTA_OTEL_ENABLED=1`, HTTP request rate/latency, active requests, request body
 size, and per-process CPU/memory telemetry are exported to the OpenTelemetry
 Collector.
@@ -80,6 +82,97 @@ synthetic database cardinality.
 
 View service, request-size, process, PostgreSQL-pool, import, and outbox metrics
 in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
+
+### Non-production write and worker profiles
+
+`loadtests/geodata-workloads.js` separates five mutating profiles: `large-upload`
+(one multipart upload per VU), `simultaneous-edits` (concurrent edits to a
+test-owned entity), `preprocessing` (imports left in the validation queue),
+`promotion` (validation and candidate promotion), and `queue-backlog` (steady
+accepted import submissions without waiting for workers). These profiles are
+hard-blocked unless the target is a local/test host (or an exact hostname is
+explicitly listed in `MYOTA_LOAD_TEST_ALLOWED_HOSTS`), `MYOTA_ENV` is explicitly
+`development`, `test`, or `staging`, and `MYOTA_LOAD_TEST_ALLOW_NONPROD=YES`.
+Production hostnames, including `myota.top` and `spainip.es`, are not accepted.
+The runner caps duration at 10 minutes, VUs at 20 (8 for uploads), features per
+import at 100 (50 for queue backlog; 25 for promotion; 5,000 for uploads), and
+submissions at five per VU (30 for the steady backlog profile; two for
+promotion). Large uploads run once per VU
+and default to 2,500 features with 1 KiB
+of synthetic payload padding per feature (roughly 3–4 MiB per file); padding is
+capped at 4 KiB per feature so the largest generated file stays around 23 MiB.
+
+Install k6 on macOS with `brew install k6`. Use a dedicated global-admin account
+created only in the local/test environment; do not reuse production credentials.
+The gateway/API host is the target. For example, with the local stack running:
+
+```bash
+MYOTA_ENV=development \
+MYOTA_LOAD_TEST_ALLOW_NONPROD=YES \
+MYOTA_BASE_URL=http://localhost:8090 \
+MYOTA_LOAD_TEST_EMAIL="$MYOTA_TEST_ADMIN_EMAIL" \
+MYOTA_LOAD_TEST_PASSWORD="$MYOTA_TEST_ADMIN_PASSWORD" \
+MYOTA_LOAD_TEST_PROFILE=preprocessing \
+k6 run loadtests/geodata-workloads.js
+```
+
+Set `MYOTA_LOAD_TEST_PROFILE` to `large-upload`, `simultaneous-edits`,
+`preprocessing`, `promotion`, or `queue-backlog`. Optional controls are
+`MYOTA_LOAD_TEST_VUS`, `MYOTA_LOAD_TEST_DURATION`, `MYOTA_LOAD_TEST_FEATURES`,
+`MYOTA_LOAD_TEST_PADDING_BYTES`, and `MYOTA_LOAD_TEST_IMPORTS_PER_VU`; all are
+bounded by the harness. Set `MYOTA_LOAD_TEST_ALLOWED_HOSTS` only for an
+approved non-production staging hostname. Do not run profiles concurrently
+against one test environment.
+
+Every run receives a unique fixture tag and the k6 teardown calls
+`DELETE /v1/geodata/load-test-runs/{testRunId}`. Local Compose explicitly enables
+this endpoint; it additionally requires a global administrator and exact
+confirmation. Cleanup refuses active import/promotion jobs and refuses to
+delete any fixture entity with linked activations, QSOs, or award progress. It
+removes the run's source objects, staged candidates, queue rows, audit/outbox
+events, imports, and created entities. If k6 is interrupted, run cleanup with
+the same dedicated account and exact confirmation before repeating the test.
+Helm does not enable cleanup by default; staging operators must deliberately
+enable it and set a non-production `MYOTA_ENV` for the duration of a test.
+
+Do not launch multiple profiles at once against the same fixture environment:
+cleanup is scoped by run ID but writes still contend on the shared database,
+object store, and worker capacity. The workload profiles are bounded diagnostic
+loads, not a production capacity guarantee.
+
+### Query-plan and JetStream evidence
+
+The PostGIS bounding-box API query and relational entity-upsert path emit
+`myota_geodata_postgis_query_duration_seconds` observations labeled by the
+low-cardinality `query` name, and increment
+`myota_geodata_slow_queries_total` when execution exceeds
+`MYOTA_SLOW_QUERY_THRESHOLD_MS` (250 ms by default). API request latency remains
+a separate outer measurement.
+
+For an inspectable query plan, run the read-only evidence tool against a
+development, test, or staging database. It refuses production-like hostnames,
+sets the PostgreSQL session read-only, limits the query window/result count, and
+captures `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`, database version, row count,
+and available GiST index definitions:
+
+```bash
+MYOTA_ENV=development \
+MYOTA_ALLOW_EXPLAIN_ANALYZE=YES \
+GEO_DATABASE_URL="$MYOTA_NONPROD_GEO_DATABASE_URL" \
+python3 scripts/geodata-query-plan-evidence.py \
+  --bbox=-5.99,37.37,-5.90,37.43 \
+  --output /tmp/myota-postgis-query-plan.json
+```
+
+The evidence file may include schema/index information and should be reviewed
+before sharing. Grafana's **MyOTA JetStream backlog and PostGIS query
+performance** dashboard separates broker consumer pending and ack-pending
+counts, redeliveries, oldest outstanding message age, poller health, PostGIS
+query percentiles, and slow-query rate. JetStream values are polled directly
+from NATS every 15 seconds; age is marked unavailable rather than guessed if a
+message was purged or does not match the consumer's configured subject filter.
+The detailed workflow and evidence handling are in the
+[organization runbook](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-load-test-and-query-evidence.md).
 
 ## Run the vertical slice
 
