@@ -27,6 +27,11 @@ separate decision.
   after 30 days. Finalized runs age from finalization; pending, failed, and
   stalled runs age from their latest activity. Active heartbeat updates protect
   ongoing processing; promoted entities and provenance remain.
+- Geodata source uploads and recovery snapshots use the dedicated
+  `myota-geodata-imports` object-storage bucket. The 30-day cleanup is scoped
+  only to that bucket and never deletes ADIF logs, award assets, signatures,
+  or issued certificates; configure its name with
+  `MYOTA_GEODATA_IMPORT_BUCKET`.
 - Phase 2 resource APIs are available for consolidated imports, proposals,
   metadata, categories, geometry, reviews, bbox-filtered entity collections,
   and confirmed cross-service deletion jobs. Existing action routes remain
