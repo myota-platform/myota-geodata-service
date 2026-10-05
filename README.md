@@ -23,6 +23,10 @@ separate decision.
   country subdivision, optional province/county, and city/municipality.
 - Lifecycle transitions are API-owned and audited; QGIS is a controlled
   graphical editing tool, not an approval bypass.
+- A daily retention worker deletes source objects and import history/logs
+  after 30 days. Finalized runs age from finalization; pending, failed, and
+  stalled runs age from their latest activity. Active heartbeat updates protect
+  ongoing processing; promoted entities and provenance remain.
 - Phase 2 resource APIs are available for consolidated imports, proposals,
   metadata, categories, geometry, reviews, bbox-filtered entity collections,
   and confirmed cross-service deletion jobs. Existing action routes remain

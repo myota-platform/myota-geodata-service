@@ -150,3 +150,32 @@ class ObjectStore:
             return response["Body"].read()
         except Exception:
             return None
+
+    def delete(self, bucket: str, object_key: str) -> None:
+        """Delete one object; missing objects are treated as already cleaned up."""
+        if self.local_root:
+            root = self.local_root.resolve()
+            if not bucket or "/" in bucket or "\\" in bucket or bucket in {".", ".."}:
+                raise ValueError("bucket must be a single safe path component")
+            key = Path(object_key)
+            if key.is_absolute() or ".." in key.parts:
+                raise ValueError("object key must be a relative path without parent traversal")
+            bucket_root = (root / bucket).resolve()
+            if not bucket_root.is_relative_to(root):
+                raise ValueError("bucket escapes the local object storage root")
+            path = (bucket_root / key).resolve()
+            if not path.is_relative_to(bucket_root):
+                raise ValueError("object key escapes its bucket")
+            path.unlink(missing_ok=True)
+            parent = path.parent
+            while parent != bucket_root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+            return
+        client = self._s3()
+        if not client:
+            raise RuntimeError("boto3 is not installed")
+        client.delete_object(Bucket=bucket, Key=object_key)
