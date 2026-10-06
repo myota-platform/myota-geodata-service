@@ -83,18 +83,15 @@ synthetic database cardinality.
 View service, request-size, process, PostgreSQL-pool, import, and outbox metrics
 in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 
-### Non-production write and worker profiles
+### Write and worker profiles
 
 `loadtests/geodata-workloads.js` separates five mutating profiles: `large-upload`
 (one multipart upload per VU), `simultaneous-edits` (concurrent edits to a
 test-owned entity), `preprocessing` (imports left in the validation queue),
 `promotion` (validation and candidate promotion), and `queue-backlog` (steady
-accepted import submissions without waiting for workers). These profiles are
-hard-blocked unless the target is a local/test host (or an exact hostname is
-explicitly listed in `MYOTA_LOAD_TEST_ALLOWED_HOSTS`), `MYOTA_ENV` is explicitly
-`development`, `test`, or `staging`, and `MYOTA_LOAD_TEST_ALLOW_NONPROD=YES`.
-Production hostnames, including `myota.top` and `spainip.es`, are not accepted.
-The runner caps duration at 10 minutes, VUs at 20 (8 for uploads), features per
+accepted import submissions without waiting for workers). They can run in
+development, test, staging, or—only with separate explicit acknowledgement—in
+production. The runner caps duration at 10 minutes, VUs at 20 (8 for uploads), features per
 import at 100 (50 for queue backlog; 25 for promotion; 5,000 for uploads), and
 submissions at five per VU (30 for the steady backlog profile; two for
 promotion). Large uploads run once per VU
@@ -102,9 +99,15 @@ and default to 2,500 features with 1 KiB
 of synthetic payload padding per feature (roughly 3–4 MiB per file); padding is
 capped at 4 KiB per feature so the largest generated file stays around 23 MiB.
 
-Install k6 on macOS with `brew install k6`. Use a dedicated global-admin account
-created only in the local/test environment; do not reuse production credentials.
-The gateway/API host is the target. For example, with the local stack running:
+Install k6 on macOS with `brew install k6`. Use a dedicated, least-use
+global-admin account for each target environment; never reuse development
+credentials in production. Non-production requires an exact allowlist for
+remote hosts plus `MYOTA_LOAD_TEST_ALLOW_NONPROD=YES`. Production additionally
+requires `MYOTA_ENV=production`, `MYOTA_LOAD_TEST_ALLOW_PRODUCTION=YES`, and an
+exact `MYOTA_LOAD_TEST_PRODUCTION_HOSTS` hostname match. No production run is
+started automatically by the script. The same hard per-run limits apply in
+production; remove neither the limits nor cleanup safeguards.
+For example, with the local stack running:
 
 ```bash
 MYOTA_ENV=development \
@@ -116,13 +119,37 @@ MYOTA_LOAD_TEST_PROFILE=preprocessing \
 k6 run loadtests/geodata-workloads.js
 ```
 
+To explicitly target production, use the production gateway hostname and a
+dedicated production test administrator:
+
+```bash
+MYOTA_ENV=production \
+MYOTA_LOAD_TEST_ALLOW_PRODUCTION=YES \
+MYOTA_LOAD_TEST_PRODUCTION_HOSTS=api.myota.top \
+MYOTA_BASE_URL=https://api.myota.top \
+MYOTA_LOAD_TEST_EMAIL="$MYOTA_PRODUCTION_TEST_ADMIN_EMAIL" \
+MYOTA_LOAD_TEST_PASSWORD="$MYOTA_PRODUCTION_TEST_ADMIN_PASSWORD" \
+MYOTA_LOAD_TEST_PROFILE=simultaneous-edits \
+k6 run loadtests/geodata-workloads.js
+```
+
+Before production writes, enable cleanup in Helm only for the planned test
+window with `geodataLoadTestCleanup.enabled=true` and
+`geodataLoadTestCleanup.allowProductionCleanup=true` while
+`auth.environment=production`. Confirm rollout before the test. After teardown
+confirms cleanup, disable both values and redeploy immediately. Cleanup
+requires `GLOBAL_ADMIN`, exact per-run confirmation, and refuses fixtures with
+activation, QSO, or award-progress records. If teardown fails, stop further
+write tests and resolve cleanup first.
+
 Set `MYOTA_LOAD_TEST_PROFILE` to `large-upload`, `simultaneous-edits`,
 `preprocessing`, `promotion`, or `queue-backlog`. Optional controls are
 `MYOTA_LOAD_TEST_VUS`, `MYOTA_LOAD_TEST_DURATION`, `MYOTA_LOAD_TEST_FEATURES`,
 `MYOTA_LOAD_TEST_PADDING_BYTES`, and `MYOTA_LOAD_TEST_IMPORTS_PER_VU`; all are
 bounded by the harness. Set `MYOTA_LOAD_TEST_ALLOWED_HOSTS` only for an
-approved non-production staging hostname. Do not run profiles concurrently
-against one test environment.
+approved non-production staging hostname; production uses the separate exact
+`MYOTA_LOAD_TEST_PRODUCTION_HOSTS` allowlist. Do not run profiles concurrently
+against one environment.
 
 Every run receives a unique fixture tag and the k6 teardown calls
 `DELETE /v1/geodata/load-test-runs/{testRunId}`. Local Compose explicitly enables
@@ -132,8 +159,8 @@ delete any fixture entity with linked activations, QSOs, or award progress. It
 removes the run's source objects, staged candidates, queue rows, audit/outbox
 events, imports, and created entities. If k6 is interrupted, run cleanup with
 the same dedicated account and exact confirmation before repeating the test.
-Helm does not enable cleanup by default; staging operators must deliberately
-enable it and set a non-production `MYOTA_ENV` for the duration of a test.
+Helm does not enable cleanup by default; operators must deliberately enable it
+only for the duration of a test.
 
 Do not launch multiple profiles at once against the same fixture environment:
 cleanup is scoped by run ID but writes still contend on the shared database,

@@ -4,6 +4,7 @@ import { check, sleep } from 'k6';
 const BASE_URL = (__ENV.MYOTA_BASE_URL || 'http://localhost:8090').replace(/\/$/, '');
 const PROFILE = __ENV.MYOTA_LOAD_TEST_PROFILE || 'preprocessing';
 const ENVIRONMENT = (__ENV.MYOTA_ENV || '').toLowerCase();
+const ALLOW_PRODUCTION = __ENV.MYOTA_LOAD_TEST_ALLOW_PRODUCTION === 'YES';
 const VUS = Number(__ENV.MYOTA_LOAD_TEST_VUS || (PROFILE === 'large-upload' ? 3 : 8));
 const DURATION = __ENV.MYOTA_LOAD_TEST_DURATION || '2m';
 const PROFILE_FEATURE_CAP = PROFILE === 'large-upload' ? 5000 :
@@ -16,11 +17,14 @@ const VALID_PROFILES = new Set(['large-upload', 'simultaneous-edits', 'preproces
 const hostname = BASE_URL.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', 'gateway', 'myota-gateway', 'host.docker.internal']);
 const ALLOWED_NONPROD_HOSTS = new Set((__ENV.MYOTA_LOAD_TEST_ALLOWED_HOSTS || '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
+const ALLOWED_PRODUCTION_HOSTS = new Set((__ENV.MYOTA_LOAD_TEST_PRODUCTION_HOSTS || '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
 const PRODUCTION_HOST = hostname === 'myota.top' || hostname === 'api.myota.top' || hostname === 'admin.myota.top' ||
   hostname === 'spainip.es' || hostname.endsWith('.spainip.es') || hostname.includes('production') ||
   hostname.startsWith('prod-') || hostname.startsWith('prod.');
 const SAFE_HOST = !PRODUCTION_HOST && (LOCAL_HOSTS.has(hostname) || hostname.endsWith('.test') ||
   hostname.endsWith('.local') || ALLOWED_NONPROD_HOSTS.has(hostname));
+const PRODUCTION_TARGET = ENVIRONMENT === 'production' && PRODUCTION_HOST &&
+  ALLOW_PRODUCTION && ALLOWED_PRODUCTION_HOSTS.has(hostname);
 
 function durationSeconds(value) {
   const amount = Number(value.slice(0, -1));
@@ -28,8 +32,8 @@ function durationSeconds(value) {
 }
 
 if (!VALID_PROFILES.has(PROFILE)) throw new Error(`Unknown workload profile: ${PROFILE}`);
-if (!SAFE_HOST || !['development', 'test', 'staging'].includes(ENVIRONMENT) || __ENV.MYOTA_LOAD_TEST_ALLOW_NONPROD !== 'YES') {
-  throw new Error('Write workloads only run against an explicitly acknowledged non-production host/environment.');
+if (!(SAFE_HOST && ['development', 'test', 'staging'].includes(ENVIRONMENT) && __ENV.MYOTA_LOAD_TEST_ALLOW_NONPROD === 'YES') && !PRODUCTION_TARGET) {
+  throw new Error('Set the matching explicit non-production or production acknowledgement and exact host allowlist before running write workloads.');
 }
 if (!Number.isInteger(VUS) || VUS < 1 || VUS > (PROFILE === 'large-upload' ? 8 : 20)) {
   throw new Error(`MYOTA_LOAD_TEST_VUS exceeds the safe cap for ${PROFILE}`);
@@ -50,6 +54,14 @@ if (PROFILE === 'queue-backlog' && Number(__ENV.MYOTA_LOAD_TEST_ITERATIONS_PER_S
   throw new Error('queue-backlog is capped at one import request per second');
 }
 
+const thresholds = {
+  http_req_failed: [{ threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '30s' }],
+  checks: ['rate>0.90'],
+};
+if (PRODUCTION_TARGET) {
+  thresholds.http_req_duration = [{ threshold: 'p(95)<2000', abortOnFail: true, delayAbortEval: '30s' }];
+}
+
 export const options = {
   scenarios: {
     geodata_workload: PROFILE === 'queue-backlog' ? {
@@ -67,17 +79,14 @@ export const options = {
       gracefulStop: '30s',
     },
   },
-  thresholds: {
-    http_req_failed: [{ threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '30s' }],
-    checks: ['rate>0.90'],
-  },
-  tags: { test_suite: 'geodata_workloads', workload_profile: PROFILE, target: 'nonproduction' },
+  thresholds,
+  tags: { test_suite: 'geodata_workloads', workload_profile: PROFILE, target: PRODUCTION_TARGET ? 'production' : 'nonproduction' },
 };
 
 function auth(token, contentType = 'application/json') {
   const headers = {
     Accept: 'application/json', Authorization: `Bearer ${token}`,
-    'User-Agent': 'MyOTA-Geodata-LoadTest/1.0 (+https://myota.org; non-production)',
+    'User-Agent': `MyOTA-Geodata-LoadTest/1.0 (+https://myota.org; ${PRODUCTION_TARGET ? 'production' : 'non-production'}; run=${__ENV.MYOTA_LOAD_TEST_RUN_ID || 'generated'})`,
   };
   // k6 must generate the multipart boundary itself; a bare Content-Type header
   // makes the server unable to parse the upload body.
@@ -171,6 +180,9 @@ export function setup() {
   const token = login();
   const runId = __ENV.MYOTA_LOAD_TEST_RUN_ID || `lt-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
   if (!/^lt-[A-Za-z0-9._-]{1,77}$/.test(runId)) throw new Error('MYOTA_LOAD_TEST_RUN_ID must start with lt- and use at most 80 letters, digits, dot, underscore, or hyphen.');
+  // Fail before any production writes unless the dedicated cleanup endpoint,
+  // its production acknowledgement, and the caller's GLOBAL_ADMIN role work.
+  if (PRODUCTION_TARGET) cleanupRun(token, runId);
   try {
     let seedEntityId = null;
     if (PROFILE === 'simultaneous-edits') {

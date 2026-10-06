@@ -1043,10 +1043,14 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def cleanup_load_test_run(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
-        """Permanently remove one explicitly tagged test run in non-production only."""
+        """Permanently remove one tagged test run after environment-specific opt-in."""
         environment = os.environ.get("MYOTA_ENV", "").lower()
-        if os.environ.get("MYOTA_LOAD_TEST_CLEANUP_ENABLED") != "1" or environment not in {"development", "test", "staging"}:
-            raise PermissionError("load-test cleanup is disabled outside explicitly enabled non-production environments")
+        cleanup_enabled = os.environ.get("MYOTA_LOAD_TEST_CLEANUP_ENABLED") == "1"
+        production_cleanup_enabled = os.environ.get("MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP") == "YES"
+        if not cleanup_enabled or environment not in {"development", "test", "staging", "production"}:
+            raise PermissionError("load-test cleanup is disabled unless explicitly enabled in a declared environment")
+        if environment == "production" and not production_cleanup_enabled:
+            raise PermissionError("production load-test cleanup requires explicit production cleanup acknowledgement")
         authorization = p.get("Authorization", "")
         if not authorization.startswith("Bearer "):
             raise PermissionError("Bearer authentication is required")
@@ -1054,10 +1058,8 @@ class GeoHandler(JsonHandler):
         roles = claims.get("roles", [])
         if not isinstance(roles, list):
             roles = []
-        scopes = claims.get("scp", [])
-        scopes = scopes if isinstance(scopes, list) else [scopes]
-        if not any((role.get("role") if isinstance(role, dict) else role) in {"GLOBAL_ADMIN", "GLOBAL_OPERATOR"}
-                   for role in roles) and "*" not in set(scopes):
+        if not any((role.get("role") if isinstance(role, dict) else role) == "GLOBAL_ADMIN"
+                   for role in roles):
             raise PermissionError("global administrator access is required")
 
         test_run_id = p["testRunId"]
