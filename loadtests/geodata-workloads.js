@@ -63,8 +63,11 @@ const thresholds = PROFILE === 'cleanup-only' ? {
 if (PRODUCTION_TARGET && PROFILE !== 'cleanup-only') {
   thresholds.http_req_duration = [{ threshold: 'p(95)<2000', abortOnFail: true, delayAbortEval: '30s' }];
 }
+const cleanupExpectedStatuses = http.expectedStatuses(200, 400, 401);
 
 export const options = {
+  setupTimeout: PROFILE === 'cleanup-only' ? '6m' : '60s',
+  teardownTimeout: '6m',
   scenarios: {
     geodata_workload: PROFILE === 'cleanup-only' ? {
       executor: 'shared-iterations',
@@ -202,7 +205,9 @@ function cleanupRun(token, runId) {
   let lastStatus = 0;
   let lastDetails = 'no response body';
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const response = http.del(url, body, auth(currentToken));
+    const params = auth(currentToken);
+    params.responseCallback = cleanupExpectedStatuses;
+    const response = http.del(url, body, params);
     lastStatus = response.status;
     if (response.status === 200) {
       console.log(`Removed load-test fixture run ${runId}: ${JSON.stringify(response.json())}`);
@@ -213,7 +218,17 @@ function cleanupRun(token, runId) {
       currentToken = login();
       continue;
     }
-    if (response.status !== 400) break;
+    let pending = false;
+    if (response.status === 400) {
+      try {
+        const detail = String(response.json('detail') || '');
+        pending = detail.includes('load-test runs must finish or fail') ||
+          detail.includes('promotion queues must finish');
+      } catch (_) {
+        pending = false;
+      }
+    }
+    if (!pending) break;
     sleep(10);
   }
   throw new Error(`Automatic cleanup failed for ${runId} (HTTP ${lastStatus}); API response: ${lastDetails}`);

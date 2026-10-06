@@ -168,6 +168,10 @@ To recover a failed teardown, do not start another workload. Run the harness
 with `MYOTA_LOAD_TEST_PROFILE=cleanup-only` and the failed run's exact
 `MYOTA_LOAD_TEST_RUN_ID`; this performs cleanup only. If cleanup still fails,
 the harness reports the sanitized API problem detail and correlation ID.
+While an import or promotion is still active, cleanup retries the specific
+pending response without counting it as a failed workload request; other
+client errors fail immediately. k6 allows up to six minutes for setup-only
+recovery and teardown cleanup.
 
 For example, reuse the production target and credentials from the production
 command above, replacing its profile and adding the failed run ID:
