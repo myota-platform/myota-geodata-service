@@ -13,7 +13,7 @@ const FEATURES = Number(__ENV.MYOTA_LOAD_TEST_FEATURES || (PROFILE === 'large-up
 const PADDING_BYTES = Number(__ENV.MYOTA_LOAD_TEST_PADDING_BYTES || 1024);
 const IMPORTS_PER_VU_CAP = PROFILE === 'queue-backlog' ? 30 : PROFILE === 'promotion' ? 2 : 5;
 const IMPORTS_PER_VU = Number(__ENV.MYOTA_LOAD_TEST_IMPORTS_PER_VU || IMPORTS_PER_VU_CAP);
-const VALID_PROFILES = new Set(['large-upload', 'simultaneous-edits', 'preprocessing', 'promotion', 'queue-backlog']);
+const VALID_PROFILES = new Set(['large-upload', 'simultaneous-edits', 'preprocessing', 'promotion', 'queue-backlog', 'cleanup-only']);
 const hostname = BASE_URL.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', 'gateway', 'myota-gateway', 'host.docker.internal']);
 const ALLOWED_NONPROD_HOSTS = new Set((__ENV.MYOTA_LOAD_TEST_ALLOWED_HOSTS || '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
@@ -54,17 +54,24 @@ if (PROFILE === 'queue-backlog' && Number(__ENV.MYOTA_LOAD_TEST_ITERATIONS_PER_S
   throw new Error('queue-backlog is capped at one import request per second');
 }
 
-const thresholds = {
+const thresholds = PROFILE === 'cleanup-only' ? {
+  http_req_failed: ['rate<0.05'],
+} : {
   http_req_failed: [{ threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '30s' }],
   checks: ['rate>0.90'],
 };
-if (PRODUCTION_TARGET) {
+if (PRODUCTION_TARGET && PROFILE !== 'cleanup-only') {
   thresholds.http_req_duration = [{ threshold: 'p(95)<2000', abortOnFail: true, delayAbortEval: '30s' }];
 }
 
 export const options = {
   scenarios: {
-    geodata_workload: PROFILE === 'queue-backlog' ? {
+    geodata_workload: PROFILE === 'cleanup-only' ? {
+      executor: 'shared-iterations',
+      vus: 1,
+      iterations: 1,
+      maxDuration: '30s',
+    } : PROFILE === 'queue-backlog' ? {
       executor: 'constant-arrival-rate',
       rate: Number(__ENV.MYOTA_LOAD_TEST_ITERATIONS_PER_SECOND || 1),
       timeUnit: '1s',
@@ -193,6 +200,7 @@ function cleanupRun(token, runId) {
   const url = `${BASE_URL}/v1/geodata/load-test-runs/${encodeURIComponent(runId)}`;
   const body = JSON.stringify({ confirmation: `DELETE LOAD TEST DATA ${runId}` });
   let lastStatus = 0;
+  let lastDetails = 'no response body';
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const response = http.del(url, body, auth(currentToken));
     lastStatus = response.status;
@@ -200,6 +208,7 @@ function cleanupRun(token, runId) {
       console.log(`Removed load-test fixture run ${runId}: ${JSON.stringify(response.json())}`);
       return;
     }
+    lastDetails = loginErrorDetails(response, __ENV.MYOTA_LOAD_TEST_EMAIL, __ENV.MYOTA_LOAD_TEST_PASSWORD);
     if (response.status === 401) {
       currentToken = login();
       continue;
@@ -207,7 +216,7 @@ function cleanupRun(token, runId) {
     if (response.status !== 400) break;
     sleep(10);
   }
-  throw new Error(`Automatic cleanup failed for ${runId} (HTTP ${lastStatus}). Retry with DELETE /v1/geodata/load-test-runs/${runId} and exact confirmation.`);
+  throw new Error(`Automatic cleanup failed for ${runId} (HTTP ${lastStatus}); API response: ${lastDetails}`);
 }
 
 export function setup() {
@@ -216,7 +225,8 @@ export function setup() {
   if (!/^lt-[A-Za-z0-9._-]{1,77}$/.test(runId)) throw new Error('MYOTA_LOAD_TEST_RUN_ID must start with lt- and use at most 80 letters, digits, dot, underscore, or hyphen.');
   // Fail before any production writes unless the dedicated cleanup endpoint,
   // its production acknowledgement, and the caller's global-administrator role work.
-  if (PRODUCTION_TARGET) cleanupRun(token, runId);
+  if (PRODUCTION_TARGET || PROFILE === 'cleanup-only') cleanupRun(token, runId);
+  if (PROFILE === 'cleanup-only') return { token, runId, cleanupOnly: true };
   try {
     let seedEntityId = null;
     if (PROFILE === 'simultaneous-edits') {
@@ -252,6 +262,8 @@ export function setup() {
 }
 
 export default function (data) {
+  if (data.cleanupOnly) return;
+
   if (PROFILE === 'large-upload') {
     if (__ITER > 0) { sleep(1); return; }
     const source = dataset(FEATURES, data.runId, `:${__VU}`, PADDING_BYTES);
@@ -305,5 +317,6 @@ export default function (data) {
 }
 
 export function teardown(data) {
+  if (data.cleanupOnly) return;
   cleanupRun(data.token, data.runId);
 }

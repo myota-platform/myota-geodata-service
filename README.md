@@ -144,7 +144,8 @@ and refuses fixtures with activation, QSO, or award-progress records. If teardow
 write tests and resolve cleanup first.
 
 Set `MYOTA_LOAD_TEST_PROFILE` to `large-upload`, `simultaneous-edits`,
-`preprocessing`, `promotion`, or `queue-backlog`. Optional controls are
+`preprocessing`, `promotion`, or `queue-backlog`. The `cleanup-only` recovery
+mode removes a specified run without starting a workload. Optional controls are
 `MYOTA_LOAD_TEST_VUS`, `MYOTA_LOAD_TEST_DURATION`, `MYOTA_LOAD_TEST_FEATURES`,
 `MYOTA_LOAD_TEST_PADDING_BYTES`, and `MYOTA_LOAD_TEST_IMPORTS_PER_VU`; all are
 bounded by the harness. Set `MYOTA_LOAD_TEST_ALLOWED_HOSTS` only for an
@@ -162,6 +163,20 @@ events, imports, and created entities. If k6 is interrupted, run cleanup with
 the same dedicated account and exact confirmation before repeating the test.
 Helm does not enable cleanup by default; operators must deliberately enable it
 only for the duration of a test.
+
+To recover a failed teardown, do not start another workload. Run the harness
+with `MYOTA_LOAD_TEST_PROFILE=cleanup-only` and the failed run's exact
+`MYOTA_LOAD_TEST_RUN_ID`; this performs cleanup only. If cleanup still fails,
+the harness reports the sanitized API problem detail and correlation ID.
+
+For example, reuse the production target and credentials from the production
+command above, replacing its profile and adding the failed run ID:
+
+```bash
+MYOTA_LOAD_TEST_PROFILE=cleanup-only \
+MYOTA_LOAD_TEST_RUN_ID=lt-20261006123955-simultaneous-edits \
+k6 run loadtests/geodata-workloads.js
+```
 
 Do not launch multiple profiles at once against the same fixture environment:
 cleanup is scoped by run ID but writes still contend on the shared database,
