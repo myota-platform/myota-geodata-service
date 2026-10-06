@@ -76,20 +76,24 @@ class GeodataStore(Store):
         self._deleted_import_queue_ids: set[str] = set()
 
     def mark_import_candidate_dirty(self, candidate_id: str) -> None:
-        self._dirty_import_candidate_ids.add(str(candidate_id))
-        self._deleted_import_candidate_ids.discard(str(candidate_id))
+        with self.lock:
+            self._dirty_import_candidate_ids.add(str(candidate_id))
+            self._deleted_import_candidate_ids.discard(str(candidate_id))
 
     def mark_import_candidate_deleted(self, candidate_id: str) -> None:
-        self._deleted_import_candidate_ids.add(str(candidate_id))
-        self._dirty_import_candidate_ids.discard(str(candidate_id))
+        with self.lock:
+            self._deleted_import_candidate_ids.add(str(candidate_id))
+            self._dirty_import_candidate_ids.discard(str(candidate_id))
 
     def mark_import_queue_dirty(self, queue_id: str) -> None:
-        self._dirty_import_queue_ids.add(str(queue_id))
-        self._deleted_import_queue_ids.discard(str(queue_id))
+        with self.lock:
+            self._dirty_import_queue_ids.add(str(queue_id))
+            self._deleted_import_queue_ids.discard(str(queue_id))
 
     def mark_import_queue_deleted(self, queue_id: str) -> None:
-        self._deleted_import_queue_ids.add(str(queue_id))
-        self._dirty_import_queue_ids.discard(str(queue_id))
+        with self.lock:
+            self._deleted_import_queue_ids.add(str(queue_id))
+            self._dirty_import_queue_ids.discard(str(queue_id))
 
     def _category_id(self, connection: Any, code: str, geometry_type: str) -> uuid.UUID:
         row = connection.execute(
@@ -453,14 +457,18 @@ class GeodataStore(Store):
                 })
 
     def persist(self, include_import_state: bool = False) -> None:
-        self._sync_relational(include_import_state)
-        # Candidate payloads are durable in PostGIS. Keep the compatibility
-        # snapshot small so a large import does not rewrite every staged
-        # feature on every review action.
-        compact_data = {key: value for key, value in self.data.items()
-                        if key not in {"importCandidates", "importProcessingQueues"}}
-        super().persist({"items": self.items, "events": self.events, "data": compact_data})
-        self._dirty_import_candidate_ids.clear()
-        self._deleted_import_candidate_ids.clear()
-        self._dirty_import_queue_ids.clear()
-        self._deleted_import_queue_ids.clear()
+        # Import workers and request handlers share these dictionaries and
+        # dirty-ID sets. Hold the same lock as their mutations while building
+        # and writing a durable snapshot.
+        with self.lock:
+            self._sync_relational(include_import_state)
+            # Candidate payloads are durable in PostGIS. Keep the compatibility
+            # snapshot small so a large import does not rewrite every staged
+            # feature on every review action.
+            compact_data = {key: value for key, value in self.data.items()
+                            if key not in {"importCandidates", "importProcessingQueues"}}
+            super().persist({"items": self.items, "events": self.events, "data": compact_data})
+            self._dirty_import_candidate_ids.clear()
+            self._deleted_import_candidate_ids.clear()
+            self._dirty_import_queue_ids.clear()
+            self._deleted_import_queue_ids.clear()

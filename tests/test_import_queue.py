@@ -1,7 +1,9 @@
 import os
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from geodata import GeoHandler
@@ -107,6 +109,46 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(candidates["total"], 1)
         self.assertEqual(candidates["items"][0]["name"], "Valid trail")
         self.assertIn("reverse geocoder failed", run["errors"][0]["message"])
+
+    def test_concurrent_imports_safely_update_shared_candidate_and_manifest_state(self):
+        start_together = threading.Barrier(2)
+        first_call_by_thread = set()
+        first_call_lock = threading.Lock()
+
+        def synchronize_enrichment(entity, force=False):
+            thread_id = threading.get_ident()
+            with first_call_lock:
+                first_call = thread_id not in first_call_by_thread
+                first_call_by_thread.add(thread_id)
+            if first_call:
+                start_together.wait(timeout=3)
+            return entity
+
+        def make_body(label):
+            return {
+                "adapter": "MANUAL", "format": "GEOJSON", "entityType": "TRAIL",
+                "source": {"name": f"parallel import {label}", "license": "CC0"},
+                "features": [
+                    {"type": "Feature", "properties": {"name": f"{label} trail {index}"},
+                     "geometry": {"type": "LineString", "coordinates": [
+                         [-5.99 + index * 0.0001, 37.39], [-5.989 + index * 0.0001, 37.391],
+                     ]}}
+                    for index in range(20)
+                ],
+            }
+
+        with patch("geodata.enrich_entity_location", side_effect=synchronize_enrichment):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = []
+                for label in ("alpha", "bravo"):
+                    body = make_body(label)
+                    futures.append(pool.submit(GeoHandler._start_import, body, body["features"], {}))
+                results = [future.result(timeout=10) for future in futures]
+
+        self.assertEqual([len(result["preprocessed"]) for result in results], [20, 20])
+        self.assertEqual(len(GeoHandler.store.data["importCandidates"]), 40)
+        self.assertEqual(len(GeoHandler.store.data["sourceManifests"]), 2)
+        self.assertTrue(all(result["status"] == "PREPROCESSED" for result in results))
 
     def test_binary_upload_keeps_pending_run_durable(self):
         body = {

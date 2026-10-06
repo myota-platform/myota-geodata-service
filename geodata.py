@@ -371,7 +371,9 @@ class GeoHandler(JsonHandler):
             return []
         matches = []
         candidate_digest = digest(geometry)
-        for existing in GeoHandler.store.items.values():
+        with GeoHandler.store.lock:
+            existing_entities = list(GeoHandler.store.items.values())
+        for existing in existing_entities:
             if existing.get("id") == entity.get("id") or not existing.get("geometry"):
                 continue
             distance = geometry_distance_meters(geometry, existing["geometry"])
@@ -402,7 +404,8 @@ class GeoHandler(JsonHandler):
         source_key = GeoHandler._source_key(source)
         records = []
         preprocessed, skipped, errors = [], [], []
-        import_candidates = GeoHandler.store.data.setdefault("importCandidates", {})
+        with GeoHandler.store.lock:
+            import_candidates = GeoHandler.store.data.setdefault("importCandidates", {})
         for index, raw_feature in enumerate(body["features"]):
             try:
                 feature = normalize(adapter, raw_feature)
@@ -420,8 +423,9 @@ class GeoHandler(JsonHandler):
                 # applying the source transformation a second time.
                 geometry = normalize_geometry(feature["geometry"])
                 attachments = validate_attachments(raw_feature.get("attachments") or props.get("attachments"))
-                existing = next((item for item in GeoHandler.store.items.values()
-                                 if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == programme_slug), None)
+                with GeoHandler.store.lock:
+                    existing = next((item for item in GeoHandler.store.items.values()
+                                     if source_ref and item.get("sourceRef") == source_ref and item.get("programmeSlug") == programme_slug), None)
                 occurred_at = now()
                 default_entity_type = "TRAIL" if str(props.get("featureType") or "").casefold() == "way" or geometry.get("type") == "LineString" else "MUNICIPAL_PARK"
                 categories = entity_type_codes(props.get("entityTypes") or props.get("entityType"), default_entity_type) or [default_entity_type]
@@ -454,8 +458,9 @@ class GeoHandler(JsonHandler):
                              "possibleDuplicates": possible_duplicates,
                              "targetStatus": None, "processedEntityId": None, "processedAt": None,
                              "entity": entity}
-                import_candidates[candidate_id] = candidate
-                GeoHandler.store.mark_import_candidate_dirty(candidate_id)
+                with GeoHandler.store.lock:
+                    import_candidates[candidate_id] = candidate
+                    GeoHandler.store.mark_import_candidate_dirty(candidate_id)
                 preprocessed.append(candidate_id)
                 records.append({"sourceRef": source_ref, "sourceHash": entity["provenance"]["sourceHash"]})
             except Exception as error:
@@ -470,8 +475,18 @@ class GeoHandler(JsonHandler):
                                                        body.get("disappearancePolicy", "REVIEW_REQUIRED")) if body.get("completeSnapshot") else []
         manifest = source_manifest(adapter, source, records, run_id)
         manifest["sourceKey"] = source_key
-        manifest["sourceChanged"] = not any(item.get("sourceHash") == manifest["sourceHash"] for item in GeoHandler.store.data.setdefault("sourceManifests", {}).values() if item.get("sourceKey") == source_key)
-        GeoHandler.store.data["sourceManifests"][run_id] = manifest
+        # Imports run concurrently in the executor. Keep the manifest lookup
+        # and insert atomic so another worker cannot resize the dictionary
+        # while this worker iterates its values (RuntimeError: dictionary
+        # changed size during iteration).
+        with GeoHandler.store.lock:
+            source_manifests = GeoHandler.store.data.setdefault("sourceManifests", {})
+            manifest["sourceChanged"] = not any(
+                item.get("sourceHash") == manifest["sourceHash"]
+                for item in list(source_manifests.values())
+                if item.get("sourceKey") == source_key
+            )
+            source_manifests[run_id] = manifest
         result = {"importRunId": run_id, "adapter": adapter, "preprocessed": preprocessed, "created": [], "updated": [], "skipped": skipped,
                   "errors": errors, "disappeared": disappeared, "conflationCandidates": [],
                   "manifest": manifest, "_status": 202}
@@ -548,31 +563,34 @@ class GeoHandler(JsonHandler):
         record = {"id": run_id, "programmeSlug": body.get("programmeSlug"),
             "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(), "entityType": body["entityType"], "entityTypes": categories,
             "source": body["source"], "filename": filename, "status": "QUEUED", "queuedAt": now(), "featureCount": len(body.get("features") or []) or None}
-        GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
-        GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id,
-            "programmeSlug": body.get("programmeSlug"), "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
-            "entityType": body["entityType"], "entityTypes": categories, "filename": filename})
+        with GeoHandler.store.lock:
+            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = record
+            GeoHandler.store.event("geodata.import.queued.v1", "import_run", run_id, {"importRunId": run_id,
+                "programmeSlug": body.get("programmeSlug"), "adapter": body["adapter"], "format": body.get("format", "GEOJSON").upper(),
+                "entityType": body["entityType"], "entityTypes": categories, "filename": filename})
         return run_id, record
 
     @staticmethod
     def _complete_import_run(run_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
-        run.update({"status": "COMPLETED" if not result.get("errors") else "COMPLETED_WITH_ERRORS", "completedAt": now(),
-                    "stats": {key: len(result.get(key, [])) for key in ("preprocessed", "created", "updated", "skipped", "errors", "disappeared")},
-                    "errors": result.get("errors", []), "manifest": result.get("manifest"),
-                    "conflationCandidateCount": len(result.get("conflationCandidates", [])),
-                    "heartbeatAt": None, "leaseUntil": None, "lastError": None})
-        run["status"] = "PREPROCESSED" if not result.get("errors") else "PREPROCESSED_WITH_ERRORS"
-        GeoHandler.store.event("geodata.import.preprocessed.v1", "import_run", run_id, result)
+        with GeoHandler.store.lock:
+            run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+            run.update({"status": "COMPLETED" if not result.get("errors") else "COMPLETED_WITH_ERRORS", "completedAt": now(),
+                        "stats": {key: len(result.get(key, [])) for key in ("preprocessed", "created", "updated", "skipped", "errors", "disappeared")},
+                        "errors": result.get("errors", []), "manifest": result.get("manifest"),
+                        "conflationCandidateCount": len(result.get("conflationCandidates", [])),
+                        "heartbeatAt": None, "leaseUntil": None, "lastError": None})
+            run["status"] = "PREPROCESSED" if not result.get("errors") else "PREPROCESSED_WITH_ERRORS"
+            GeoHandler.store.event("geodata.import.preprocessed.v1", "import_run", run_id, result)
         return run
 
     @staticmethod
     def _fail_import_run(run_id: str, error: Exception) -> dict[str, Any]:
-        run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
-        run.update({"status": "FAILED", "completedAt": now(), "errors": [{"message": str(error)}],
-                    "stats": {"preprocessed": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1, "disappeared": 0},
-                    "heartbeatAt": None, "leaseUntil": None, "lastError": str(error)})
-        GeoHandler.store.event("geodata.import.failed.v1", "import_run", run_id, {"importRunId": run_id, "error": str(error)})
+        with GeoHandler.store.lock:
+            run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+            run.update({"status": "FAILED", "completedAt": now(), "errors": [{"message": str(error)}],
+                        "stats": {"preprocessed": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1, "disappeared": 0},
+                        "heartbeatAt": None, "leaseUntil": None, "lastError": str(error)})
+            GeoHandler.store.event("geodata.import.failed.v1", "import_run", run_id, {"importRunId": run_id, "error": str(error)})
         return run
 
     @staticmethod
@@ -658,10 +676,11 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def _claim_import_run(run_id: str) -> bool:
-        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
-        if not run:
-            return False
-        attempt = int(run.get("attemptCount") or 0) + 1
+        with GeoHandler.store.lock:
+            run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+            if not run:
+                return False
+            attempt = int(run.get("attemptCount") or 0) + 1
         if GeoHandler.store.durable:
             lease_seconds = max(60, int(os.environ.get("MYOTA_IMPORT_LEASE_SECONDS", "900")))
             with GeoHandler.store.transaction() as connection:
@@ -674,12 +693,17 @@ class GeoHandler(JsonHandler):
                 ).fetchone()
             if not claimed:
                 return False
-            run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
-                        "heartbeatAt": now(), "lastError": None})
-            run["leaseUntil"] = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+            with GeoHandler.store.lock:
+                run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+                if not run:
+                    return False
+                run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
+                            "heartbeatAt": now(), "lastError": None})
+                run["leaseUntil"] = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
         else:
-            run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
-                        "heartbeatAt": now(), "lastError": None})
+            with GeoHandler.store.lock:
+                run.update({"status": "PROCESSING", "startedAt": run.get("startedAt") or now(), "attemptCount": attempt,
+                            "heartbeatAt": now(), "lastError": None})
         return True
 
     @staticmethod
@@ -693,9 +717,10 @@ class GeoHandler(JsonHandler):
                         connection.execute(
                             "UPDATE import_run SET heartbeat_at=now(), lease_until=now() + make_interval(secs => %s) "
                             "WHERE id=%s AND status='PROCESSING'", (lease_seconds, run_id))
-                run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
-                if run:
-                    run["heartbeatAt"] = now()
+                with GeoHandler.store.lock:
+                    run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+                    if run:
+                        run["heartbeatAt"] = now()
             except Exception:
                 # A heartbeat failure must not hide the original import error.
                 continue

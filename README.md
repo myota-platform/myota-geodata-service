@@ -339,6 +339,11 @@ remain visibly queued instead of being incorrectly marked failed.
 Unrecoverable runs are marked `FAILED` with a visible reason instead of being
 left indefinitely in `PROCESSING`. This makes the import history a durable
 operational status view rather than a process-local queue snapshot.
+Concurrent workers perform parsing and enrichment in parallel, but mutations
+to shared candidate, run, and manifest state—and durable snapshot iteration—are
+protected by the service lock. Parsing and enrichment remain outside the
+critical section. A concurrent-import regression test guards against
+dictionary-resize races during manifest comparison and persistence.
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
 PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;
