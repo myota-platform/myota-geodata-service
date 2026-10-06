@@ -121,7 +121,7 @@ function requestImport(token, runId, count) {
   const suffix = `:${__VU}:${__ITER}`;
   const body = {
     adapter: 'MANUAL', format: 'GEOJSON', entityType: 'MUNICIPAL_PARK', entityTypes: ['MUNICIPAL_PARK'],
-    source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic non-production fixture', loadTestRunId: runId },
+    source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic load-test fixture', loadTestRunId: runId },
     features: Array.from({ length: count }, (_, i) => feature(i, runId, `${suffix}:${i}`)),
   };
   const response = http.post(`${BASE_URL}/v1/geodata/imports`, JSON.stringify(body), auth(token));
@@ -146,7 +146,7 @@ function waitForPreprocessing(token, runId, importId, timeoutSeconds = 120) {
 function login() {
   const email = __ENV.MYOTA_LOAD_TEST_EMAIL;
   const password = __ENV.MYOTA_LOAD_TEST_PASSWORD;
-  if (!email || !password) throw new Error('Set MYOTA_LOAD_TEST_EMAIL and MYOTA_LOAD_TEST_PASSWORD for the isolated non-production admin.');
+  if (!email || !password) throw new Error('Set MYOTA_LOAD_TEST_EMAIL and MYOTA_LOAD_TEST_PASSWORD for the dedicated target-environment admin.');
   const response = http.post(`${BASE_URL}/v1/identity/auth/login`, JSON.stringify({ email, password }), {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'MyOTA-Geodata-LoadTest/1.0' },
   });
@@ -163,7 +163,7 @@ function cleanupRun(token, runId) {
     const response = http.del(url, body, auth(currentToken));
     lastStatus = response.status;
     if (response.status === 200) {
-      console.log(`Removed non-production fixture run ${runId}: ${JSON.stringify(response.json())}`);
+      console.log(`Removed load-test fixture run ${runId}: ${JSON.stringify(response.json())}`);
       return;
     }
     if (response.status === 401) {
@@ -193,10 +193,10 @@ export function setup() {
       const candidateId = pageItems.length ? pageItems[0].id : null;
       if (!candidateId) throw new Error('Edit fixture candidate was not staged.');
       http.post(`${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`, JSON.stringify({
-        candidateIds: [candidateId], reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic non-production load fixture',
+        candidateIds: [candidateId], reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic load-test fixture',
       }), auth(token));
       http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
-        candidateIds: [candidateId], targetStatus: 'CANDIDATE', processorId: 'load-test', note: 'Synthetic non-production load fixture',
+        candidateIds: [candidateId], targetStatus: 'CANDIDATE', processorId: 'load-test', note: 'Synthetic load-test fixture',
       }), auth(token));
       const deadline = Date.now() + 120000;
       while (Date.now() < deadline) {
@@ -259,12 +259,12 @@ export default function (data) {
   check(candidatesResponse, { 'preprocessed candidates are available': () => candidateIds.length > 0 });
   if (!candidateIds.length) return;
   const validation = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`, JSON.stringify({
-    candidateIds, reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic non-production promotion profile',
+    candidateIds, reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic load-test promotion profile',
   }), auth(data.token));
   check(validation, { 'candidate validation succeeded': (r) => r.status === 200 });
   const targetStatus = PROFILE === 'promotion' ? 'APPROVED' : 'CANDIDATE';
   const promotion = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
-    candidateIds, targetStatus, processorId: 'load-test', note: 'Synthetic non-production promotion profile',
+    candidateIds, targetStatus, processorId: 'load-test', note: 'Synthetic load-test promotion profile',
   }), auth(data.token));
   check(promotion, { 'promotion queue accepted': (r) => r.status === 202 || r.status === 200 });
   sleep(1);
