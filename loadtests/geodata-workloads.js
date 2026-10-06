@@ -117,8 +117,8 @@ function dataset(count, runId, suffix = '', paddingBytes = 0) {
   return JSON.stringify({ type: 'FeatureCollection', features: Array.from({ length: count }, (_, i) => feature(i, runId, suffix, paddingBytes)) });
 }
 
-function requestImport(token, runId, count) {
-  const suffix = `:${__VU}:${__ITER}`;
+function requestImport(token, runId, count, requestSequence) {
+  const suffix = `:${requestSequence}`;
   const body = {
     adapter: 'MANUAL', format: 'GEOJSON', entityType: 'MUNICIPAL_PARK', entityTypes: ['MUNICIPAL_PARK'],
     source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic load-test fixture', loadTestRunId: runId },
@@ -215,12 +215,12 @@ export function setup() {
   const runId = __ENV.MYOTA_LOAD_TEST_RUN_ID || `lt-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
   if (!/^lt-[A-Za-z0-9._-]{1,77}$/.test(runId)) throw new Error('MYOTA_LOAD_TEST_RUN_ID must start with lt- and use at most 80 letters, digits, dot, underscore, or hyphen.');
   // Fail before any production writes unless the dedicated cleanup endpoint,
-  // its production acknowledgement, and the caller's GLOBAL_ADMIN role work.
+  // its production acknowledgement, and the caller's global-administrator role work.
   if (PRODUCTION_TARGET) cleanupRun(token, runId);
   try {
     let seedEntityId = null;
     if (PROFILE === 'simultaneous-edits') {
-      const importId = requestImport(token, runId, 1);
+      const importId = requestImport(token, runId, 1, 'setup-seed');
       if (!importId || waitForPreprocessing(token, runId, importId) === 'FAILED') throw new Error('Could not create the shared edit fixture.');
       const page = http.get(`${BASE_URL}/v1/geodata/imports/${importId}/candidates?page=1&pageSize=10`, auth(token));
       const pageItems = page.json('items') || [];
@@ -280,7 +280,7 @@ export default function (data) {
 
   if (__ITER >= IMPORTS_PER_VU) { sleep(1); return; }
 
-  const importId = requestImport(data.token, data.runId, FEATURES);
+  const importId = requestImport(data.token, data.runId, FEATURES, `${__VU}:${__ITER}`);
   if (!importId) return;
   if (PROFILE === 'preprocessing' || PROFILE === 'queue-backlog') { sleep(1); return; }
   const status = waitForPreprocessing(data.token, data.runId, importId);
