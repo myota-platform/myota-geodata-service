@@ -73,6 +73,21 @@ class GeodataStoreHydrationTests(unittest.TestCase):
         self.assertEqual(store.items["entity-1"]["geometry"]["type"], "Point")
         self.assertEqual(store.items["entity-1"]["entityTypes"], ["MUNICIPAL_PARK"])
 
+    def test_snapshot_only_persistence_does_not_flush_or_clear_dirty_imports(self):
+        store = GeodataStore()
+        store.data = {"importCandidates": {"active-candidate": {"id": "active-candidate"}},
+                      "importProcessingQueues": {"active-queue": {"id": "active-queue"}},
+                      "importRuns": {"other-run": {"id": "other-run"}}}
+        store._dirty_import_candidate_ids.add("active-candidate")
+        store._dirty_import_queue_ids.add("active-queue")
+
+        with patch.object(store, "_sync_relational") as relational_sync:
+            store.persist_snapshot_only()
+
+        relational_sync.assert_not_called()
+        self.assertEqual(store._dirty_import_candidate_ids, {"active-candidate"})
+        self.assertEqual(store._dirty_import_queue_ids, {"active-queue"})
+
 
 if __name__ == "__main__":
     unittest.main()

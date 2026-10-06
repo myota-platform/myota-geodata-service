@@ -450,8 +450,7 @@ class GeoHandler(JsonHandler):
                 GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
                 possible_duplicates = GeoHandler._possible_duplicates(entity)
-                candidate_id = new_id()
-                candidate = {"id": candidate_id, "importRunId": run_id, "ordinal": index,
+                candidate = {"importRunId": run_id, "ordinal": index,
                              "existingEntityId": existing["id"] if existing else None,
                              "candidateSource": candidate_source, "validationStatus": "PENDING",
                              "dedupeWarning": "POSSIBLE_DUPLICATE" if possible_duplicates else None,
@@ -459,6 +458,20 @@ class GeoHandler(JsonHandler):
                              "targetStatus": None, "processedEntityId": None, "processedAt": None,
                              "entity": entity}
                 with GeoHandler.store.lock:
+                    # A recovered preprocessing run replays the same source
+                    # ordinals. Reuse the staged identity (and review state)
+                    # rather than creating a second row that violates the
+                    # (import_run_id, ordinal) database constraint.
+                    previous = next((item for item in import_candidates.values()
+                                     if item.get("importRunId") == run_id
+                                     and int(item.get("ordinal", -1)) == index), None)
+                    candidate_id = previous.get("id") if previous else new_id()
+                    candidate["id"] = candidate_id
+                    if previous:
+                        for field in ("validationStatus", "validationNote", "validatedBy", "validatedAt",
+                                      "targetStatus", "processedEntityId", "processedAt"):
+                            if field in previous:
+                                candidate[field] = previous[field]
                     import_candidates[candidate_id] = candidate
                     GeoHandler.store.mark_import_candidate_dirty(candidate_id)
                 preprocessed.append(candidate_id)
@@ -1178,7 +1191,11 @@ class GeoHandler(JsonHandler):
         GeoHandler.store.event("geodata.loadtest.cleaned.v1", "load_test_run", test_run_id,
                                {"testRunId": test_run_id, "importsDeleted": len(run_ids),
                                 "entitiesDeleted": len(entities), "objectsDeleted": removed_objects})
-        GeoHandler.store.persist(include_import_state=True)
+        # Do not flush unrelated dirty import candidates here. A different
+        # recovering run may be in memory with rows already present in Postgres;
+        # a broad relational sync can fail on its unique (run, ordinal) key and
+        # turn this already-targeted cleanup into a partial failure.
+        GeoHandler.store.persist_snapshot_only()
         return {"testRunId": test_run_id, "importsDeleted": len(run_ids),
                 "entitiesDeleted": len(entities), "objectsDeleted": removed_objects, "cleaned": True}
 

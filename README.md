@@ -343,7 +343,12 @@ Concurrent workers perform parsing and enrichment in parallel, but mutations
 to shared candidate, run, and manifest state—and durable snapshot iteration—are
 protected by the service lock. Parsing and enrichment remain outside the
 critical section. A concurrent-import regression test guards against
-dictionary-resize races during manifest comparison and persistence.
+dictionary-resize races during manifest comparison and persistence. Recovery
+replays preserve candidate identity by `(import_run_id, ordinal)` and update the
+existing staged row instead of inserting a duplicate. Load-test cleanup uses a
+snapshot-only persist after targeted relational deletes, so dirty rows from an
+unrelated active import cannot make cleanup partially fail. Cleanup can be
+retried safely after an earlier partial attempt.
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
 PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;

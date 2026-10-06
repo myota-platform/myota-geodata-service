@@ -10,6 +10,9 @@ class GeometryWayTests(unittest.TestCase):
     def setUp(self):
         self.previous_items = GeoHandler.store.items
         self.previous_events = GeoHandler.store.events
+        self.previous_data = GeoHandler.store.data
+        self.previous_dirty_candidates = GeoHandler.store._dirty_import_candidate_ids
+        self.previous_deleted_candidates = GeoHandler.store._deleted_import_candidate_ids
         GeoHandler.store.items = {
             "entity-1": {
                 "id": "entity-1", "programmeSlug": "regional-ota", "entityType": "TRAIL",
@@ -20,10 +23,16 @@ class GeometryWayTests(unittest.TestCase):
             },
         }
         GeoHandler.store.events = []
+        GeoHandler.store.data = {"importCandidates": {}, "sourceManifests": {}}
+        GeoHandler.store._dirty_import_candidate_ids = set()
+        GeoHandler.store._deleted_import_candidate_ids = set()
 
     def tearDown(self):
         GeoHandler.store.items = self.previous_items
         GeoHandler.store.events = self.previous_events
+        GeoHandler.store.data = self.previous_data
+        GeoHandler.store._dirty_import_candidate_ids = self.previous_dirty_candidates
+        GeoHandler.store._deleted_import_candidate_ids = self.previous_deleted_candidates
 
     def test_linestring_is_valid_and_way_alias_is_canonicalized(self):
         self.assertEqual(normalize_geometry({"type": "way", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})["type"], "LineString")
@@ -60,6 +69,23 @@ class GeometryWayTests(unittest.TestCase):
         self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][0], -5.99, places=5)
         self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][1], 37.39, places=5)
         self.assertEqual(candidate["entity"]["provenance"]["sourceCrs"]["properties"]["name"], "EPSG:25830")
+
+    def test_replaying_preprocessing_reuses_run_ordinal_candidate(self):
+        body = {
+            "adapter": "MANUAL",
+            "source": {"name": "recovery-replay", "license": "CC0"},
+            "features": [{"type": "Feature", "properties": {"name": "Replay trail"},
+                          "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}],
+        }
+
+        first = GeoHandler._import_features(body, "replay-run")
+        candidate_id = first["preprocessed"][0]
+        GeoHandler.store.data["importCandidates"][candidate_id]["validationNote"] = "Keep reviewer note"
+        replay = GeoHandler._import_features(body, "replay-run")
+
+        self.assertEqual(replay["preprocessed"], [candidate_id])
+        self.assertEqual(len(GeoHandler.store.data["importCandidates"]), 1)
+        self.assertEqual(GeoHandler.store.data["importCandidates"][candidate_id]["validationNote"], "Keep reviewer note")
 
     def test_osm_style_way_record_is_importable(self):
         feature = normalize("MANUAL", {"type": "way", "id": "way/42", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})
