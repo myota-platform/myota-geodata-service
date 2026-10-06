@@ -41,13 +41,30 @@ class LoadTestCleanupSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "Bearer authentication is required"):
                 GeoHandler.cleanup_load_test_run(None, {"testRunId": "lt-production-test"})
 
-    def test_cleanup_requires_global_admin_even_with_wildcard_scope(self):
+    def test_cleanup_accepts_identity_global_operator_role(self):
         with patch.dict(os.environ, {
             "MYOTA_ENV": "production",
             "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
             "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
         }, clear=False), patch.object(geodata, "verify_token", return_value={
-            "roles": ["GLOBAL_OPERATOR"], "scp": ["*"],
+            "roles": [{"role": "GLOBAL_OPERATOR"}], "scp": ["*"],
+        }):
+            params = {
+                "Authorization": "Bearer valid-test-token",
+                "testRunId": "lt-production-test",
+                "_body": {"confirmation": "not-the-required-confirmation"},
+            }
+            # Reaching confirmation validation proves the canonical identity role passed auth.
+            with self.assertRaisesRegex(ValueError, "confirmation must exactly match"):
+                GeoHandler.cleanup_load_test_run(None, params)
+
+    def test_cleanup_rejects_non_global_role_even_with_wildcard_scope(self):
+        with patch.dict(os.environ, {
+            "MYOTA_ENV": "production",
+            "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
+            "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
+        }, clear=False), patch.object(geodata, "verify_token", return_value={
+            "roles": ["GIS_ADMIN"], "scp": ["*"],
         }):
             params = {
                 "Authorization": "Bearer valid-test-token",

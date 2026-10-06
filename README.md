@@ -138,8 +138,9 @@ window with `geodataLoadTestCleanup.enabled=true` and
 `geodataLoadTestCleanup.allowProductionCleanup=true` while
 `auth.environment=production`. Confirm rollout before the test. After teardown
 confirms cleanup, disable both values and redeploy immediately. Cleanup
-requires `GLOBAL_ADMIN`, exact per-run confirmation, and refuses fixtures with
-activation, QSO, or award-progress records. If teardown fails, stop further
+requires the identity service's global-administrator role (`GLOBAL_OPERATOR`;
+legacy `GLOBAL_ADMIN` tokens are also accepted), exact per-run confirmation,
+and refuses fixtures with activation, QSO, or award-progress records. If teardown fails, stop further
 write tests and resolve cleanup first.
 
 Set `MYOTA_LOAD_TEST_PROFILE` to `large-upload`, `simultaneous-edits`,

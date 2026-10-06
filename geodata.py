@@ -1058,8 +1058,13 @@ class GeoHandler(JsonHandler):
         roles = claims.get("roles", [])
         if not isinstance(roles, list):
             roles = []
-        if not any((role.get("role") if isinstance(role, dict) else role) == "GLOBAL_ADMIN"
-                   for role in roles):
+        global_roles = {
+            role.get("role") if isinstance(role, dict) else role
+            for role in roles
+        }
+        # GLOBAL_OPERATOR is the identity service's canonical global-admin role.
+        # Keep GLOBAL_ADMIN accepted for compatibility with older/external tokens.
+        if not global_roles.intersection({"GLOBAL_ADMIN", "GLOBAL_OPERATOR"}):
             raise PermissionError("global administrator access is required")
 
         test_run_id = p["testRunId"]
