@@ -143,6 +143,37 @@ function waitForPreprocessing(token, runId, importId, timeoutSeconds = 120) {
   throw new Error(`Timed out waiting for preprocessing for load-test run ${runId}`);
 }
 
+function loginErrorDetails(response, email, password) {
+  const safeFields = ['type', 'title', 'status', 'code', 'detail', 'requestId', 'correlationId'];
+  try {
+    const payload = response.json();
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const safePayload = {};
+      for (const key of safeFields) {
+        const value = payload[key];
+        if (typeof value === 'string' || typeof value === 'number') {
+          let safeValue = String(value);
+          if (email) safeValue = safeValue.split(email).join('[redacted email]');
+          if (password) safeValue = safeValue.split(password).join('[redacted password]');
+          safePayload[key] = safeValue;
+        }
+      }
+      if (Object.keys(safePayload).length) return JSON.stringify(safePayload);
+    }
+  } catch (_) {
+    // Fall back to a bounded, credential-redacted text snippet for non-JSON errors.
+  }
+
+  let body = String(response.body || '').trim();
+  if (email) body = body.split(email).join('[redacted email]');
+  if (password) body = body.split(password).join('[redacted password]');
+  body = body
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [redacted]')
+    .replace(/("(?:password|accessToken|refreshToken|token|secret|authorization)"\s*:\s*")[^"]*(")/gi, '$1[redacted]$2');
+  if (!body) return 'response body was empty';
+  return body.length > 1200 ? `${body.slice(0, 1200)}… [truncated]` : body;
+}
+
 function login() {
   const email = __ENV.MYOTA_LOAD_TEST_EMAIL;
   const password = __ENV.MYOTA_LOAD_TEST_PASSWORD;
@@ -150,7 +181,10 @@ function login() {
   const response = http.post(`${BASE_URL}/v1/identity/auth/login`, JSON.stringify({ email, password }), {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'MyOTA-Geodata-LoadTest/1.0' },
   });
-  if (response.status !== 200 && response.status !== 201) throw new Error(`Non-production load-test admin login failed (${response.status}).`);
+  if (response.status !== 200 && response.status !== 201) {
+    const details = loginErrorDetails(response, email, password);
+    throw new Error(`Load-test admin login failed (${response.status}); API response: ${details}`);
+  }
   return response.json('accessToken');
 }
 
