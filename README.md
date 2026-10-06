@@ -171,7 +171,12 @@ the harness reports the sanitized API problem detail and correlation ID.
 While an import or promotion is still active, cleanup retries the specific
 pending response without counting it as a failed workload request; other
 client errors fail immediately. k6 allows up to six minutes for setup-only
-recovery and teardown cleanup.
+recovery and teardown cleanup. If an import submission is not accepted, the
+harness prints its HTTP status and a bounded, credential-redacted API problem
+response (including request/correlation IDs when supplied). Cleanup retry waits
+also report the safe API detail and attempt number; use those diagnostics to
+identify backend or worker failures rather than relaxing the acceptance or
+request-failure thresholds.
 
 For example, reuse the production target and credentials from the production
 command above, replacing its profile and adding the failed run ID:

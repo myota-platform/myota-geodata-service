@@ -135,8 +135,17 @@ function requestImport(token, runId, count, requestSequence) {
     features: Array.from({ length: count }, (_, i) => feature(i, runId, `${suffix}:${i}`)),
   };
   const response = http.post(`${BASE_URL}/v1/geodata/imports`, JSON.stringify(body), auth(token));
-  check(response, { 'import was accepted for preprocessing': (r) => r.status === 202 && Boolean(r.json('id')) });
-  return response.status === 202 ? response.json('id') : null;
+  let importId = null;
+  if (response.status === 202) {
+    try { importId = response.json('id'); } catch (_) { /* Log the malformed response below. */ }
+  }
+  const accepted = response.status === 202 && Boolean(importId);
+  if (!accepted) {
+    const details = loginErrorDetails(response, __ENV.MYOTA_LOAD_TEST_EMAIL, __ENV.MYOTA_LOAD_TEST_PASSWORD);
+    console.log(`Import submission ${requestSequence} for run ${runId} was not accepted (HTTP ${response.status}); API response: ${details}`);
+  }
+  check(response, { 'import was accepted for preprocessing': () => accepted });
+  return accepted ? importId : null;
 }
 
 function waitForPreprocessing(token, runId, importId, timeoutSeconds = 120) {
@@ -227,6 +236,9 @@ function cleanupRun(token, runId) {
       } catch (_) {
         pending = false;
       }
+    }
+    if (pending) {
+      console.log(`Cleanup for run ${runId} is waiting for active processing (attempt ${attempt + 1}/30): ${lastDetails}`);
     }
     if (!pending) break;
     sleep(10);
