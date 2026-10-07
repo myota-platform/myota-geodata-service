@@ -64,6 +64,10 @@ if (PRODUCTION_TARGET && PROFILE !== 'cleanup-only') {
   thresholds.http_req_duration = [{ threshold: 'p(95)<2000', abortOnFail: true, delayAbortEval: '30s' }];
 }
 const cleanupExpectedStatuses = http.expectedStatuses(200, 400, 401);
+// Import POST returns 202 before the durable run projection is visible. A
+// short-lived 404 while polling that accepted run is eventual-consistency
+// signaling, not an API failure; later 4xx/5xx responses remain failures.
+const preprocessingPollExpectedStatuses = http.expectedStatuses(200, 404);
 
 export const options = {
   setupTimeout: PROFILE === 'cleanup-only' ? '6m' : '60s',
@@ -150,16 +154,22 @@ function requestImport(token, runId, count, requestSequence) {
 
 function waitForPreprocessing(token, runId, importId, timeoutSeconds = 120) {
   const params = auth(token);
+  params.responseCallback = preprocessingPollExpectedStatuses;
   const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastStatus = 0;
+  let lastDetails = 'no response body';
   while (Date.now() < deadline) {
     const response = http.get(`${BASE_URL}/v1/geodata/imports/${importId}`, params);
+    lastStatus = response.status;
     if (response.status === 200) {
       const status = String(response.json('status') || '').toUpperCase();
       if (status.startsWith('PREPROCESSED') || status === 'FAILED') return status;
+    } else {
+      lastDetails = loginErrorDetails(response, __ENV.MYOTA_LOAD_TEST_EMAIL, __ENV.MYOTA_LOAD_TEST_PASSWORD);
     }
     sleep(2);
   }
-  throw new Error(`Timed out waiting for preprocessing for load-test run ${runId}`);
+  throw new Error(`Timed out waiting for preprocessing for load-test run ${runId}; last status response was HTTP ${lastStatus}: ${lastDetails}`);
 }
 
 function loginErrorDetails(response, email, password) {

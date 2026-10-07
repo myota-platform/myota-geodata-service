@@ -153,6 +153,13 @@ approved non-production staging hostname; production uses the separate exact
 `MYOTA_LOAD_TEST_PRODUCTION_HOSTS` allowlist. Do not run profiles concurrently
 against one environment.
 
+After an accepted import, the status poll may briefly receive HTTP 404 while
+the asynchronous upload handoff publishes its durable run record. The harness
+counts only 200 and this specific polling 404 as expected; the 404 is retried
+until the run appears, while other error statuses still count against
+`http_req_failed`. If polling times out, the error reports the last HTTP status
+and sanitized API details.
+
 Every run receives a unique fixture tag and the k6 teardown calls
 `DELETE /v1/geodata/load-test-runs/{testRunId}`. Local Compose explicitly enables
 this endpoint; it additionally requires a global administrator and exact
