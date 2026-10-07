@@ -256,7 +256,15 @@ class RelationalConcurrencyTests(unittest.TestCase):
                             "status": status,
                             "source": {},
                         }
-                    with store.operation(write=True):
+                    with (
+                        store.operation(write=True),
+                        patch(
+                            "relational_state.RowMap.__iter__",
+                            side_effect=AssertionError(
+                                "cancellation must not enumerate import staging"
+                            ),
+                        ),
+                    ):
                         result = GeoHandler.cancel_import(
                             None, {"runId": self.run_id}
                         )

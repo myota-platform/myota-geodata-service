@@ -297,6 +297,22 @@ class RowRepository:
         self.scope.original[identity] = copy.deepcopy(latest)
         return value
 
+    def discard_import_candidates(self, run_id: str) -> None:
+        """Delete one run's staging rows without loading other imports."""
+        with self.connection() as connection:
+            connection.execute(
+                "DELETE FROM geodata_import_candidate WHERE import_run_id=%s",
+                (run_id,),
+            )
+        for identity, value in list(self.scope.loaded.items()):
+            if (
+                identity[0] == "importCandidates"
+                and value.get("importRunId") == run_id
+            ):
+                self.scope.loaded.pop(identity)
+                self.scope.original.pop(identity, None)
+                self.scope.deleted.discard(identity)
+
     def _write(
         self, connection: Any, kind: str, key: str, value: dict[str, Any]
     ) -> None:

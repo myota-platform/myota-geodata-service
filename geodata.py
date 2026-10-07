@@ -1824,23 +1824,24 @@ class GeoHandler(JsonHandler):
                 },
             }
         )
-        for candidate_id, candidate in list(
-            GeoHandler.store.data.setdefault("importCandidates", {}).items()
-        ):
-            if candidate.get("importRunId") == run_id:
-                GeoHandler.store.data["importCandidates"].pop(
-                    candidate_id, None
-                )
-                GeoHandler.store.mark_import_candidate_deleted(candidate_id)
+        if GeoHandler.store.durable:
+            GeoHandler.store.discard_import_candidates(run_id)
+        else:
+            for candidate_id, candidate in list(
+                GeoHandler.store.data.setdefault(
+                    "importCandidates", {}
+                ).items()
+            ):
+                if candidate.get("importRunId") == run_id:
+                    GeoHandler.store.data["importCandidates"].pop(
+                        candidate_id, None
+                    )
+                    GeoHandler.store.mark_import_candidate_deleted(
+                        candidate_id
+                    )
         GeoHandler.store.data.setdefault("sourceManifests", {}).pop(
             run_id, None
         )
-        if GeoHandler.store.durable:
-            with GeoHandler.store.transaction() as connection:
-                connection.execute(
-                    "DELETE FROM geodata_import_candidate WHERE import_run_id=%s",
-                    (run_id,),
-                )
         GeoHandler.store.event(
             "geodata.import.cancelled.v1",
             "import_run",

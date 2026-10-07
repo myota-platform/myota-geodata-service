@@ -387,7 +387,9 @@ Cancellation uses the row repository as the sole lifecycle/timestamp writer;
 the worker finalizer reloads and locks the authoritative run through staged-row
 cleanup and persistence. This avoids cancellation timestamp conflicts and
 discards unfinished worker changes. Repeated requests retain the first actor
-and request time. The isolated PostGIS relational suite covers pending uploads,
+and request time. Staged cleanup uses an indexed `import_run_id` deletion;
+it does not enumerate unrelated import records or load their geometries.
+The isolated PostGIS relational suite covers pending uploads,
 queued imports, idempotent retries and stale-worker finalization.
 
 Use the admin web's **Geodata imports** page rather than the review page. Select
