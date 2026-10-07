@@ -237,6 +237,89 @@ class RelationalConcurrencyTests(unittest.TestCase):
             self.assertIsNotNone(run["heartbeatAt"])
             self.assertEqual(run["featureCount"], 25)
 
+    def test_pending_import_cancellation_has_one_timestamp_writer(self):
+        from geodata import GeoHandler
+
+        store = self.stores[0]
+        with (
+            patch.object(GeoHandler, "store", store),
+            patch.object(GeoHandler, "_authorize_import"),
+            patch.object(GeoHandler, "_import_owner", return_value="admin"),
+            patch.object(GeoHandler, "_delete_import_source"),
+        ):
+            for status in ("UPLOAD_PENDING", "QUEUED"):
+                with self.subTest(status=status):
+                    with store.operation(write=True):
+                        store.data["importRuns"][self.run_id] = {
+                            "id": self.run_id,
+                            "adapter": "MANUAL",
+                            "status": status,
+                            "source": {},
+                        }
+                    with store.operation(write=True):
+                        result = GeoHandler.cancel_import(
+                            None, {"runId": self.run_id}
+                        )
+                    self.assertEqual(result["status"], "CANCELLED")
+                    self.assertEqual(result["_status"], 200)
+                    self.assertIsNotNone(result["completedAt"])
+                    with self.stores[1].operation():
+                        persisted = self.stores[1].data["importRuns"][
+                            self.run_id
+                        ]
+                        timestamp = persisted["cancellationRequestedAt"]
+                        self.assertEqual(persisted["status"], "CANCELLED")
+                        self.assertEqual(
+                            persisted["cancellationRequestedBy"], "admin"
+                        )
+                    with store.operation(write=True):
+                        retry = GeoHandler.cancel_import(
+                            None, {"runId": self.run_id}
+                        )
+                    self.assertEqual(
+                        retry["cancellationRequestedAt"], timestamp
+                    )
+                    with store.operation(write=True):
+                        del store.data["importRuns"][self.run_id]
+
+    def test_active_cancellation_finalizes_over_stale_worker_projection(self):
+        from geodata import GeoHandler
+
+        stale, fresh = self.stores
+        with fresh.operation(write=True):
+            fresh.data["importRuns"][self.run_id] = {
+                "id": self.run_id,
+                "adapter": "MANUAL",
+                "status": "PROCESSING",
+                "source": {},
+            }
+        with stale.operation(write=True, atomic=False):
+            pending = stale.data["importRuns"][self.run_id]
+            pending["featureCount"] = 999
+            with (
+                patch.object(GeoHandler, "store", fresh),
+                patch.object(GeoHandler, "_authorize_import"),
+                patch.object(
+                    GeoHandler, "_import_owner", return_value="admin"
+                ),
+                fresh.operation(write=True),
+            ):
+                result = GeoHandler.cancel_import(None, {"runId": self.run_id})
+            self.assertEqual(result["status"], "CANCELLING")
+            self.assertEqual(result["_status"], 202)
+            with patch.object(GeoHandler, "store", stale):
+                GeoHandler._finish_import_cancellation(self.run_id)
+                stale.persist()
+        with fresh.operation():
+            persisted = fresh.data["importRuns"][self.run_id]
+            self.assertEqual(persisted["status"], "CANCELLED")
+            self.assertEqual(persisted["cancellationRequestedBy"], "admin")
+            self.assertIsNotNone(persisted["completedAt"])
+            self.assertEqual(
+                persisted["cancellationRequestedAt"],
+                result["cancellationRequestedAt"],
+            )
+
     def test_paged_catalogue_filters_use_relational_rows(self):
         with self.stores[1].operation():
             result = catalogue_page(

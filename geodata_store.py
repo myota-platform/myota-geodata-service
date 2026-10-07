@@ -602,6 +602,13 @@ class GeodataStore(CompatibilityGeodataStore):
             self.hydrate()
             self._repository.invalidate("importRuns")
 
+    def refresh_import_run(self, run_id):
+        """Discard a cancelled job's local run changes and read its authority."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.reload("importRuns", run_id)
+        return self.data.get("importRuns", {}).get(run_id)
+
     def refresh_import_candidates_for_run(self, run_id):
         if self.durable:
             self.hydrate()

@@ -1783,12 +1783,28 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def _finish_import_cancellation(run_id: str) -> dict[str, Any] | None:
+        # Hold the run lock through projection reload, candidate deletion and
+        # persistence, including when invoked from a non-atomic worker scope.
+        with GeoHandler.store.transaction():
+            result = GeoHandler._finish_import_cancellation_locked(run_id)
+            GeoHandler.store.persist(include_import_state=True)
+            return result
+
+    @staticmethod
+    def _finish_import_cancellation_locked(
+        run_id: str,
+    ) -> dict[str, Any] | None:
         """Finalize cancellation and remove records staged by preprocessing."""
         run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
         if not run:
             return None
+        # Cancellation supersedes unfinished preprocessing changes. Adopt the
+        # locked row before finalizing so timestamps and status have one writer.
+        run = GeoHandler.store.refresh_import_run(run_id)
         status = _import_status(run_id) or str(run.get("status") or "").upper()
         if status not in {"CANCELLING", "CANCELLED"}:
+            return run
+        if status == "CANCELLED" and run.get("completedAt"):
             return run
         run["status"] = status
         run.update(
@@ -1823,12 +1839,6 @@ class GeoHandler(JsonHandler):
             with GeoHandler.store.transaction() as connection:
                 connection.execute(
                     "DELETE FROM geodata_import_candidate WHERE import_run_id=%s",
-                    (run_id,),
-                )
-                connection.execute(
-                    "UPDATE import_run SET status='CANCELLED', completed_at=now(), "
-                    "heartbeat_at=NULL, lease_until=NULL, stats='{}'::jsonb, last_error=NULL "
-                    "WHERE id=%s AND status IN ('CANCELLING','CANCELLED')",
                     (run_id,),
                 )
         GeoHandler.store.event(
@@ -2859,13 +2869,6 @@ class GeoHandler(JsonHandler):
             next_status = (
                 "CANCELLING" if current_status == "PROCESSING" else "CANCELLED"
             )
-            if GeoHandler.store.durable:
-                with GeoHandler.store.transaction() as connection:
-                    connection.execute(
-                        "UPDATE import_run SET status=%s, cancellation_requested_at=now(), "
-                        "cancellation_requested_by=%s WHERE id=%s",
-                        (next_status, actor, run_id),
-                    )
             run.update(
                 {
                     "status": next_status,
@@ -2873,6 +2876,10 @@ class GeoHandler(JsonHandler):
                     "cancellationRequestedBy": actor,
                 }
             )
+            # Persist through the row repository before the finalizer reads
+            # cancellation state. A separate SQL now() would conflict with the
+            # Python timestamp during optimistic delta reconciliation.
+            GeoHandler.store.persist(include_import_state=True)
             if current_status != "PROCESSING":
                 GeoHandler._finish_import_cancellation(run_id)
                 GeoHandler._delete_import_source(run_id)

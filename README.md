@@ -383,6 +383,13 @@ the cancelled run summary. Preprocessed runs cannot be cancelled because they
 have entered administrator review. Cancelled/stalled summaries remain subject
 to the configured import-retention policy.
 
+Cancellation uses the row repository as the sole lifecycle/timestamp writer;
+the worker finalizer reloads and locks the authoritative run through staged-row
+cleanup and persistence. This avoids cancellation timestamp conflicts and
+discards unfinished worker changes. Repeated requests retain the first actor
+and request time. The isolated PostGIS relational suite covers pending uploads,
+queued imports, idempotent retries and stale-worker finalization.
+
 Use the admin web's **Geodata imports** page rather than the review page. Select
 the shared feature categories before submitting; programme assignment is not
 part of dataset intake. Every dataset import is pre-processed with its
