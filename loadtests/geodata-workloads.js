@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import crypto from 'k6/crypto';
 import { check, sleep } from 'k6';
 
 const BASE_URL = (__ENV.MYOTA_BASE_URL || 'http://localhost:8090').replace(/\/$/, '');
@@ -84,6 +85,12 @@ export const options = {
       vus: 1,
       iterations: 1,
       maxDuration: '30s',
+    } : PROFILE === 'large-upload' ? {
+      executor: 'per-vu-iterations',
+      vus: VUS,
+      iterations: 1,
+      maxDuration: DURATION,
+      gracefulStop: '30s',
     } : PROFILE === 'queue-backlog' ? {
       executor: 'constant-arrival-rate',
       rate: Number(__ENV.MYOTA_LOAD_TEST_ITERATIONS_PER_SECOND || 1),
@@ -108,9 +115,7 @@ function auth(token, contentType = 'application/json') {
     Accept: 'application/json', Authorization: `Bearer ${token}`,
     'User-Agent': `MyOTA-Geodata-LoadTest/1.0 (+https://myota.org; ${PRODUCTION_TARGET ? 'production' : 'non-production'}; run=${__ENV.MYOTA_LOAD_TEST_RUN_ID || 'generated'})`,
   };
-  // k6 must generate the multipart boundary itself; a bare Content-Type header
-  // makes the server unable to parse the upload body.
-  if (contentType !== 'multipart/form-data') headers['Content-Type'] = contentType;
+  headers['Content-Type'] = contentType;
   return { headers, tags: { service: 'geodata', workload_profile: PROFILE } };
 }
 
@@ -135,6 +140,76 @@ function feature(index, runId, suffix = '', paddingBytes = 0) {
 
 function dataset(count, runId, suffix = '', paddingBytes = 0) {
   return JSON.stringify({ type: 'FeatureCollection', features: Array.from({ length: count }, (_, i) => feature(i, runId, suffix, paddingBytes)) });
+}
+
+function responseField(response, selector) {
+  try { return response.json(selector); } catch (_) { return null; }
+}
+
+function uploadCheck(response, label, predicate) {
+  const accepted = predicate(response);
+  check(response, { [label]: () => accepted });
+  if (!accepted) {
+    const details = loginErrorDetails(response, __ENV.MYOTA_LOAD_TEST_EMAIL, __ENV.MYOTA_LOAD_TEST_PASSWORD);
+    console.log(`${label} failed (HTTP ${response.status}); API response: ${details}`);
+  }
+  return accepted;
+}
+
+function uploadDataset(token, runId) {
+  // Generated fixtures contain only ASCII, so string offsets and byte offsets
+  // coincide. Do not use this slicing strategy for arbitrary uploaded files.
+  const source = dataset(FEATURES, runId, `:${__VU}`, PADDING_BYTES);
+  const metadata = {
+    adapter: 'MANUAL', format: 'GEOJSON', filename: `loadtest-${runId}-${__VU}.geojson`,
+    entityTypes: ['MUNICIPAL_PARK'], expectedSize: source.length,
+    sha256: crypto.sha256(source, 'hex'),
+    source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic fixture', loadTestRunId: runId },
+  };
+  const params = auth(token);
+  params.headers['Idempotency-Key'] = `${runId}-upload-${__VU}`;
+  const created = http.post(`${BASE_URL}/v1/geodata/import-uploads`, JSON.stringify(metadata), params);
+  const uploadId = responseField(created, 'uploadId');
+  if (!uploadCheck(created, 'resumable upload session created', (r) => r.status === 201 && typeof uploadId === 'string' && uploadId.length > 0)) return;
+  console.log(`Resumable upload ${uploadId}; run=${runId}; bytes=${source.length}`);
+
+  const endpoint = `${BASE_URL}/v1/geodata/import-uploads/${encodeURIComponent(uploadId)}`;
+  let completed = false;
+  try {
+    const advertisedPartSize = Number(responseField(created, 'partSizeBytes'));
+    if (!Number.isSafeInteger(advertisedPartSize) || advertisedPartSize < 5 * 1024 * 1024) {
+      check(false, { 'upload part size is valid': () => false });
+      console.log('Upload session returned an invalid partSizeBytes; aborting its multipart upload.');
+      return;
+    }
+    const partSize = Math.min(advertisedPartSize, 16 * 1024 * 1024);
+    for (let offset = 0, partNumber = 1; offset < source.length; offset += partSize, partNumber += 1) {
+      const part = source.slice(offset, offset + partSize);
+      const partParams = auth(token, 'application/octet-stream');
+      partParams.headers['X-Part-SHA256'] = crypto.sha256(part, 'hex');
+      const response = http.post(`${endpoint}/parts/${partNumber}`, part, partParams);
+      if (!uploadCheck(response, 'upload part stored with checksum', (r) => r.status === 200
+        && Number(responseField(r, 'sizeBytes')) === part.length
+        && responseField(r, 'sha256') === partParams.headers['X-Part-SHA256'])) return;
+    }
+
+    const response = http.post(`${endpoint}/complete`, '{}', auth(token));
+    let importId = responseField(response, 'importRun.id');
+    completed = response.status === 202 && Boolean(importId);
+    // Completion can succeed despite a lost response. Reconcile the durable
+    // session before attempting to abort an already accepted source object.
+    if (!completed) {
+      const progress = http.get(endpoint, auth(token));
+      importId = responseField(progress, 'importRunId');
+      completed = progress.status === 200 && responseField(progress, 'status') === 'COMPLETED' && Boolean(importId);
+    }
+    uploadCheck(response, 'large file upload accepted', () => completed);
+  } finally {
+    if (!completed) {
+      const aborted = http.del(endpoint, null, auth(token));
+      uploadCheck(aborted, 'incomplete upload aborted', (r) => r.status === 200 && responseField(r, 'status') === 'ABORTED');
+    }
+  }
 }
 
 function requestImport(token, runId, count, requestSequence) {
@@ -248,7 +323,8 @@ function cleanupRun(token, runId) {
       try {
         const detail = String(response.json('detail') || '');
         pending = detail.includes('load-test runs must finish or fail') ||
-          detail.includes('promotion queues must finish');
+          detail.includes('promotion queues must finish') ||
+          detail.includes('load-test uploads must finish or be aborted');
       } catch (_) {
         pending = false;
       }
@@ -266,6 +342,7 @@ export function setup() {
   const token = login();
   const runId = __ENV.MYOTA_LOAD_TEST_RUN_ID || `lt-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
   if (!/^lt-[A-Za-z0-9._-]{1,77}$/.test(runId)) throw new Error('MYOTA_LOAD_TEST_RUN_ID must start with lt- and use at most 80 letters, digits, dot, underscore, or hyphen.');
+  console.log(`Workload ${PROFILE}; target=${PRODUCTION_TARGET ? 'production' : 'nonproduction'}; run=${runId}; uploads=resumable-v1`);
   // Fail before any production writes unless the dedicated cleanup endpoint,
   // its production acknowledgement, and the caller's global-administrator role work.
   if (PRODUCTION_TARGET || PROFILE === 'cleanup-only') cleanupRun(token, runId);
@@ -308,18 +385,7 @@ export default function (data) {
   if (data.cleanupOnly) return;
 
   if (PROFILE === 'large-upload') {
-    if (__ITER > 0) { sleep(1); return; }
-    const source = dataset(FEATURES, data.runId, `:${__VU}`, PADDING_BYTES);
-    const metadata = JSON.stringify({
-      adapter: 'MANUAL', format: 'GEOJSON', filename: `loadtest-${data.runId}.geojson`,
-      entityType: 'MUNICIPAL_PARK', entityTypes: ['MUNICIPAL_PARK'],
-      source: { name: `MyOTA load test ${data.runId}`, license: 'CC0', attribution: 'Synthetic fixture', loadTestRunId: data.runId },
-    });
-    const response = http.post(`${BASE_URL}/v1/geodata/imports/upload`, {
-      metadata,
-      file: http.file(source, `loadtest-${data.runId}.geojson`, 'application/geo+json'),
-    }, auth(data.token, 'multipart/form-data'));
-    check(response, { 'large file upload accepted': (r) => r.status === 202 && Boolean(r.json('id')) });
+    uploadDataset(data.token, data.runId);
     return;
   }
 
