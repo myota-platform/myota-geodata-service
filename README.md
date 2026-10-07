@@ -312,7 +312,8 @@ and [repository map](https://github.com/myota-platform/myota-docs/blob/main/docs
 
 ## Source project
 
-The original `ea7klk/mpota` repository remains untouched. Its charter and planned flows are treated as the migration source; see [`docs/migration-from-mpota.md`](docs/migration-from-mpota.md).
+The original `ea7klk/mpota` repository remains untouched; see the
+[migration strategy](https://github.com/myota-platform/myota-docs/blob/main/docs/migration-from-mpota.md).
 
 ## Dataset imports
 
@@ -368,9 +369,11 @@ Durable deployments separate HTTP and queue execution. The API persists the
 import run and outbox event, while the geodata-owned `geodata_import_worker.py`
 process consumes durable NATS JetStream pull consumers with explicit ACKs,
 bounded pending work, lease/heartbeat/attempt tracking, retry backoff, and a
-terminal dead-letter path. Preprocessing and promotion use separate durable
-consumer names and subjects. The worker can be scaled independently of the
-API, and deterministic candidate/entity identities make redelivery safe. A
+terminal dead-letter path. Preprocessing (`geodata-preprocessing-v1`), promotion
+(`geodata-import-processing-v2`) and confirmed entity deletion
+(`geodata-entity-deletion-v1`) use separate durable consumers and subjects.
+The worker is deployed independently of the API; increasing replicas still
+requires the qualification gates below. Stable identities make replay safe. A
 worker refreshes relevant database queue rows before acting rather than
 relying on the API process's copy. In local non-durable unit-test mode only,
 the existing in-process fallback remains available; it is not the durable
@@ -378,17 +381,22 @@ Compose/Helm path.
 
 Restart recovery replays queued work from the outbox/JetStream and reclaims
 expired database leases. This removes API-local durable job execution, but it
-does not yet make feature parsing memory-bounded: current parsing and legacy
-catalogue compatibility hydration can still consume memory proportional to a
-large source/run. Streaming parsers, bounded feature batches, and API
-multi-instance mutation safety remain explicit horizontal-scaling roadmap
-work. The SeaweedFS multipart protocol also requires integration and restart
+does not yet make feature parsing memory-bounded: current parsing and some
+broad candidate/spatial traversals can consume memory proportional to a large
+source/run. Database-authoritative row repositories and multi-instance mutation
+safety are implemented and verified; streaming parsers, bounded batches and
+forced-failure/multi-worker qualification remain
+[horizontal-scaling roadmap work](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-horizontal-scaling-roadmap.md).
+The SeaweedFS multipart protocol also requires integration and restart
 failure testing against the exact deployed SeaweedFS version before the upload
 phase is considered verified.
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
-PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;
-on restart, relational entity columns are authoritative. The service does not
+PostGIS tables. Migration 016 retains JSON `service_state` only as an archive;
+the durable runtime never reads or writes it. Request/job-scoped repositories
+flush only changed rows, with revision conflicts and atomic audit/outbox writes.
+See the [inventory, tests and fenced rollout](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).
+The service does not
 create built-in geodata entities at startup; local catalogues must be populated
 through the import or community-proposal workflows.
 
