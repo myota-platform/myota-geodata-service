@@ -1,111 +1,61 @@
-import json
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from geodata_store import GeodataStore
-
-
-class _Result:
-    def __init__(self, one=None, many=None):
-        self.one = one
-        self.many = many if many is not None else []
-
-    def fetchone(self):
-        return self.one
-
-    def fetchall(self):
-        return self.many
-
-
-class _Connection:
-    def __init__(self, state, entity_rows):
-        self.state = state
-        self.entity_rows = entity_rows
-
-    def execute(self, statement, _params=None):
-        if "SELECT state FROM service_state" in statement:
-            return _Result(one=(self.state,))
-        if "SELECT key, response FROM idempotency_record" in statement:
-            return _Result(many=[])
-        if "FROM source_reference" in statement:
-            return _Result(many=[])
-        if "FROM geodata_entity_category" in statement:
-            return _Result(many=[("entity-1", "MUNICIPAL_PARK", True)])
-        if "FROM geodata_entity" in statement:
-            return _Result(many=self.entity_rows)
-        if "FROM import_run" in statement:
-            return _Result(many=[])
-        if "FROM geodata_import_candidate" in statement:
-            return _Result(many=[])
-        if "FROM geodata_import_processing_queue" in statement:
-            return _Result(many=[])
-        raise AssertionError(f"unexpected query: {statement}")
+from relational_state import RowMap
 
 
 class GeodataStoreHydrationTests(unittest.TestCase):
-    def test_relational_status_overrides_stale_compatibility_snapshot(self):
-        snapshot = {
-            "items": {
-                "entity-1": {
-                    "id": "entity-1",
-                    "name": "Parque de los Príncipes",
-                    "status": "CANDIDATE",
-                    "entityType": "MUNICIPAL_PARK",
-                }
-            },
-            "events": [],
-            "data": {},
-        }
-        entity_row = (
-            "entity-1",
-            None,
-            "MUNICIPAL_PARK",
-            "Parque de los Príncipes",
-            "APPROVED",
-            {"type": "Point", "coordinates": [-6.006222, 37.3739359]},
-            json.dumps({"reviewHistory": [{"action": "APPROVED"}]}),
-            "CURRENT",
-            None,
-            [],
-        )
-        connection = _Connection(snapshot, [entity_row])
+    def test_hydrate_installs_repositories_without_loading_snapshot(self):
         store = GeodataStore()
-        store.dsn = "test-dsn"
+        store.dsn = "unused-test-dsn"
+        with patch.object(store, "base_transaction") as connection:
+            store.hydrate()
+        connection.assert_not_called()
+        self.assertIsInstance(store.items, RowMap)
+        self.assertIsInstance(store.data["importRuns"], RowMap)
+        self.assertEqual(store.idempotency, {})
+
+    def test_relational_entity_reads_ignore_legacy_snapshot(self):
+        class Result:
+            def fetchone(self):
+                return (
+                    {
+                        "id": "entity-1",
+                        "status": "APPROVED",
+                        "name": "Actual park",
+                        "version": 4,
+                    },
+                )
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql = sql
+                assert "service_state" not in sql
+                return Result()
+
+        connection = Connection()
 
         @contextmanager
         def transaction():
             yield connection
 
-        with patch.object(store, "transaction", transaction):
+        store = GeodataStore()
+        store.dsn = "unused-test-dsn"
+        with patch.object(store, "base_transaction", transaction):
             store.hydrate()
-
-        self.assertEqual(store.items["entity-1"]["status"], "APPROVED")
-        self.assertEqual(
-            store.items["entity-1"]["name"], "Parque de los Príncipes"
-        )
-        self.assertEqual(store.items["entity-1"]["geometry"]["type"], "Point")
-        self.assertEqual(
-            store.items["entity-1"]["entityTypes"], ["MUNICIPAL_PARK"]
-        )
+            self.assertEqual(store.items["entity-1"]["status"], "APPROVED")
+            self.assertEqual(store.items["entity-1"]["version"], 4)
 
     def test_snapshot_only_persistence_does_not_flush_or_clear_dirty_imports(
         self,
     ):
         store = GeodataStore()
-        store.data = {
-            "importCandidates": {
-                "active-candidate": {"id": "active-candidate"}
-            },
-            "importProcessingQueues": {"active-queue": {"id": "active-queue"}},
-            "importRuns": {"other-run": {"id": "other-run"}},
-        }
         store._dirty_import_candidate_ids.add("active-candidate")
         store._dirty_import_queue_ids.add("active-queue")
-
         with patch.object(store, "_sync_relational") as relational_sync:
             store.persist_snapshot_only()
-
         relational_sync.assert_not_called()
         self.assertEqual(
             store._dirty_import_candidate_ids, {"active-candidate"}

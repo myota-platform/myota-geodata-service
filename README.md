@@ -12,6 +12,15 @@ separate decision.
 
 ## What works now
 
+- Phase 1 geodata state is database-authoritative: request-scoped row
+  projections, transactional changes/audit/outbox, durable idempotency,
+  indexed catalogue queries, and optimistic entity revisions. No live API or
+  worker reads or rewrites the archived whole-service JSON snapshot.
+- Entity deletion jobs are consumed by the durable
+  `geodata-entity-deletion-v1` JetStream consumer, not an API-local executor.
+- Migration 016 is a coordinated upgrade: old writers are fenced, and new API
+  and consumer processes wait for its completion before accepting work.
+  Follow the [Phase 1 upgrade and evidence record](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).
 - The identity, programme, activity, public-web, admin-web, and deployment
   boundaries are documented in the
   [repository map](https://github.com/myota-platform/myota-docs/blob/main/docs/repository-map.md).
@@ -43,6 +52,13 @@ uses PostgreSQL/PostGIS and SeaweedFS through myota-deploy. The remaining
 large-scale source workers, public data publication, stewardship workflow, and
 production operations are tracked in the
 [charter gap analysis](https://github.com/myota-platform/myota-docs/blob/main/docs/charter-gap-analysis.md).
+
+Database concurrency tests require `GEO_TEST_DATABASE_URL` pointing to an
+isolated database whose name ends in `_tests`, with all migrations applied.
+They refuse other database names. The image workflow also starts two API
+processes and verifies a concurrent same-revision edit returns one success
+and one conflict. This establishes Phase 1 correctness, not completion of
+the later streaming, memory-capacity, and rollout qualification gates.
 
 The `/metrics` endpoint exposes durable entity, geometry, category, import,
 pre-processing, PostgreSQL pool/activity, lock-wait and outbox metrics, plus

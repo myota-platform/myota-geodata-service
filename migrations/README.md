@@ -38,6 +38,12 @@ ordered SQL files define the `myota_geo` database:
     sessions, per-part checksums, idempotency, and expiry metadata.
 15. `015_jetstream_worker_dispatch.sql` adds recoverable promotion leases and
     re-dispatches in-flight imports through JetStream during the migration.
+16. `016_relational_authority.sql` adds entity revisions, indexed audit and
+    auxiliary control records, promotion-job links, and a one-time legacy
+    metadata migration. A writer fence prevents obsolete snapshot writers
+    from corrupting authoritative rows. New API/consumer processes wait for
+    its feature marker before accepting work. Replaying migrations does not
+    re-create deleted legacy resources.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
@@ -46,7 +52,11 @@ changes, update this directory first, then copy the complete ordered set to
 both repositories and verify the files are byte-for-byte identical.
 
 Shared platform tables such as service state, idempotency, outbox and event
-consumer bookkeeping belong to the core migration, not this geodata schema.
+consumer bookkeeping are supplied by the shared platform migration runner
+in each owning database, not created by this service's schema. Geodata's
+legacy `service_state` row is retained only as an archive; the live service
+does not hydrate or persist it. See the
+[coordinated upgrade procedure](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).
 
 Import recovery
 

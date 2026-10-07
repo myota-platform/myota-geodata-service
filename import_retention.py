@@ -67,6 +67,7 @@ def source_object(metadata: Any, import_bucket: str) -> tuple[str, str] | None:
 
 def _purge_run(connection: Any, run_id: str, retention_days: int) -> bool:
     """Delete retained import logs and metadata, preserving domain entities."""
+    connection.execute("SET LOCAL myota.geodata_writer = 'row-v1'")
     eligible = connection.execute(
         f"SELECT id FROM import_run WHERE id = %s AND {ELIGIBLE_WHERE_SQL} FOR UPDATE",
         (run_id, retention_days, retention_days),
@@ -108,34 +109,16 @@ def _purge_run(connection: Any, run_id: str, retention_days: int) -> bool:
     ):  # defensive; the row is locked and was just verified
         raise RuntimeError("eligible import run disappeared during retention")
 
-    row = connection.execute(
-        "SELECT state FROM service_state WHERE service = 'geodata' FOR UPDATE"
-    ).fetchone()
-    if row:
-        state = (
-            row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
-        )
-        data = state.get("data") if isinstance(state.get("data"), dict) else {}
-        runs = (
-            data.get("importRuns")
-            if isinstance(data.get("importRuns"), dict)
-            else {}
-        )
-        runs.pop(run_id, None)
-        data["importRuns"] = runs
-        state["data"] = data
-        state["events"] = [
-            event
-            for event in state.get("events", [])
-            if not (
-                (event.get("aggregate") or {}).get("type") == "import_run"
-                and str((event.get("aggregate") or {}).get("id")) == run_id
-            )
-        ]
-        connection.execute(
-            "UPDATE service_state SET state = %s::jsonb, updated_at = now() WHERE service = 'geodata'",
-            (json.dumps(state),),
-        )
+    connection.execute(
+        "DELETE FROM geodata_audit_event WHERE aggregate_type='import_run' "
+        "AND aggregate_id=%s",
+        (run_id,),
+    )
+    connection.execute(
+        "DELETE FROM geodata_control_record WHERE kind='sourceManifests' "
+        "AND id=%s",
+        (run_id,),
+    )
     return True
 
 

@@ -9,7 +9,58 @@ permissions:
   contents: read
 
 jobs:
+  test-relational-boundaries:
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: myota
+          POSTGRES_PASSWORD: isolated-test-only
+          POSTGRES_DB: geodata_tests
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U myota -d geodata_tests"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GEO_TEST_DATABASE_URL: postgresql://myota:isolated-test-only@localhost:5432/geodata_tests
+      PGHOST: localhost
+      PGUSER: myota
+      PGPASSWORD: isolated-test-only
+      PGDATABASE: geodata_tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Apply service-owned migrations
+        run: |
+          for migration_file in migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -f "$migration_file"
+          done
+      - run: python -m ruff format --check .
+      - run: python -m ruff check .
+      - name: Test two independent API instances and all regressions
+        env:
+          MYOTA_AUTH_SIGNING_KEY: isolated-ci-test-key
+          GEO_TEST_API_A_URL: http://127.0.0.1:18003
+          GEO_TEST_API_B_URL: http://127.0.0.1:18013
+        run: |
+          GEO_DATABASE_URL="$GEO_TEST_DATABASE_URL" GEODATA_HTTP_PORT=18003 python run_geodata.py >/tmp/geodata-api-a.log 2>&1 &
+          api_a_pid=$!
+          GEO_DATABASE_URL="$GEO_TEST_DATABASE_URL" GEODATA_HTTP_PORT=18013 python run_geodata.py >/tmp/geodata-api-b.log 2>&1 &
+          api_b_pid=$!
+          trap 'kill "$api_a_pid" "$api_b_pid" || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18003/healthz && curl -fsS http://127.0.0.1:18013/healthz; then
+              break
+            fi
+            sleep 1
+          done
+          python -m unittest discover -s tests
   build-and-publish:
+    needs: test-relational-boundaries
     runs-on: ubuntu-latest
     permissions:
       contents: read

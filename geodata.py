@@ -9,13 +9,21 @@ import os
 import re
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from common import JsonHandler, new_id, now, page_result, require, verify_token
+from common import (
+    JsonHandler,
+    new_id,
+    now,
+    page_result,
+    require,
+    verify_token,
+    sign_token,
+)
 from geodata_pipeline import (
     MAX_IMPORT_FEATURES,
     conflation_score,
@@ -28,6 +36,7 @@ from geodata_pipeline import (
     validate_attachments,
 )
 from geodata_store import GeodataStore
+from geodata_operations import install_operations
 from import_adapters import normalize
 from import_formats import (
     SUPPORTED_FORMATS,
@@ -94,6 +103,13 @@ class GeoHandler(JsonHandler):
     @classmethod
     def metrics_extra(cls) -> dict[str, float]:
         """Return counts from the durable catalogue and import lifecycle."""
+        if cls.store.durable:
+            from relational_metrics import durable_metrics
+
+            try:
+                return durable_metrics(cls.store)
+            except Exception:
+                return {"myota_geodata_metrics_database_unavailable": 1}
         try:
             cls.store.refresh_import_runs()
         except Exception:
@@ -904,6 +920,10 @@ class GeoHandler(JsonHandler):
             if value.strip()
         }
         bounds = GeoHandler._query_bounds(query)
+        if GeoHandler.store.durable:
+            from relational_queries import catalogue_page
+
+            return catalogue_page(GeoHandler.store, query, bounds)
         items = list(GeoHandler.store.items.values())
         if programme:
             items = [i for i in items if i["programmeSlug"] == programme]
@@ -1029,6 +1049,10 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def location_options(_: JsonHandler, __: dict[str, str]) -> dict[str, Any]:
+        if GeoHandler.store.durable:
+            from relational_queries import location_rows
+
+            return build_location_tree(location_rows(GeoHandler.store))
         return build_location_tree(GeoHandler.store.items.values())
 
     @staticmethod
@@ -1038,16 +1062,22 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def audit_entity(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         entity = GeoHandler.store.items[p["entityId"]]
+        if GeoHandler.store.durable:
+            from relational_queries import audit_rows
+
+            events = audit_rows(GeoHandler.store, entity["id"])
+        else:
+            events = [
+                event
+                for event in GeoHandler.store.events
+                if event.get("aggregate", {}).get("id") == entity["id"]
+            ]
         return {
             "entityId": entity["id"],
             "status": entity["status"],
             "reviewHistory": entity.get("reviewHistory", []),
             "geometryHistory": entity.get("geometryHistory", []),
-            "events": [
-                event
-                for event in GeoHandler.store.events
-                if event.get("aggregate", {}).get("id") == entity["id"]
-            ],
+            "events": events,
         }
 
     @staticmethod
@@ -1894,29 +1924,8 @@ class GeoHandler(JsonHandler):
                 ).fetchone()
             if not claimed:
                 return False
-            with GeoHandler.store.lock:
-                run = GeoHandler.store.data.setdefault("importRuns", {}).get(
-                    run_id
-                )
-                if not run:
-                    return False
-                run.update(
-                    {
-                        "status": "PROCESSING",
-                        "startedAt": run.get("startedAt") or now(),
-                        "attemptCount": attempt,
-                        "heartbeatAt": now(),
-                        "lastError": None,
-                    }
-                )
-                run["leaseUntil"] = (
-                    (
-                        datetime.now(timezone.utc)
-                        + timedelta(seconds=lease_seconds)
-                    )
-                    .isoformat()
-                    .replace("+00:00", "Z")
-                )
+            GeoHandler.store.refresh_import_runs()
+            return True
         else:
             with GeoHandler.store.lock:
                 run.update(
@@ -1947,6 +1956,7 @@ class GeoHandler(JsonHandler):
                             "WHERE id=%s AND status='PROCESSING'",
                             (lease_seconds, run_id),
                         )
+                    continue
                 with GeoHandler.store.lock:
                     run = GeoHandler.store.data.setdefault(
                         "importRuns", {}
@@ -1991,6 +2001,7 @@ class GeoHandler(JsonHandler):
                 GeoHandler.store.persist(include_import_state=True)
         except Exception as error:  # imports must report failure in the run, not fail the HTTP request
             with GeoHandler.store.lock:
+                GeoHandler.store.rollback_pending()
                 GeoHandler._fail_import_run(run_id, error)
                 GeoHandler.store.persist(include_import_state=True)
         finally:
@@ -2515,6 +2526,19 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def _import_run_view(run: dict[str, Any]) -> dict[str, Any]:
+        if GeoHandler.store.durable:
+            from relational_queries import candidate_counts
+
+            return {
+                **{
+                    key: value
+                    for key, value in run.items()
+                    if key != "uploadSpoolPath"
+                },
+                "candidateCounts": candidate_counts(
+                    GeoHandler.store, run["id"]
+                ),
+            }
         """Return a run with candidate-queue counts for the imports page."""
         run_id = run.get("id") or run.get("importRunId")
         candidates = [
@@ -2552,8 +2576,22 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def list_imports(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
         GeoHandler.store.refresh_import_runs()
         query = parse_qs(urlparse(p.get("_path", "")).query)
+        if GeoHandler.store.durable:
+            from relational_queries import page_query
+
+            result = page_query(
+                GeoHandler.store,
+                "importRuns",
+                query,
+                order="started_at DESC,id",
+            )
+            result["items"] = [
+                GeoHandler._import_run_view(run) for run in result["items"]
+            ]
+            return result
         runs = [
             GeoHandler._import_run_view(run)
             for run in GeoHandler.store.data.setdefault(
@@ -2568,6 +2606,7 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def get_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
         GeoHandler.store.refresh_import_runs()
         run = GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
         return GeoHandler._import_run_view(run)
@@ -2620,7 +2659,7 @@ class GeoHandler(JsonHandler):
                     "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s",
                     (actor, run_id),
                 )
-        for candidate_id in candidate_ids:
+        for candidate_id in sorted(set(candidate_ids)):
             candidates.pop(candidate_id, None)
             GeoHandler.store.mark_import_candidate_deleted(candidate_id)
         for queue_id in queue_ids:
@@ -2864,9 +2903,26 @@ class GeoHandler(JsonHandler):
     def list_import_candidates(
         _: JsonHandler, p: dict[str, str]
     ) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
         query = parse_qs(urlparse(p.get("_path", "")).query)
         run_id = p["runId"]
         GeoHandler.store.refresh_import_candidates_for_run(run_id)
+        if GeoHandler.store.durable:
+            from relational_queries import page_query
+
+            result = page_query(
+                GeoHandler.store,
+                "importCandidates",
+                query,
+                "import_run_id=%s AND validation_status='PENDING'",
+                (run_id,),
+                order="ordinal,id",
+            )
+            result["items"] = [
+                GeoHandler._candidate_view(candidate)
+                for candidate in result["items"]
+            ]
+            return result
         candidates = [
             GeoHandler._candidate_view(candidate)
             for candidate in GeoHandler.store.data.setdefault(
@@ -2912,6 +2968,10 @@ class GeoHandler(JsonHandler):
                     f"candidate {candidate_id} does not belong to import run"
                 )
             selected.append(str(candidate_id))
+            if requested_status in {"REJECTED", "INVALID"} and candidate.get(
+                "processingQueueId"
+            ):
+                raise ValueError("queued records cannot be rejected")
         if requested_status in {"REJECTED", "INVALID"}:
             if GeoHandler.store.durable:
                 with GeoHandler.store.transaction() as connection:
@@ -3010,94 +3070,142 @@ class GeoHandler(JsonHandler):
             daemon=True,
         )
         lease_heartbeat.start()
-        created, updated, errors = [], [], []
-        candidates = GeoHandler.store.data.setdefault("importCandidates", {})
-        for candidate_id in queue["candidateIds"]:
-            try:
-                with GeoHandler.store.lock:
-                    candidate = candidates.get(candidate_id)
-                    if not candidate:
-                        raise ValueError(
-                            "pre-processed candidate no longer exists"
+        try:
+            created, updated, errors = [], [], []
+            candidates = GeoHandler.store.data.setdefault(
+                "importCandidates", {}
+            )
+            for candidate_id in queue["candidateIds"]:
+                try:
+                    with GeoHandler.store.lock:
+                        candidate = candidates.get(candidate_id)
+                        if not candidate:
+                            raise ValueError(
+                                "pre-processed candidate no longer exists"
+                            )
+                        if candidate.get("validationStatus") == "PROCESSED":
+                            entity_id = candidate.get("processedEntityId")
+                            if entity_id:
+                                (
+                                    updated
+                                    if candidate.get("existingEntityId")
+                                    else created
+                                ).append(entity_id)
+                            continue
+                        if candidate.get("validationStatus") != "CONFIRMED":
+                            raise ValueError(
+                                "only confirmed records can be promoted"
+                            )
+                        if candidate.get("processingQueueId") not in (
+                            None,
+                            queue_id,
+                        ):
+                            raise ValueError(
+                                "record belongs to another promotion job"
+                            )
+                        entity_id = candidate.get("entity", {}).get("id")
+                        was_existing = entity_id in GeoHandler.store.items
+                        GeoHandler._materialize_import_candidate(
+                            candidate,
+                            queue["targetStatus"],
+                            queue["requestedBy"],
+                            queue.get("note"),
                         )
-                    if candidate.get("validationStatus") == "PROCESSED":
-                        continue
-                    entity_id = candidate.get("entity", {}).get("id")
-                    was_existing = entity_id in GeoHandler.store.items
-                    GeoHandler._materialize_import_candidate(
-                        candidate,
-                        queue["targetStatus"],
-                        queue["requestedBy"],
-                        queue.get("note"),
+                        candidate.update(
+                            {
+                                "validationStatus": "PROCESSED",
+                                "targetStatus": queue["targetStatus"],
+                                "processedEntityId": entity_id,
+                                "processedAt": now(),
+                            }
+                        )
+                        GeoHandler.store.mark_import_candidate_dirty(
+                            candidate_id
+                        )
+                        GeoHandler.store.persist(include_import_state=True)
+                        (updated if was_existing else created).append(
+                            entity_id
+                        )
+                except (TypeError, ValueError) as error:
+                    GeoHandler.store.rollback_pending()
+                    errors.append(
+                        {"candidateId": candidate_id, "message": str(error)}
                     )
-                    candidate.update(
-                        {
-                            "validationStatus": "PROCESSED",
-                            "targetStatus": queue["targetStatus"],
-                            "processedEntityId": entity_id,
-                            "processedAt": now(),
-                        }
-                    )
-                    GeoHandler.store.mark_import_candidate_dirty(candidate_id)
-                    (updated if was_existing else created).append(entity_id)
-                    GeoHandler.store.persist(include_import_state=True)
-            except (TypeError, ValueError) as error:
-                errors.append(
-                    {"candidateId": candidate_id, "message": str(error)}
-                )
-        with GeoHandler.store.lock:
-            queue = GeoHandler.store.data["importProcessingQueues"][queue_id]
-            queue.update(
-                {
-                    "status": "COMPLETED" if not errors else "FAILED",
-                    "completedAt": now(),
-                    "result": {
-                        "created": created,
-                        "updated": updated,
-                        "errors": errors,
-                    },
-                }
-            )
-            GeoHandler.store.mark_import_queue_dirty(queue_id)
-            run = GeoHandler.store.data.setdefault("importRuns", {}).get(
-                queue["importRunId"]
-            )
-            if run:
-                run.setdefault("stats", {}).update(
+            with GeoHandler.store.lock, GeoHandler.store.transaction():
+                queue = GeoHandler.store.data["importProcessingQueues"][
+                    queue_id
+                ]
+                queue.update(
                     {
-                        "processed": len(created) + len(updated),
-                        "created": run.get("stats", {}).get("created", 0)
-                        + len(created),
-                        "updated": run.get("stats", {}).get("updated", 0)
-                        + len(updated),
-                        "processingErrors": len(errors),
+                        "status": "COMPLETED" if not errors else "FAILED",
+                        "completedAt": now(),
+                        "result": {
+                            "created": created,
+                            "updated": updated,
+                            "errors": errors,
+                        },
                     }
                 )
-                remaining = [
-                    candidate
-                    for candidate in candidates.values()
-                    if candidate.get("importRunId") == queue["importRunId"]
-                    and candidate.get("validationStatus") != "PROCESSED"
-                ]
-                if not remaining and not errors:
-                    run["status"] = "COMPLETED"
-                    run["completedAt"] = now()
-            GeoHandler.store.event(
-                "geodata.import.processing.completed.v1",
-                "import_processing_queue",
-                queue_id,
-                {
-                    "queueId": queue_id,
-                    "importRunId": queue["importRunId"],
-                    "status": queue["status"],
-                    "targetStatus": queue["targetStatus"],
-                    **queue["result"],
-                },
-            )
-            GeoHandler.store.persist(include_import_state=True)
-        lease_stop.set()
-        lease_heartbeat.join(timeout=2)
-        return True
+                GeoHandler.store.mark_import_queue_dirty(queue_id)
+                run = GeoHandler.store.data.setdefault("importRuns", {}).get(
+                    queue["importRunId"]
+                )
+                if run and run.get("status") != "PROCESSED":
+                    if GeoHandler.store.durable:
+                        with GeoHandler.store.transaction() as connection:
+                            totals = connection.execute(
+                                "SELECT count(*) FILTER (WHERE validation_status='PROCESSED' "
+                                "AND existing_entity_id IS NULL),"
+                                "count(*) FILTER (WHERE validation_status='PROCESSED' "
+                                "AND existing_entity_id IS NOT NULL),"
+                                "count(*) FILTER (WHERE validation_status<>'PROCESSED') "
+                                "FROM geodata_import_candidate WHERE import_run_id=%s",
+                                (queue["importRunId"],),
+                            ).fetchone()
+                        promoted_created, promoted_updated, remaining = totals
+                    else:
+                        promoted_created = run.get("stats", {}).get(
+                            "created", 0
+                        ) + len(created)
+                        promoted_updated = run.get("stats", {}).get(
+                            "updated", 0
+                        ) + len(updated)
+                        remaining = [
+                            candidate
+                            for candidate in candidates.values()
+                            if candidate.get("importRunId")
+                            == queue["importRunId"]
+                            and candidate.get("validationStatus")
+                            != "PROCESSED"
+                        ]
+                    run.setdefault("stats", {}).update(
+                        {
+                            "processed": promoted_created + promoted_updated,
+                            "created": promoted_created,
+                            "updated": promoted_updated,
+                            "processingErrors": len(errors),
+                        }
+                    )
+                    if not remaining and not errors:
+                        run["status"] = "COMPLETED"
+                        run["completedAt"] = now()
+                GeoHandler.store.event(
+                    "geodata.import.processing.completed.v1",
+                    "import_processing_queue",
+                    queue_id,
+                    {
+                        "queueId": queue_id,
+                        "importRunId": queue["importRunId"],
+                        "status": queue["status"],
+                        "targetStatus": queue["targetStatus"],
+                        **queue["result"],
+                    },
+                )
+                GeoHandler.store.persist(include_import_state=True)
+            return True
+        finally:
+            lease_stop.set()
+            lease_heartbeat.join(timeout=2)
 
     @staticmethod
     def _heartbeat_import_queue(queue_id: str, stop: threading.Event) -> None:
@@ -3134,7 +3242,8 @@ class GeoHandler(JsonHandler):
         if target_status not in {"CANDIDATE", "APPROVED"}:
             raise ValueError("targetStatus must be CANDIDATE or APPROVED")
         candidates = GeoHandler.store.data.setdefault("importCandidates", {})
-        for candidate_id in candidate_ids:
+        queue_id = new_id()
+        for candidate_id in sorted(set(candidate_ids)):
             candidate = candidates.get(str(candidate_id))
             if not candidate or candidate.get("importRunId") != p["runId"]:
                 raise ValueError(
@@ -3142,7 +3251,20 @@ class GeoHandler(JsonHandler):
                 )
             if target_status == "APPROVED":
                 GeoHandler._authorize_review(p, candidate.get("entity") or {})
-        queue_id = new_id()
+            if candidate.get(
+                "validationStatus"
+            ) == "PROCESSED" or candidate.get("processingQueueId"):
+                raise ValueError("record is already promoted or queued")
+            candidate.update(
+                {
+                    "validationStatus": "CONFIRMED",
+                    "validatedBy": body["processorId"],
+                    "validatedAt": now(),
+                    "targetStatus": target_status,
+                    "processingQueueId": queue_id,
+                }
+            )
+            GeoHandler.store.mark_import_candidate_dirty(str(candidate_id))
         queue = {
             "id": queue_id,
             "importRunId": p["runId"],
@@ -3180,6 +3302,8 @@ class GeoHandler(JsonHandler):
                     GeoHandler._process_import_queue, queue_id
                 )
         else:
+            if GeoHandler.store.durable:
+                GeoHandler.store.persist(include_import_state=True)
             GeoHandler._process_import_queue(queue_id)
         return {**queue, "queued": True, "_status": 202}
 
@@ -3449,7 +3573,14 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def draw_proposal(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
-        body = p["_body"]
+        body = dict(p["_body"])
+        if p.get("_http"):
+            authorization = p.get("Authorization", "")
+            if not authorization.startswith("Bearer "):
+                raise PermissionError("Bearer authentication is required")
+            body["proposerId"] = verify_token(authorization[7:], "access")[
+                "sub"
+            ]
         require(body, "feature")
         feature = dict(body["feature"])
         feature["attachments"] = body.get(
@@ -3735,10 +3866,14 @@ class GeoHandler(JsonHandler):
         for field in manual_fields:
             if field in location:
                 entity[field] = normalize_value(field, location[field])
+        if GeoHandler.store.durable:
+            from relational_queries import location_rows
+
+            catalogue_locations = location_rows(GeoHandler.store)
+        else:
+            catalogue_locations = GeoHandler.store.items.values()
         entity.update(
-            derive_location_codes(
-                location, manual_fields, GeoHandler.store.items.values()
-            )
+            derive_location_codes(location, manual_fields, catalogue_locations)
         )
         for field in released_fields:
             entity[field] = None
@@ -4072,11 +4207,12 @@ class GeoHandler(JsonHandler):
                 )
         GeoHandler.store.delete_relational(entity_id)
         GeoHandler.store.items.pop(entity_id, None)
-        GeoHandler.store.events[:] = [
-            event
-            for event in GeoHandler.store.events
-            if event.get("aggregate", {}).get("id") != entity_id
-        ]
+        if not GeoHandler.store.durable:
+            GeoHandler.store.events[:] = [
+                event
+                for event in GeoHandler.store.events
+                if event.get("aggregate", {}).get("id") != entity_id
+            ]
         GeoHandler.store.event(
             "geodata.entity.deleted.v1",
             "entity",
@@ -4203,6 +4339,8 @@ class GeoHandler(JsonHandler):
         }
         if p.get("Authorization"):
             headers["Authorization"] = p["Authorization"]
+        if p.get("Idempotency-Key"):
+            headers["Idempotency-Key"] = p["Idempotency-Key"]
         data = None
         if payload is not None:
             headers["Content-Type"] = "application/json"
@@ -4270,16 +4408,59 @@ class GeoHandler(JsonHandler):
 
     @staticmethod
     def get_deletion_job(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
-        return GeoHandler.store.data.setdefault("entityDeletionJobs", {})[
+        job = GeoHandler.store.data.setdefault("entityDeletionJobs", {})[
             p["jobId"]
         ]
+        GeoHandler._authorize_gis_admin(p, job, "geodata.delete")
+        return {
+            key: value
+            for key, value in job.items()
+            if key != "executionClaims"
+        }
 
     @staticmethod
-    def _execute_deletion_job(job_id: str, p: dict[str, str]) -> None:
+    def _execute_deletion_job(
+        job_id: str, p: dict[str, str] | None = None
+    ) -> bool:
         jobs = GeoHandler.store.data.setdefault("entityDeletionJobs", {})
         job = jobs.get(job_id)
         if not job:
-            return
+            return True
+        if job.get("status") in {"COMPLETED", "FAILED"}:
+            return True
+        if GeoHandler.store.durable:
+            with GeoHandler.store.transaction() as connection:
+                claimed = connection.execute(
+                    "UPDATE geodata_control_record SET payload=payload || "
+                    "jsonb_build_object('status','PROCESSING','leaseUntil',"
+                    "now()+interval '120 seconds'),updated_at=now() "
+                    "WHERE kind='entityDeletionJobs' AND id=%s AND "
+                    "(payload->>'status'='QUEUED' OR (payload->>'status'='PROCESSING' "
+                    "AND (payload->>'leaseUntil')::timestamptz<=now())) RETURNING id",
+                    (job_id,),
+                ).fetchone()
+            if not claimed:
+                return False
+            GeoHandler.store._repository.invalidate(
+                "entityDeletionJobs", job_id
+            )
+            job = jobs[job_id]
+            claims = job.get("executionClaims")
+            if not claims:
+                raise PermissionError(
+                    "deletion job has no authorized execution context"
+                )
+            claims = {
+                **claims,
+                "exp": int(datetime.now(timezone.utc).timestamp()) + 300,
+            }
+            p = {
+                "_http": "1",
+                "Authorization": f"Bearer {sign_token(claims)}",
+                "_body": {},
+                "Idempotency-Key": f"geodata-delete:{job_id}",
+            }
+        p = p or {}
         job.update({"status": "PROCESSING", "updatedAt": now()})
         GeoHandler.store.persist()
         try:
@@ -4293,17 +4474,19 @@ class GeoHandler(JsonHandler):
                     or job["requestedBy"],
                 },
             )
-            deleted = GeoHandler.delete_entity(
-                None,
-                {
-                    **p,
-                    "entityId": job["entityId"],
-                    "_body": {
-                        "deletedBy": p.get("_body", {}).get("deletedBy")
-                        or job["requestedBy"]
+            deleted = {"entityId": job["entityId"], "deleted": True}
+            if job["entityId"] in GeoHandler.store.items:
+                deleted = GeoHandler.delete_entity(
+                    None,
+                    {
+                        **p,
+                        "entityId": job["entityId"],
+                        "_body": {
+                            "deletedBy": p.get("_body", {}).get("deletedBy")
+                            or job["requestedBy"]
+                        },
                     },
-                },
-            )
+                )
             job.update(
                 {
                     "status": "COMPLETED",
@@ -4317,9 +4500,14 @@ class GeoHandler(JsonHandler):
                 "geodata.entity-deletion-job.completed.v1",
                 "entity_deletion_job",
                 job_id,
-                job,
+                {
+                    key: value
+                    for key, value in job.items()
+                    if key != "executionClaims"
+                },
             )
         except Exception as exc:  # pragma: no cover - exercised by service integration failures
+            GeoHandler.store.rollback_pending()
             job.update(
                 {"status": "FAILED", "error": str(exc), "updatedAt": now()}
             )
@@ -4327,9 +4515,14 @@ class GeoHandler(JsonHandler):
                 "geodata.entity-deletion-job.failed.v1",
                 "entity_deletion_job",
                 job_id,
-                job,
+                {
+                    key: value
+                    for key, value in job.items()
+                    if key != "executionClaims"
+                },
             )
         GeoHandler.store.persist()
+        return True
 
     @staticmethod
     def confirm_deletion_job(
@@ -4342,8 +4535,13 @@ class GeoHandler(JsonHandler):
         job = GeoHandler.store.data.setdefault("entityDeletionJobs", {})[
             p["jobId"]
         ]
+        GeoHandler._authorize_gis_admin(p, job, "geodata.delete")
         if job.get("status") == "COMPLETED":
-            return job
+            return {
+                key: value
+                for key, value in job.items()
+                if key != "executionClaims"
+            }
         if job.get("status") != "AWAITING_CONFIRMATION":
             raise ValueError("deletion job is not awaiting confirmation")
         job.update(
@@ -4355,6 +4553,30 @@ class GeoHandler(JsonHandler):
             }
         )
         request_context = {**p, "_body": body}
+        if GeoHandler.store.durable:
+            authorization = p.get("Authorization", "")
+            claims = verify_token(authorization[7:])
+            job["executionClaims"] = {
+                name: claims.get(name) for name in ("sub", "roles", "scp")
+            }
+            GeoHandler.store.event(
+                "geodata.entity-deletion-job.queued.v1",
+                "entity_deletion_job",
+                job["id"],
+                {
+                    "jobId": job["id"],
+                    "natsSubject": "myota.geodata.entity.delete.v1",
+                },
+            )
+            return {
+                **{
+                    key: value
+                    for key, value in job.items()
+                    if key != "executionClaims"
+                },
+                "queued": True,
+                "_status": 202,
+            }
         if p.get("_http"):
             GeoHandler.deletion_executor.submit(
                 GeoHandler._execute_deletion_job, job["id"], request_context
@@ -4498,6 +4720,9 @@ GeoHandler.deprecated_routes = {
     ("POST", "/v1/geodata/entities/{entityId}/name"),
     ("POST", "/v1/geodata/entities/{entityId}/delete"),
 }
+
+
+install_operations(GeoHandler)
 
 
 if __name__ == "__main__":

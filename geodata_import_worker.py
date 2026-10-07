@@ -128,6 +128,9 @@ async def _consume(
                     aggregate_id = aggregate.get("id")
                     with psycopg.connect(GeoHandler.store.dsn) as connection:
                         connection.execute(
+                            "SET LOCAL myota.geodata_writer = 'row-v1'"
+                        )
+                        connection.execute(
                             "INSERT INTO dead_letter_event(event_id,event_type,payload,attempts,error) "
                             "VALUES (%s,%s,%s::jsonb,%s,%s) ON CONFLICT DO NOTHING",
                             (
@@ -176,6 +179,7 @@ async def _consume(
 async def run() -> None:
     if not GeoHandler.store.durable:
         raise RuntimeError("GEO_DATABASE_URL is required for import workers")
+    await asyncio.to_thread(GeoHandler.store.wait_for_authority_schema)
     GeoHandler.store.hydrate()
     nc = NATS()
     await nc.connect(
@@ -226,7 +230,26 @@ async def run() -> None:
                     "promotion lease is active; defer this delivery"
                 )
 
+    async def delete_entity(event: dict[str, Any]) -> None:
+        job_id = event.get("aggregate", {}).get("id")
+        if job_id:
+            processed = await asyncio.to_thread(
+                GeoHandler._execute_deletion_job, str(job_id)
+            )
+            if not processed:
+                raise RuntimeError("deletion lease is active; defer delivery")
+
     tasks = [
+        asyncio.create_task(
+            _consume(
+                js,
+                "geodata-entity-deletion-v1",
+                "myota.geodata.entity.delete.v1",
+                delete_entity,
+                stop_event,
+            ),
+            name="geodata-entity-deletion-consumer",
+        ),
         asyncio.create_task(
             _consume(
                 js,

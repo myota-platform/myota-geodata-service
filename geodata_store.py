@@ -1,16 +1,13 @@
-"""Durable relational persistence for the geodata catalogue.
-
-The compatibility JSON snapshot is retained for older service metadata and
-tests. Entity writes are additionally stored in the PostGIS-owned tables so a
-manual proposal is durable and visible to GIS tooling.
-"""
+"""Row encoders and database-authoritative geodata repositories."""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -98,7 +95,7 @@ def _cached_import_expired(
     )
 
 
-class GeodataStore(Store):
+class CompatibilityGeodataStore(Store):
     def __init__(
         self, service: str = "geodata", dsn_env: str | None = None
     ) -> None:
@@ -131,6 +128,10 @@ class GeodataStore(Store):
     def _category_id(
         self, connection: Any, code: str, geometry_type: str
     ) -> uuid.UUID:
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"geodata:category:{code}",),
+        )
         row = connection.execute(
             "SELECT id FROM entity_type WHERE programme_id IS NULL AND code = %s LIMIT 1",
             (code,),
@@ -244,9 +245,6 @@ class GeodataStore(Store):
             if not include_import_state:
                 return
             import_runs = self.data.get("importRuns", {})
-            for run_id, run in list(import_runs.items()):
-                if _cached_import_expired(run):
-                    import_runs.pop(run_id, None)
             for run in import_runs.values():
                 run_id = _uuid(run.get("id"))
                 if not run_id:
@@ -487,509 +485,139 @@ class GeodataStore(Store):
         finally:
             self._observe_postgis_query("bbox", started)
 
-    def hydrate(self) -> None:
-        super().hydrate()
+
+class GeodataStore(CompatibilityGeodataStore):
+    """Database-authoritative geodata with scoped compatibility projections."""
+
+    def __init__(self, service="geodata", dsn_env=None):
+        super().__init__(service, dsn_env)
+        self._repository = None
+
+    def wait_for_authority_schema(self):
+        """Do not serve or consume work before the row-authority migration."""
         if not self.durable:
             return
-        self._dirty_import_candidate_ids.clear()
-        self._deleted_import_candidate_ids.clear()
-        self._dirty_import_queue_ids.clear()
-        self._deleted_import_queue_ids.clear()
-        with self.transaction() as connection:
-            rows = connection.execute(
-                "SELECT id::text, programme_slug, entity_type_code, name, lifecycle_status, ST_AsGeoJSON(geom)::jsonb, public_properties, source_state, jurisdiction, attachments FROM geodata_entity"
-            ).fetchall()
-            source_rows = connection.execute(
-                "SELECT entity_id::text, adapter_code, source_uri, source_record_id, license, attribution, retrieved_at, source_payload FROM source_reference"
-            ).fetchall()
-            category_rows = connection.execute(
-                "SELECT entity_id::text, category_code, is_primary FROM geodata_entity_category ORDER BY entity_id, is_primary DESC, category_code"
-            ).fetchall()
-            import_rows = connection.execute(
-                "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
-                "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by FROM import_run"
-            ).fetchall()
-            candidate_rows = connection.execute(
-                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, programme_slug, "
-                "entity_type_codes, candidate_source, source_ref, source_hash, provenance, entity_payload, "
-                "validation_status, validation_note, validated_by, validated_at, target_status, "
-                "processed_entity_id::text, processed_at FROM geodata_import_candidate"
-            ).fetchall()
-            queue_rows = connection.execute(
-                "SELECT id::text, import_run_id::text, candidate_ids, target_status, requested_by, status, "
-                "result, error, requested_at, started_at, completed_at, attempt_count, heartbeat_at, lease_until "
-                "FROM geodata_import_processing_queue"
-            ).fetchall()
-        import_runs = self.data.setdefault("importRuns", {})
-        for row in import_rows:
-            metadata = (
-                row[2]
-                if isinstance(row[2], dict)
-                else json.loads(row[2] or "{}")
-            )
-            run = import_runs.setdefault(row[0], {"id": row[0]})
-            # Relational state is authoritative for lifecycle and timestamps;
-            # preserve compatibility-only fields such as manifest and errors.
-            run.update(
-                {
-                    "id": row[0],
-                    "adapter": row[1],
-                    "source": metadata.get("source")
-                    or run.get("source")
-                    or {},
-                    "programmeSlug": metadata.get(
-                        "programmeSlug", run.get("programmeSlug")
-                    ),
-                    "format": metadata.get(
-                        "format", run.get("format") or "GEOJSON"
-                    ),
-                    "filename": metadata.get("filename", run.get("filename")),
-                    "entityType": metadata.get(
-                        "entityType", run.get("entityType")
-                    ),
-                    "entityTypes": metadata.get("entityTypes")
-                    or run.get("entityTypes")
-                    or [],
-                    "queuedAt": metadata.get("queuedAt", run.get("queuedAt")),
-                    "featureCount": metadata.get(
-                        "featureCount", run.get("featureCount")
-                    ),
-                    "binaryObjectPending": bool(
-                        metadata.get(
-                            "binaryObjectPending",
-                            run.get("binaryObjectPending", False),
-                        )
-                    ),
-                    "uploadSpoolPath": metadata.get(
-                        "uploadSpoolPath", run.get("uploadSpoolPath")
-                    ),
-                    "status": row[6],
-                    "startedAt": row[3].isoformat().replace("+00:00", "Z")
-                    if row[3]
-                    else run.get("startedAt"),
-                    "completedAt": row[4].isoformat().replace("+00:00", "Z")
-                    if row[4]
-                    else run.get("completedAt"),
-                    "stats": row[5]
-                    if isinstance(row[5], dict)
-                    else json.loads(row[5] or "{}"),
-                    "attemptCount": row[7] or 0,
-                    "heartbeatAt": row[8].isoformat().replace("+00:00", "Z")
-                    if row[8]
-                    else None,
-                    "leaseUntil": row[9].isoformat().replace("+00:00", "Z")
-                    if row[9]
-                    else None,
-                    "lastError": row[10],
-                    "processedAt": row[11].isoformat().replace("+00:00", "Z")
-                    if row[11]
-                    else None,
-                    "processedBy": row[12],
-                }
-            )
-        snapshot_candidates = self.data.get("importCandidates") or {}
-        import_candidates: dict[str, dict[str, Any]] = {}
-        for row in candidate_rows:
-            entity = (
-                row[10]
-                if isinstance(row[10], dict)
-                else json.loads(row[10] or "{}")
-            )
-            if not entity.get("geometry"):
-                # The relational geometry is intentionally not selected here:
-                # entity_payload is the canonical normalized candidate payload.
-                continue
-            import_candidates[row[0]] = {
-                "id": row[0],
-                "importRunId": row[1],
-                "ordinal": row[2],
-                "existingEntityId": row[3],
-                "candidateSource": row[7] or {},
-                "validationStatus": row[11],
-                "validationNote": row[12],
-                "validatedBy": row[13],
-                "validatedAt": row[14].isoformat().replace("+00:00", "Z")
-                if row[14]
-                else None,
-                "targetStatus": row[15],
-                "processedEntityId": row[16],
-                "processedAt": row[17].isoformat().replace("+00:00", "Z")
-                if row[17]
-                else None,
-                "dedupeWarning": entity.get("dedupeWarning"),
-                "possibleDuplicates": entity.get("possibleDuplicates") or [],
-                "entity": entity,
-            }
-        if not candidate_rows and snapshot_candidates:
-            # Older deployments kept staged records only in service_state. Keep
-            # them available for a one-time migration into the relational
-            # tables instead of silently losing an in-flight import on restart.
-            import_candidates = snapshot_candidates
-            self._dirty_import_candidate_ids.update(import_candidates)
-        self.data["importCandidates"] = import_candidates
-        snapshot_queues = self.data.get("importProcessingQueues") or {}
-        import_queues: dict[str, dict[str, Any]] = {}
-        for row in queue_rows:
-            import_queues[row[0]] = {
-                "id": row[0],
-                "importRunId": row[1],
-                "candidateIds": row[2]
-                if isinstance(row[2], list)
-                else json.loads(row[2] or "[]"),
-                "targetStatus": row[3],
-                "requestedBy": row[4],
-                "status": row[5],
-                "result": row[6]
-                if isinstance(row[6], dict)
-                else json.loads(row[6] or "{}"),
-                "error": row[7],
-                "requestedAt": row[8].isoformat().replace("+00:00", "Z")
-                if row[8]
-                else None,
-                "startedAt": row[9].isoformat().replace("+00:00", "Z")
-                if row[9]
-                else None,
-                "completedAt": row[10].isoformat().replace("+00:00", "Z")
-                if row[10]
-                else None,
-                "attemptCount": row[11] or 0,
-                "heartbeatAt": row[12].isoformat().replace("+00:00", "Z")
-                if row[12]
-                else None,
-                "leaseUntil": row[13].isoformat().replace("+00:00", "Z")
-                if row[13]
-                else None,
-            }
-        if not queue_rows and snapshot_queues:
-            import_queues = snapshot_queues
-            self._dirty_import_queue_ids.update(import_queues)
-        self.data["importProcessingQueues"] = import_queues
-        self._deleted_import_candidate_ids.clear()
-        self._deleted_import_queue_ids.clear()
-        sources = {row[0]: row for row in source_rows}
-        categories = {}
-        for entity_id, category_code, _ in category_rows:
-            categories.setdefault(entity_id, []).append(category_code)
-        for row in rows:
-            properties = (
-                row[6]
-                if isinstance(row[6], dict)
-                else json.loads(row[6] or "{}")
-            )
-            # The relational entity row is authoritative for lifecycle fields.
-            # service_state is retained as a compatibility snapshot, but it may
-            # lag behind a status mutation when a process is restarted between
-            # the relational write and the snapshot write. Always overlay the
-            # durable columns, including for entities already present there.
-            entity = {
-                **self.items.get(row[0], {}),
-                **properties,
-                "id": row[0],
-                "programmeSlug": row[1],
-                "entityType": row[2],
-                "name": row[3],
-                "status": row[4],
-                "geometry": row[5],
-                "sourceState": row[7],
-                "jurisdiction": row[8],
-                "attachments": row[9] or [],
-            }
-            entity["entityTypes"] = categories.get(row[0]) or [row[2]]
-            entity["entityTypeCodes"] = list(entity["entityTypes"])
-            source = sources.get(row[0])
-            if source:
-                payload = (
-                    source[7]
-                    if isinstance(source[7], dict)
-                    else json.loads(source[7] or "{}")
-                )
-                entity["sourceRef"] = source[3]
-                entity.setdefault("provenance", {}).update(
-                    {
-                        "adapter": source[1],
-                        "source": {
-                            "url": source[2],
-                            "license": source[4],
-                            "attribution": source[5],
-                            "retrievedAt": source[6]
-                            .isoformat()
-                            .replace("+00:00", "Z")
-                            if source[6]
-                            else None,
-                        },
-                        "sourceFeature": payload,
-                    }
-                )
-            self.items[row[0]] = entity
+        import psycopg
 
-    def refresh_import_runs(self) -> None:
-        """Refresh import lifecycle state from PostgreSQL for read endpoints."""
+        while True:
+            try:
+                with self.base_transaction() as connection:
+                    if connection.execute(
+                        "SELECT 1 FROM geodata_schema_feature "
+                        "WHERE name='row_authority_v1'"
+                    ).fetchone():
+                        return
+            except psycopg.Error:
+                pass
+            logging.getLogger(__name__).warning(
+                "Waiting for geodata migration 016 before accepting work"
+            )
+            time.sleep(3)
+
+    def hydrate(self):
         if not self.durable:
+            self._hydrated = True
             return
-        with self.transaction() as connection:
-            rows = connection.execute(
-                "SELECT id::text, adapter_code, source_metadata, started_at, completed_at, stats, status, "
-                "attempt_count, heartbeat_at, lease_until, last_error, processed_at, processed_by FROM import_run"
-            ).fetchall()
-        with self.lock:
-            import_runs = self.data.setdefault("importRuns", {})
-            durable_ids = {row[0] for row in rows}
-            for run_id in set(import_runs) - durable_ids:
-                import_runs.pop(run_id, None)
-            for row in rows:
-                metadata = (
-                    row[2]
-                    if isinstance(row[2], dict)
-                    else json.loads(row[2] or "{}")
-                )
-                run = import_runs.setdefault(row[0], {"id": row[0]})
-                run.update(
-                    {
-                        "id": row[0],
-                        "adapter": row[1],
-                        "source": metadata.get("source")
-                        or run.get("source")
-                        or {},
-                        "programmeSlug": metadata.get(
-                            "programmeSlug", run.get("programmeSlug")
-                        ),
-                        "format": metadata.get(
-                            "format", run.get("format") or "GEOJSON"
-                        ),
-                        "filename": metadata.get(
-                            "filename", run.get("filename")
-                        ),
-                        "entityType": metadata.get(
-                            "entityType", run.get("entityType")
-                        ),
-                        "entityTypes": metadata.get("entityTypes")
-                        or run.get("entityTypes")
-                        or [],
-                        "queuedAt": metadata.get(
-                            "queuedAt", run.get("queuedAt")
-                        ),
-                        "featureCount": metadata.get(
-                            "featureCount", run.get("featureCount")
-                        ),
-                        "binaryObjectPending": bool(
-                            metadata.get(
-                                "binaryObjectPending",
-                                run.get("binaryObjectPending", False),
-                            )
-                        ),
-                        "uploadSpoolPath": metadata.get(
-                            "uploadSpoolPath", run.get("uploadSpoolPath")
-                        ),
-                        "status": row[6],
-                        "startedAt": row[3].isoformat().replace("+00:00", "Z")
-                        if row[3]
-                        else run.get("startedAt"),
-                        "completedAt": row[4]
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                        if row[4]
-                        else run.get("completedAt"),
-                        "stats": row[5]
-                        if isinstance(row[5], dict)
-                        else json.loads(row[5] or "{}"),
-                        "attemptCount": row[7] or 0,
-                        "heartbeatAt": row[8]
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                        if row[8]
-                        else None,
-                        "leaseUntil": row[9].isoformat().replace("+00:00", "Z")
-                        if row[9]
-                        else None,
-                        "lastError": row[10],
-                        "processedAt": row[11]
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                        if row[11]
-                        else None,
-                        "processedBy": row[12],
-                    }
-                )
+        if self._repository is not None:
+            return
+        from relational_state import DatabaseEvents, RowRepository
 
-    def refresh_import_queue(self, queue_id: str) -> None:
-        """Load one promotion job and its selected records, not the catalogue."""
+        self._repository = RowRepository(
+            self, CompatibilityGeodataStore._sync_relational
+        )
+        self.items = self._repository.mapping("entities")
+        self.data = {
+            kind: self._repository.mapping(kind)
+            for kind in (
+                "importRuns",
+                "importCandidates",
+                "importProcessingQueues",
+                "schedules",
+                "conflationCandidates",
+                "sourceManifests",
+                "entityDeletionJobs",
+            )
+        }
+        self.events = DatabaseEvents(self._repository)
+        self.idempotency = {}
+        self._hydrated = True
+
+    @contextmanager
+    def base_transaction(self):
+        with Store.transaction(self) as connection:
+            if connection is not None:
+                connection.execute("SET LOCAL myota.geodata_writer = 'row-v1'")
+            yield connection
+
+    def transaction(self):
+        if self._repository is not None:
+            return self._repository.connection()
+        return self.base_transaction()
+
+    def operation(self, write=False, atomic=True):
+        from contextlib import nullcontext
+
         if not self.durable:
-            return
-        with self.transaction() as connection:
-            queue_row = connection.execute(
-                "SELECT id::text, import_run_id::text, candidate_ids, target_status, "
-                "requested_by, status, result, error, requested_at, started_at, "
-                "completed_at, attempt_count, heartbeat_at, lease_until "
-                "FROM geodata_import_processing_queue WHERE id=%s",
-                (queue_id,),
-            ).fetchone()
-            if not queue_row:
-                return
-            candidate_ids = (
-                queue_row[2]
-                if isinstance(queue_row[2], list)
-                else json.loads(queue_row[2] or "[]")
-            )
-            candidate_rows = connection.execute(
-                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, "
-                "entity_payload, candidate_source, validation_status, validation_note, "
-                "validated_by, validated_at, target_status, processed_entity_id::text, "
-                "processed_at FROM geodata_import_candidate WHERE id = ANY(%s::uuid[])",
-                (candidate_ids,),
-            ).fetchall()
-        with self.lock:
-            self.data.setdefault("importProcessingQueues", {})[queue_id] = {
-                "id": queue_row[0],
-                "importRunId": queue_row[1],
-                "candidateIds": candidate_ids,
-                "targetStatus": queue_row[3],
-                "requestedBy": queue_row[4],
-                "status": queue_row[5],
-                "result": queue_row[6]
-                if isinstance(queue_row[6], dict)
-                else json.loads(queue_row[6] or "{}"),
-                "error": queue_row[7],
-                "requestedAt": queue_row[8].isoformat().replace("+00:00", "Z")
-                if queue_row[8]
-                else None,
-                "startedAt": queue_row[9].isoformat().replace("+00:00", "Z")
-                if queue_row[9]
-                else None,
-                "completedAt": queue_row[10].isoformat().replace("+00:00", "Z")
-                if queue_row[10]
-                else None,
-                "attemptCount": queue_row[11] or 0,
-                "heartbeatAt": queue_row[12].isoformat().replace("+00:00", "Z")
-                if queue_row[12]
-                else None,
-                "leaseUntil": queue_row[13].isoformat().replace("+00:00", "Z")
-                if queue_row[13]
-                else None,
-            }
-            candidates = self.data.setdefault("importCandidates", {})
-            for row in candidate_rows:
-                entity = (
-                    row[4]
-                    if isinstance(row[4], dict)
-                    else json.loads(row[4] or "{}")
-                )
-                if not entity.get("geometry"):
-                    continue
-                candidates[row[0]] = {
-                    "id": row[0],
-                    "importRunId": row[1],
-                    "ordinal": row[2],
-                    "existingEntityId": row[3],
-                    "entity": entity,
-                    "candidateSource": row[5] or {},
-                    "validationStatus": row[6],
-                    "validationNote": row[7],
-                    "validatedBy": row[8],
-                    "validatedAt": row[9].isoformat().replace("+00:00", "Z")
-                    if row[9]
-                    else None,
-                    "targetStatus": row[10],
-                    "processedEntityId": row[11],
-                    "processedAt": row[12].isoformat().replace("+00:00", "Z")
-                    if row[12]
-                    else None,
-                    "dedupeWarning": entity.get("dedupeWarning"),
-                    "possibleDuplicates": entity.get("possibleDuplicates")
-                    or [],
-                }
+            return nullcontext()
+        self.hydrate()
+        return self._repository.operation(write, atomic)
 
-    def refresh_import_candidates_for_run(self, run_id: str) -> None:
-        """Refresh one run's review records from their relational owner table."""
+    def persist(self, include_import_state=False):
+        if self.durable:
+            self.hydrate()
+            self._repository.flush()
+
+    def persist_snapshot_only(self):
+        if self.durable:
+            self.hydrate()
+            self._repository.flush(events_only=True)
+
+    def rollback_pending(self):
+        if self._repository is not None:
+            self._repository.rollback_pending()
+
+    def delete_relational(self, entity_id):
+        if self.durable:
+            self.hydrate()
+            self._repository.scope.deleted.add(("entities", str(entity_id)))
+
+    def delete_encoded_entity(self, entity_id):
+        CompatibilityGeodataStore.delete_relational(self, entity_id)
+
+    def once(self, key, callback):
         if not self.durable:
-            return
-        with self.transaction() as connection:
-            rows = connection.execute(
-                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, "
-                "candidate_source, entity_payload, validation_status, validation_note, "
-                "validated_by, validated_at, target_status, processed_entity_id::text, "
-                "processed_at FROM geodata_import_candidate WHERE import_run_id=%s",
-                (run_id,),
-            ).fetchall()
-        refreshed: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            entity = (
-                row[5]
-                if isinstance(row[5], dict)
-                else json.loads(row[5] or "{}")
-            )
-            if not entity.get("geometry"):
-                continue
-            refreshed[row[0]] = {
-                "id": row[0],
-                "importRunId": row[1],
-                "ordinal": row[2],
-                "existingEntityId": row[3],
-                "candidateSource": row[4] or {},
-                "entity": entity,
-                "validationStatus": row[6],
-                "validationNote": row[7],
-                "validatedBy": row[8],
-                "validatedAt": row[9].isoformat().replace("+00:00", "Z")
-                if row[9]
-                else None,
-                "targetStatus": row[10],
-                "processedEntityId": row[11],
-                "processedAt": row[12].isoformat().replace("+00:00", "Z")
-                if row[12]
-                else None,
-                "dedupeWarning": entity.get("dedupeWarning"),
-                "possibleDuplicates": entity.get("possibleDuplicates") or [],
-            }
-        with self.lock:
-            candidates = self.data.setdefault("importCandidates", {})
-            for candidate_id, candidate in list(candidates.items()):
-                if candidate.get("importRunId") == run_id:
-                    candidates.pop(candidate_id, None)
-            candidates.update(refreshed)
+            return super().once(key, callback)
+        self.hydrate()
+        return self._repository.once(key, callback)
 
-    def persist(self, include_import_state: bool = False) -> None:
-        # Import workers and request handlers share these dictionaries and
-        # dirty-ID sets. Hold the same lock as their mutations while building
-        # and writing a durable snapshot.
-        with self.lock:
-            self._sync_relational(include_import_state)
-            # Candidate payloads are durable in PostGIS. Keep the compatibility
-            # snapshot small so a large import does not rewrite every staged
-            # feature on every review action.
-            compact_data = {
-                key: value
-                for key, value in self.data.items()
-                if key not in {"importCandidates", "importProcessingQueues"}
-            }
-            super().persist(
-                {
-                    "items": self.items,
-                    "events": self.events,
-                    "data": compact_data,
-                }
-            )
-            self._dirty_import_candidate_ids.clear()
-            self._deleted_import_candidate_ids.clear()
-            self._dirty_import_queue_ids.clear()
-            self._deleted_import_queue_ids.clear()
+    def refresh_import_runs(self):
+        if self.durable:
+            self.hydrate()
+            self._repository.invalidate("importRuns")
 
-    def persist_snapshot_only(self) -> None:
-        """Persist service metadata/events without syncing unrelated GIS rows.
+    def refresh_import_candidates_for_run(self, run_id):
+        if self.durable:
+            self.hydrate()
+            self._repository.invalidate("importCandidates")
 
-        Targeted cleanup and maintenance operations can update relational rows
-        in their own transaction. The general relational sync would also flush
-        every dirty candidate/queue in memory, including work from other runs.
-        """
-        with self.lock:
-            compact_data = {
-                key: value
-                for key, value in self.data.items()
-                if key not in {"importCandidates", "importProcessingQueues"}
-            }
-            super().persist(
-                {
-                    "items": self.items,
-                    "events": self.events,
-                    "data": compact_data,
-                }
-            )
+    def refresh_import_queue(self, queue_id):
+        if self.durable:
+            self.hydrate()
+            self._repository.invalidate("importProcessingQueues", queue_id)
+            self._repository.invalidate("importCandidates")
+
+    def mark_import_candidate_dirty(self, candidate_id):
+        if not self.durable:
+            super().mark_import_candidate_dirty(candidate_id)
+
+    def mark_import_candidate_deleted(self, candidate_id):
+        if not self.durable:
+            super().mark_import_candidate_deleted(candidate_id)
+
+    def mark_import_queue_dirty(self, queue_id):
+        if not self.durable:
+            super().mark_import_queue_dirty(queue_id)
+
+    def mark_import_queue_deleted(self, queue_id):
+        if not self.durable:
+            super().mark_import_queue_deleted(queue_id)

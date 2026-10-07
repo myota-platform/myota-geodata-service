@@ -558,7 +558,7 @@ class JsonHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Correlation-ID",
+                "Content-Type, Authorization, Idempotency-Key, If-Match, X-Request-ID, X-Correlation-ID",
             )
             self.send_header(
                 "Access-Control-Allow-Methods",
@@ -573,6 +573,10 @@ class JsonHandler(BaseHTTPRequestHandler):
                     ),
                 )
             self.send_header("API-Version", "v1")
+            if isinstance(payload, dict) and isinstance(
+                payload.get("version"), int
+            ):
+                self.send_header("ETag", f'"{payload["version"]}"')
             self.end_headers()
             if data:
                 self.wfile.write(data)
@@ -719,6 +723,7 @@ class JsonHandler(BaseHTTPRequestHandler):
                             "Authorization": self.headers.get(
                                 "Authorization", ""
                             ),
+                            "If-Match": self.headers.get("If-Match", ""),
                             "X-Part-SHA256": self.headers.get(
                                 "X-Part-SHA256", ""
                             ),
@@ -736,7 +741,9 @@ class JsonHandler(BaseHTTPRequestHandler):
                         self.store.persist()
                     self._send(status, result)
                 except ValueError as exc:
-                    self._error(400, "invalid_request", str(exc))
+                    status = getattr(exc, "status_code", 400)
+                    code = "conflict" if status == 409 else "invalid_request"
+                    self._error(status, code, str(exc))
                 except KeyError as exc:
                     self._error(404, "not_found", str(exc))
                 except PermissionError as exc:
