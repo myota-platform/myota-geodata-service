@@ -2742,6 +2742,20 @@ class GeoHandler(JsonHandler):
             raise ValueError(
                 "confirmation must exactly match DELETE LOAD TEST DATA <testRunId>"
             )
+        from load_test_upload_fixtures import (
+            purge_upload_fixtures,
+            tagged_upload_fixtures,
+        )
+
+        upload_fixtures = tagged_upload_fixtures(GeoHandler.store, test_run_id)
+        if any(
+            upload.bucket != GEODATA_IMPORT_BUCKET
+            for upload in upload_fixtures
+        ):
+            raise ValueError(
+                "load-test cleanup refuses to delete an upload object "
+                "outside the geodata import bucket"
+            )
         GeoHandler.store.refresh_import_runs()
         runs = GeoHandler.store.data.setdefault("importRuns", {})
         matching_runs = {
@@ -2810,6 +2824,7 @@ class GeoHandler(JsonHandler):
 
         object_store = ObjectStore()
         removed_objects = 0
+        removed_keys = set()
         for run in matching_runs.values():
             source = run.get("source") or {}
             object_key = source.get("objectKey")
@@ -2821,6 +2836,7 @@ class GeoHandler(JsonHandler):
                     )
                 object_store.delete(bucket, object_key)
                 removed_objects += 1
+                removed_keys.add((bucket, object_key))
             spool = run.get("uploadSpoolPath")
             if spool:
                 spool_root = Path(
@@ -2834,6 +2850,19 @@ class GeoHandler(JsonHandler):
                         "load-test spool path is outside the configured upload spool directory"
                     )
                 spool_path.unlink(missing_ok=True)
+
+        for upload in upload_fixtures:
+            key = (upload.bucket, upload.object_key)
+            if (
+                upload.status in {"COMPLETED", "FAILED"}
+                and key not in removed_keys
+            ):
+                object_store.delete(*key)
+                removed_keys.add(key)
+                removed_objects += 1
+        removed_uploads = purge_upload_fixtures(
+            GeoHandler.store, test_run_id, upload_fixtures
+        )
 
         for entity_id in entities:
             GeoHandler.store.delete_relational(entity_id)
@@ -2884,6 +2913,7 @@ class GeoHandler(JsonHandler):
                 "importsDeleted": len(run_ids),
                 "entitiesDeleted": len(entities),
                 "objectsDeleted": removed_objects,
+                "uploadSessionsDeleted": removed_uploads,
             },
         )
         # Do not flush unrelated dirty import candidates here. A different
@@ -2896,6 +2926,7 @@ class GeoHandler(JsonHandler):
             "importsDeleted": len(run_ids),
             "entitiesDeleted": len(entities),
             "objectsDeleted": removed_objects,
+            "uploadSessionsDeleted": removed_uploads,
             "cleaned": True,
         }
 
