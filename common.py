@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as email_default
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from metrics import METRICS
@@ -41,6 +41,29 @@ def require_durable_database(dsn_env: str | None, dsn: str) -> None:
         raise RuntimeError(
             f"{dsn_env} is required when MYOTA_REQUIRE_DURABILITY is enabled"
         )
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Thread-per-request server with an explicit concurrency ceiling."""
+
+    daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._request_slots = threading.BoundedSemaphore(
+            max(1, int(os.environ.get("MYOTA_HTTP_MAX_WORKERS", "64")))
+        )
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        self._request_slots.acquire()
+
+        def run() -> None:
+            try:
+                self.process_request_thread(request, client_address)
+            finally:
+                self._request_slots.release()
+
+        threading.Thread(target=run, daemon=True).start()
 
 
 def now() -> str:
@@ -172,11 +195,15 @@ class Store:
     """Service-owned state with optional PostgreSQL durability and a durable outbox."""
 
     def __init__(
-        self, service: str = "service", dsn_env: str | None = None
+        self,
+        service: str = "service",
+        dsn_env: str | None = None,
+        persist_state: bool = True,
     ) -> None:
         self.service = service
         self.dsn = os.environ.get(dsn_env or "", "") if dsn_env else ""
         require_durable_database(dsn_env, self.dsn)
+        self.persist_state = persist_state
         self.items: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.data: dict[str, Any] = {}
@@ -204,7 +231,9 @@ class Store:
                 self._pool = ConnectionPool(
                     self.dsn,
                     min_size=1,
-                    max_size=10,
+                    max_size=max(
+                        1, int(os.environ.get("MYOTA_DB_POOL_MAX", "10"))
+                    ),
                     open=True,
                     kwargs={"connect_timeout": 5},
                 )
@@ -230,7 +259,7 @@ class Store:
                 raise
 
     def hydrate(self) -> None:
-        if self._hydrated or not self.durable:
+        if self._hydrated or not self.durable or not self.persist_state:
             self._hydrated = True
             return
         with self.transaction() as connection:
@@ -253,7 +282,7 @@ class Store:
         self._hydrated = True
 
     def persist(self, state: dict[str, Any] | None = None) -> None:
-        if not self.durable:
+        if not self.durable or not self.persist_state:
             return
         snapshot = (
             state
@@ -615,6 +644,7 @@ class JsonHandler(BaseHTTPRequestHandler):
             "Content-Type", "text/plain; version=0.0.4; charset=utf-8"
         )
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
