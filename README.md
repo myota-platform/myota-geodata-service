@@ -333,35 +333,42 @@ administrator, an `APPROVED` entity. Community proposals use
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
-it submits ordinary GeoJSON through the `OSM` adapter so OSM tags are filtered,
+it submits GeoJSON through the `OSM` adapter so OSM tags are filtered,
 attribution is preserved, and source references remain available for review.
-File uploads use `POST /v1/geodata/imports/upload` as a multipart request with
-a `metadata` JSON part and a `file` part. The legacy JSON `contentBase64`
-payload remains supported for non-browser clients. Both paths return
-`202 QUEUED`; parsing, normalization, reverse-geocoding, deduplication, and
-pre-processed candidate persistence run in a bounded background import worker.
-Each run stores its source document in SeaweedFS, claims a PostgreSQL lease,
-and refreshes a heartbeat while it is working. On service restart, queued runs
-and all runs left in `PROCESSING` by the previous service instance are
-immediately requeued and resumed from object storage; the startup requeue is
-persisted before workers are dispatched. This avoids waiting for the normal
-lease timeout after a restart. Pasted KML/GPX sources are replayed as their
-normalized GeoJSON snapshot, while uploaded files retain their original
-parser format. Durable binary uploads whose parser adapter is not available
-remain visibly queued instead of being incorrectly marked failed.
-Unrecoverable runs are marked `FAILED` with a visible reason instead of being
-left indefinitely in `PROCESSING`. This makes the import history a durable
-operational status view rather than a process-local queue snapshot.
-Concurrent workers perform parsing and enrichment in parallel, but mutations
-to shared candidate, run, and manifest state—and durable snapshot iteration—are
-protected by the service lock. Parsing and enrichment remain outside the
-critical section. A concurrent-import regression test guards against
-dictionary-resize races during manifest comparison and persistence. Recovery
-replays preserve candidate identity by `(import_run_id, ordinal)` and update the
-existing staged row instead of inserting a duplicate. Load-test cleanup uses a
-snapshot-only persist after targeted relational deletes, so dirty rows from an
-unrelated active import cannot make cleanup partially fail. Cleanup can be
-retried safely after an earlier partial attempt.
+Browser file uploads use resumable sessions: create with
+`POST /v1/geodata/import-uploads`, upload bounded binary parts to
+`POST /v1/geodata/import-uploads/{uploadId}/parts/{partNumber}`, query progress
+with `GET /v1/geodata/import-uploads/{uploadId}`, and finalize with
+`POST /v1/geodata/import-uploads/{uploadId}/complete`. A client can abort with
+`DELETE /v1/geodata/import-uploads/{uploadId}`. Sessions are user-bound and
+idempotent; the API stores each part in SeaweedFS S3 multipart storage, checks
+part and whole-object SHA-256, scans the completed object, and persists the
+import run/outbox record before returning acceptance. Parts default to at most
+16 MiB. Abandoned multipart sessions are aborted by retention maintenance.
+There is no shared upload-spool PVC. The old single-request upload endpoint is
+not used by the admin web; durable deployments reject this legacy upload path.
+
+Durable deployments separate HTTP and queue execution. The API persists the
+import run and outbox event, while the geodata-owned `geodata_import_worker.py`
+process consumes durable NATS JetStream pull consumers with explicit ACKs,
+bounded pending work, lease/heartbeat/attempt tracking, retry backoff, and a
+terminal dead-letter path. Preprocessing and promotion use separate durable
+consumer names and subjects. The worker can be scaled independently of the
+API, and deterministic candidate/entity identities make redelivery safe. A
+worker refreshes relevant database queue rows before acting rather than
+relying on the API process's copy. In local non-durable unit-test mode only,
+the existing in-process fallback remains available; it is not the durable
+Compose/Helm path.
+
+Restart recovery replays queued work from the outbox/JetStream and reclaims
+expired database leases. This removes API-local durable job execution, but it
+does not yet make feature parsing memory-bounded: current parsing and legacy
+catalogue compatibility hydration can still consume memory proportional to a
+large source/run. Streaming parsers, bounded feature batches, and API
+multi-instance mutation safety remain explicit horizontal-scaling roadmap
+work. The SeaweedFS multipart protocol also requires integration and restart
+failure testing against the exact deployed SeaweedFS version before the upload
+phase is considered verified.
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
 PostGIS tables. The JSON `service_state` record is only a compatibility snapshot;
@@ -383,7 +390,7 @@ retained unchanged for provenance; when no usable alias exists the review UI
 continues to show `Unnamed candidate`.
 
 The deployment stores uploaded bytes in SeaweedFS and records
-`geodata.import.preprocessed.v1` in the durable outbox for NATS consumers.
+`myota.geodata.import.preprocess.v1` in the durable outbox for NATS consumers.
 Shapefile uploads must be ZIP archives with their `.shp`, `.shx`, and `.dbf`
 members.
 
@@ -399,13 +406,11 @@ previously confirmed IDs and an explicit `CANDIDATE` or `APPROVED` target.
 Successful promotion deletes the staged record; rejection also removes it from
 the import detail. The promotion request emits
 `geodata.import.processing.queued.v1` to the
-`myota.geodata.import.process.v1` subject. The local service runs a bounded
-fallback worker, while production NATS consumers process the same durable
-queue idempotently. The default
-request and upload limits default to 1 GiB (`MYOTA_MAX_BODY_BYTES` and
-`MYOTA_UPLOAD_MAX_BYTES`); deployments may set lower bounded values. Multipart
-uploads are spooled to a temporary file and streamed into object storage, so
-the gateway does not need a second in-memory copy of a large source document.
+`myota.geodata.import.process.v1` subject. The durable worker consumes the
+database-backed queue idempotently. The default whole-object limit is 1 GiB
+(`MYOTA_UPLOAD_MAX_BYTES`); deployments may set a lower limit. Each part is
+temporarily staged as a bounded file (16 MiB by default), not the entire source
+document.
 The admin web treats the text area as optional when a file is
 selected and links each recent run to this summary. Active `QUEUED`,
 `PROCESSING`, and `PREPROCESSED` runs are exposed with their pending and

@@ -33,7 +33,11 @@ ordered SQL files define the `myota_geo` database:
 12. `012_import_finalization.sql` records who finalized an import and when,
    while allowing staged candidate and queue data to be removed after review.
 13. `013_import_retention.sql` indexes finalized and inactive import runs
-   eligible for age-based retention cleanup.
+    eligible for age-based retention cleanup.
+14. `014_resumable_uploads.sql` adds user-owned resumable S3 multipart upload
+    sessions, per-part checksums, idempotency, and expiry metadata.
+15. `015_jetstream_worker_dispatch.sql` adds recoverable promotion leases and
+    re-dispatches in-flight imports through JetStream during the migration.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

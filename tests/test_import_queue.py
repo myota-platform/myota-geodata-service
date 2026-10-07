@@ -9,6 +9,21 @@ from unittest.mock import patch
 from geodata import GeoHandler
 
 
+class _MissingQueueConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, *_args):
+        return self
+
+    @staticmethod
+    def fetchone():
+        return None
+
+
 class ImportQueueTests(unittest.TestCase):
     def setUp(self):
         self.previous_items = GeoHandler.store.items
@@ -134,6 +149,17 @@ class ImportQueueTests(unittest.TestCase):
                     }
                 },
             )
+
+    def test_missing_promotion_queue_acknowledges_stale_delivery(self):
+        with (
+            patch.object(GeoHandler.store, "dsn", "postgresql://test"),
+            patch.object(
+                GeoHandler.store,
+                "transaction",
+                return_value=_MissingQueueConnection(),
+            ),
+        ):
+            self.assertTrue(GeoHandler._process_import_queue("deleted-queue"))
 
     def test_preprocessing_keeps_valid_entities_when_one_feature_errors(self):
         body = {

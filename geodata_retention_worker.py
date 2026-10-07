@@ -8,6 +8,8 @@ import os
 import time
 
 from import_retention import purge_expired_imports
+from geodata import GeoHandler
+from storage import ObjectStore
 
 
 def purge_sweep() -> dict[str, object]:
@@ -26,7 +28,45 @@ def purge_sweep() -> dict[str, object]:
         excluded.update(result["failedRunIds"])
         total["failedRunIds"].extend(result["failedRunIds"])
         if result["eligible"] < batch_size or result["purged"] == 0:
+            total["uploadsExpired"] = expire_upload_sessions(batch_size)
             return total
+
+
+def expire_upload_sessions(batch_size: int = 100) -> int:
+    """Abort stale S3 multipart sessions and retain only compact history."""
+    if not GeoHandler.store.durable:
+        return 0
+    with GeoHandler.store.transaction() as connection:
+        expired = connection.execute(
+            "SELECT id::text, bucket, object_key, multipart_upload_id "
+            "FROM geodata_upload_session WHERE status IN ('UPLOADING','COMPLETING') "
+            "AND expires_at <= now() ORDER BY expires_at LIMIT %s",
+            (batch_size,),
+        ).fetchall()
+    store = ObjectStore()
+    completed_ids = []
+    for upload_id, bucket, object_key, multipart_id in expired:
+        try:
+            store.abort_multipart(bucket, object_key, multipart_id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to abort expired multipart upload %s", upload_id
+            )
+            continue
+        completed_ids.append(upload_id)
+    if completed_ids:
+        with GeoHandler.store.transaction() as connection:
+            connection.execute(
+                "UPDATE geodata_upload_session SET status='EXPIRED', updated_at=now() "
+                "WHERE id = ANY(%s::uuid[]) AND status IN ('UPLOADING','COMPLETING')",
+                (completed_ids,),
+            )
+    with GeoHandler.store.transaction() as connection:
+        connection.execute(
+            "DELETE FROM geodata_upload_session WHERE status IN ('ABORTED','EXPIRED') "
+            "AND updated_at < now() - interval '30 days'"
+        )
+    return len(completed_ids)
 
 
 def main() -> None:

@@ -205,6 +205,136 @@ class ObjectStore:
                 )
         return {"sha256": sha256, "size": size, "storedAt": object_key}
 
+    def create_multipart(
+        self, bucket: str, object_key: str, content_type: str
+    ) -> str:
+        """Start a resumable S3 multipart upload and return its opaque ID."""
+        client = self._s3()
+        if not client:
+            raise RuntimeError(
+                "resumable uploads require an S3-compatible object store"
+            )
+        self._ensure_bucket(client, bucket)
+        result = client.create_multipart_upload(
+            Bucket=bucket, Key=object_key, ContentType=content_type
+        )
+        return str(result["UploadId"])
+
+    def upload_part(
+        self,
+        bucket: str,
+        object_key: str,
+        upload_id: str,
+        part_number: int,
+        path: str | Path,
+    ) -> str:
+        """Upload one bounded request part, returning the S3 ETag."""
+        client = self._s3()
+        if not client:
+            raise RuntimeError("S3-compatible object storage is unavailable")
+        with Path(path).open("rb") as stream:
+            result = client.upload_part(
+                Bucket=bucket,
+                Key=object_key,
+                UploadId=upload_id,
+                PartNumber=part_number,
+                Body=stream,
+                ContentLength=Path(path).stat().st_size,
+            )
+        return str(result["ETag"])
+
+    def complete_multipart(
+        self,
+        bucket: str,
+        object_key: str,
+        upload_id: str,
+        parts: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Atomically publish the assembled source object."""
+        client = self._s3()
+        if not client:
+            raise RuntimeError("S3-compatible object storage is unavailable")
+        result = client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=object_key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {
+                        "PartNumber": int(part["partNumber"]),
+                        "ETag": str(part["etag"]),
+                    }
+                    for part in parts
+                ]
+            },
+        )
+        return {"etag": result.get("ETag"), "storedAt": object_key}
+
+    def abort_multipart(
+        self, bucket: str, object_key: str, upload_id: str
+    ) -> None:
+        client = self._s3()
+        if client:
+            client.abort_multipart_upload(
+                Bucket=bucket, Key=object_key, UploadId=upload_id
+            )
+
+    def scan_object(
+        self, bucket: str, object_key: str, filename: str
+    ) -> dict[str, object]:
+        """Hash and malware-check a completed object with bounded memory."""
+        if self.local_root:
+            path = self._local_path(bucket, object_key)
+            return self.scan_path(path, filename)
+        client = self._s3()
+        if not client:
+            raise RuntimeError("S3-compatible object storage is unavailable")
+        head = client.head_object(Bucket=bucket, Key=object_key)
+        size = int(head["ContentLength"])
+        maximum = int(os.environ.get("MYOTA_UPLOAD_MAX_BYTES", str(1024**3)))
+        if size > maximum:
+            raise ValueError(f"{filename} exceeds the configured upload limit")
+        marker = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+        digest = hashlib.sha256()
+        found = False
+        previous = b""
+        response = client.get_object(Bucket=bucket, Key=object_key)
+        try:
+            while chunk := response["Body"].read(8 * 1024 * 1024):
+                digest.update(chunk)
+                found = found or marker in previous + chunk
+                previous = (previous + chunk)[-len(marker) :]
+        finally:
+            response["Body"].close()
+        if found:
+            raise ValueError("malware scan rejected the upload")
+
+        scanner_url = os.environ.get("MYOTA_CLAMAV_URL", "").strip()
+        if scanner_url:
+            response = client.get_object(Bucket=bucket, Key=object_key)
+            source = response["Body"]
+            request = urllib.request.Request(
+                scanner_url,
+                data=source,
+                method="POST",
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(size),
+                    "X-Upload-Name": filename,
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=120) as result:
+                    if result.status >= 300:
+                        raise ValueError("malware scanner rejected the upload")
+            except Exception as exc:
+                raise RuntimeError(
+                    "malware scanner is unavailable; import was not queued"
+                ) from exc
+            finally:
+                source.close()
+        return {"status": "CLEAN", "sha256": digest.hexdigest(), "size": size}
+
     def get(self, bucket: str, object_key: str) -> bytes | None:
         """Read a durable import source for restart recovery."""
         if self.local_root:

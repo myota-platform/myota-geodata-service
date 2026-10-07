@@ -319,7 +319,7 @@ class GeodataStore(Store):
                     "INSERT INTO geodata_import_candidate "
                     "(id, import_run_id, ordinal, planned_entity_id, programme_slug, entity_type_codes, name, geom, candidate_source, source_ref, source_hash, provenance, entity_payload, validation_status, validation_note, validated_by, validated_at, target_status, processed_entity_id, processed_at, updated_at) "
                     "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, now()) "
-                    "ON CONFLICT (import_run_id, ordinal) DO UPDATE SET planned_entity_id=EXCLUDED.planned_entity_id, programme_slug=EXCLUDED.programme_slug, entity_type_codes=EXCLUDED.entity_type_codes, name=EXCLUDED.name, geom=EXCLUDED.geom, candidate_source=EXCLUDED.candidate_source, source_ref=EXCLUDED.source_ref, source_hash=EXCLUDED.source_hash, provenance=EXCLUDED.provenance, entity_payload=EXCLUDED.entity_payload, updated_at=now()",
+                    "ON CONFLICT (import_run_id, ordinal) DO UPDATE SET planned_entity_id=EXCLUDED.planned_entity_id, programme_slug=EXCLUDED.programme_slug, entity_type_codes=EXCLUDED.entity_type_codes, name=EXCLUDED.name, geom=EXCLUDED.geom, candidate_source=EXCLUDED.candidate_source, source_ref=EXCLUDED.source_ref, source_hash=EXCLUDED.source_hash, provenance=EXCLUDED.provenance, entity_payload=EXCLUDED.entity_payload, validation_status=EXCLUDED.validation_status, validation_note=EXCLUDED.validation_note, validated_by=EXCLUDED.validated_by, validated_at=EXCLUDED.validated_at, target_status=EXCLUDED.target_status, processed_entity_id=EXCLUDED.processed_entity_id, processed_at=EXCLUDED.processed_at, updated_at=now()",
                     (
                         candidate_id,
                         run_id,
@@ -517,7 +517,8 @@ class GeodataStore(Store):
             ).fetchall()
             queue_rows = connection.execute(
                 "SELECT id::text, import_run_id::text, candidate_ids, target_status, requested_by, status, "
-                "result, error, requested_at, started_at, completed_at FROM geodata_import_processing_queue"
+                "result, error, requested_at, started_at, completed_at, attempt_count, heartbeat_at, lease_until "
+                "FROM geodata_import_processing_queue"
             ).fetchall()
         import_runs = self.data.setdefault("importRuns", {})
         for row in import_rows:
@@ -650,6 +651,13 @@ class GeodataStore(Store):
                 else None,
                 "completedAt": row[10].isoformat().replace("+00:00", "Z")
                 if row[10]
+                else None,
+                "attemptCount": row[11] or 0,
+                "heartbeatAt": row[12].isoformat().replace("+00:00", "Z")
+                if row[12]
+                else None,
+                "leaseUntil": row[13].isoformat().replace("+00:00", "Z")
+                if row[13]
                 else None,
             }
         if not queue_rows and snapshot_queues:
@@ -802,6 +810,142 @@ class GeodataStore(Store):
                         "processedBy": row[12],
                     }
                 )
+
+    def refresh_import_queue(self, queue_id: str) -> None:
+        """Load one promotion job and its selected records, not the catalogue."""
+        if not self.durable:
+            return
+        with self.transaction() as connection:
+            queue_row = connection.execute(
+                "SELECT id::text, import_run_id::text, candidate_ids, target_status, "
+                "requested_by, status, result, error, requested_at, started_at, "
+                "completed_at, attempt_count, heartbeat_at, lease_until "
+                "FROM geodata_import_processing_queue WHERE id=%s",
+                (queue_id,),
+            ).fetchone()
+            if not queue_row:
+                return
+            candidate_ids = (
+                queue_row[2]
+                if isinstance(queue_row[2], list)
+                else json.loads(queue_row[2] or "[]")
+            )
+            candidate_rows = connection.execute(
+                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, "
+                "entity_payload, candidate_source, validation_status, validation_note, "
+                "validated_by, validated_at, target_status, processed_entity_id::text, "
+                "processed_at FROM geodata_import_candidate WHERE id = ANY(%s::uuid[])",
+                (candidate_ids,),
+            ).fetchall()
+        with self.lock:
+            self.data.setdefault("importProcessingQueues", {})[queue_id] = {
+                "id": queue_row[0],
+                "importRunId": queue_row[1],
+                "candidateIds": candidate_ids,
+                "targetStatus": queue_row[3],
+                "requestedBy": queue_row[4],
+                "status": queue_row[5],
+                "result": queue_row[6]
+                if isinstance(queue_row[6], dict)
+                else json.loads(queue_row[6] or "{}"),
+                "error": queue_row[7],
+                "requestedAt": queue_row[8].isoformat().replace("+00:00", "Z")
+                if queue_row[8]
+                else None,
+                "startedAt": queue_row[9].isoformat().replace("+00:00", "Z")
+                if queue_row[9]
+                else None,
+                "completedAt": queue_row[10].isoformat().replace("+00:00", "Z")
+                if queue_row[10]
+                else None,
+                "attemptCount": queue_row[11] or 0,
+                "heartbeatAt": queue_row[12].isoformat().replace("+00:00", "Z")
+                if queue_row[12]
+                else None,
+                "leaseUntil": queue_row[13].isoformat().replace("+00:00", "Z")
+                if queue_row[13]
+                else None,
+            }
+            candidates = self.data.setdefault("importCandidates", {})
+            for row in candidate_rows:
+                entity = (
+                    row[4]
+                    if isinstance(row[4], dict)
+                    else json.loads(row[4] or "{}")
+                )
+                if not entity.get("geometry"):
+                    continue
+                candidates[row[0]] = {
+                    "id": row[0],
+                    "importRunId": row[1],
+                    "ordinal": row[2],
+                    "existingEntityId": row[3],
+                    "entity": entity,
+                    "candidateSource": row[5] or {},
+                    "validationStatus": row[6],
+                    "validationNote": row[7],
+                    "validatedBy": row[8],
+                    "validatedAt": row[9].isoformat().replace("+00:00", "Z")
+                    if row[9]
+                    else None,
+                    "targetStatus": row[10],
+                    "processedEntityId": row[11],
+                    "processedAt": row[12].isoformat().replace("+00:00", "Z")
+                    if row[12]
+                    else None,
+                    "dedupeWarning": entity.get("dedupeWarning"),
+                    "possibleDuplicates": entity.get("possibleDuplicates")
+                    or [],
+                }
+
+    def refresh_import_candidates_for_run(self, run_id: str) -> None:
+        """Refresh one run's review records from their relational owner table."""
+        if not self.durable:
+            return
+        with self.transaction() as connection:
+            rows = connection.execute(
+                "SELECT id::text, import_run_id::text, ordinal, planned_entity_id::text, "
+                "candidate_source, entity_payload, validation_status, validation_note, "
+                "validated_by, validated_at, target_status, processed_entity_id::text, "
+                "processed_at FROM geodata_import_candidate WHERE import_run_id=%s",
+                (run_id,),
+            ).fetchall()
+        refreshed: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entity = (
+                row[5]
+                if isinstance(row[5], dict)
+                else json.loads(row[5] or "{}")
+            )
+            if not entity.get("geometry"):
+                continue
+            refreshed[row[0]] = {
+                "id": row[0],
+                "importRunId": row[1],
+                "ordinal": row[2],
+                "existingEntityId": row[3],
+                "candidateSource": row[4] or {},
+                "entity": entity,
+                "validationStatus": row[6],
+                "validationNote": row[7],
+                "validatedBy": row[8],
+                "validatedAt": row[9].isoformat().replace("+00:00", "Z")
+                if row[9]
+                else None,
+                "targetStatus": row[10],
+                "processedEntityId": row[11],
+                "processedAt": row[12].isoformat().replace("+00:00", "Z")
+                if row[12]
+                else None,
+                "dedupeWarning": entity.get("dedupeWarning"),
+                "possibleDuplicates": entity.get("possibleDuplicates") or [],
+            }
+        with self.lock:
+            candidates = self.data.setdefault("importCandidates", {})
+            for candidate_id, candidate in list(candidates.items()):
+                if candidate.get("importRunId") == run_id:
+                    candidates.pop(candidate_id, None)
+            candidates.update(refreshed)
 
     def persist(self, include_import_state: bool = False) -> None:
         # Import workers and request handlers share these dictionaries and

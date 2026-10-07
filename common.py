@@ -469,6 +469,33 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     return result
 
 
+def read_bounded_raw_upload(
+    handler: BaseHTTPRequestHandler, max_bytes: int
+) -> dict[str, str]:
+    """Stream one bounded binary upload part to reconstructible temp storage."""
+    length = _request_length(handler)
+    if length <= 0 or length > max_bytes:
+        raise ValueError(
+            f"upload part must be between 1 and {max_bytes} bytes"
+        )
+    temporary = tempfile.NamedTemporaryFile(
+        prefix="myota-geodata-part-", suffix=".part", delete=False
+    )
+    try:
+        remaining = length
+        with temporary:
+            while remaining:
+                chunk = handler.rfile.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("upload part ended unexpectedly")
+                temporary.write(chunk)
+                remaining -= len(chunk)
+        return {"_uploadPath": temporary.name}
+    except Exception:
+        os.unlink(temporary.name)
+        raise
+
+
 class JsonHandler(BaseHTTPRequestHandler):
     service = "myota-service"
     routes: dict[
@@ -661,13 +688,23 @@ class JsonHandler(BaseHTTPRequestHandler):
                     self.current_route = (method, pattern)
                     if method in {"POST", "PUT", "PATCH", "DELETE"}:
                         content_type = self.headers.get("Content-Type", "")
-                        body = (
-                            read_multipart(self)
-                            if content_type.lower().startswith(
-                                "multipart/form-data"
+                        if content_type.lower().startswith(
+                            "multipart/form-data"
+                        ):
+                            body = read_multipart(self)
+                        elif self.current_route == (
+                            "POST",
+                            "/v1/geodata/import-uploads/{uploadId}/parts/{partNumber}",
+                        ):
+                            part_limit = int(
+                                os.environ.get(
+                                    "MYOTA_UPLOAD_PART_MAX_BYTES",
+                                    str(16 * 1024 * 1024),
+                                )
                             )
-                            else read_json(self)
-                        )
+                            body = read_bounded_raw_upload(self, part_limit)
+                        else:
+                            body = read_json(self)
                     else:
                         body = {}
                     result = fn(
@@ -681,6 +718,9 @@ class JsonHandler(BaseHTTPRequestHandler):
                             ),
                             "Authorization": self.headers.get(
                                 "Authorization", ""
+                            ),
+                            "X-Part-SHA256": self.headers.get(
+                                "X-Part-SHA256", ""
                             ),
                             "User-Agent": self.headers.get("User-Agent", ""),
                             "Remote-Addr": self.client_address[0],
