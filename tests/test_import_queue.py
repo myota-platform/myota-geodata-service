@@ -6,7 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from geodata import GeoHandler
+from geodata import GeoHandler, ImportCancelled
 
 
 class _MissingQueueConnection:
@@ -134,6 +134,61 @@ class ImportQueueTests(unittest.TestCase):
         )
         self.assertEqual(run["stats"]["created"], 1)
         self.assertEqual(len(GeoHandler.store.items), 1)
+
+    def test_cancel_queued_import_is_immediate_and_idempotent(self):
+        run_id = "run-cancel-queued"
+        GeoHandler.store.data["importRuns"] = {
+            run_id: {"id": run_id, "status": "QUEUED", "source": {}}
+        }
+        params = {"runId": run_id, "_http": "1"}
+        with (
+            patch.object(GeoHandler, "_authorize_import"),
+            patch.object(GeoHandler, "_import_owner", return_value="admin-1"),
+        ):
+            result = GeoHandler.cancel_import(None, params)
+            repeated = GeoHandler.cancel_import(None, params)
+
+        self.assertEqual(result["status"], "CANCELLED")
+        self.assertEqual(repeated["status"], "CANCELLED")
+        self.assertIsNotNone(result["cancellationRequestedAt"])
+        self.assertEqual(
+            GeoHandler.store.events[-1]["eventType"],
+            "geodata.import.cancelled.v1",
+        )
+
+    def test_active_preprocessing_cancellation_discards_staged_candidates(
+        self,
+    ):
+        run_id = "run-cancel-active"
+        GeoHandler.store.data["importRuns"] = {
+            run_id: {"id": run_id, "status": "PROCESSING", "source": {}}
+        }
+        GeoHandler.store.data["importCandidates"] = {
+            "candidate-1": {"id": "candidate-1", "importRunId": run_id}
+        }
+        with (
+            patch.object(GeoHandler, "_claim_import_run", return_value=True),
+            patch.object(GeoHandler, "_prepare_import_body", return_value={}),
+            patch.object(
+                GeoHandler,
+                "_import_features",
+                side_effect=ImportCancelled(
+                    "cancelled during feature processing"
+                ),
+            ),
+            patch.object(GeoHandler.store, "persist"),
+        ):
+            result = GeoHandler._process_import_run(
+                run_id, {}, lambda: [], already_claimed=True
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            GeoHandler.store.data["importRuns"][run_id]["status"], "CANCELLED"
+        )
+        self.assertNotIn(
+            "candidate-1", GeoHandler.store.data["importCandidates"]
+        )
 
     def test_empty_pasted_content_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "content must not be empty"):

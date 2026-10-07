@@ -373,6 +373,16 @@ normalized features remain available as pending candidates when other features
 fail. The run summary records failed feature indexes and messages, and only
 those failed features are omitted from the validation queue.
 
+Administrators can cancel `UPLOAD_PENDING` and `QUEUED` imports immediately,
+or request cancellation of a `PROCESSING` import through the idempotent
+`PUT /v1/geodata/imports/{runId}/cancellation` resource. Active workers poll
+the durable cancellation state and stop at feature boundaries; the API returns
+`202` with `CANCELLING` until that safe checkpoint is reached. Cancellation
+then removes staged candidate rows and temporary source bytes while retaining
+the cancelled run summary. Preprocessed runs cannot be cancelled because they
+have entered administrator review. Cancelled/stalled summaries remain subject
+to the configured import-retention policy.
+
 Use the admin web's **Geodata imports** page rather than the review page. Select
 the shared feature categories before submitting; programme assignment is not
 part of dataset intake. Every dataset import is pre-processed with its

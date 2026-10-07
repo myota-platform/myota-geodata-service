@@ -44,6 +44,10 @@ ordered SQL files define the `myota_geo` database:
     from corrupting authoritative rows. New API/consumer processes wait for
     its feature marker before accepting work. Replaying migrations does not
     re-create deleted legacy resources.
+17. `017_import_cancellation.sql` adds durable cancellation-request metadata
+    for queued uploads and active preprocessing runs. Active workers observe
+    `CANCELLING` at bounded checkpoints and finish as `CANCELLED`; queued work
+    is cancelled immediately and staged rows/source artifacts are removed.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

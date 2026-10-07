@@ -11,7 +11,7 @@ from storage import ObjectStore
 
 logger = logging.getLogger("myota.geodata.import_retention")
 STALE_IMPORT_STATUSES = (
-    "'UPLOAD_PENDING', 'QUEUED', 'PROCESSING', 'PREPROCESSED', "
+    "'UPLOAD_PENDING', 'QUEUED', 'PROCESSING', 'CANCELLING', 'CANCELLED', 'PREPROCESSED', "
     "'PREPROCESSED_WITH_ERRORS', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED'"
 )
 LAST_ACTIVITY_SQL = (

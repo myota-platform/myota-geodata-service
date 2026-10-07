@@ -42,6 +42,8 @@ RUN_FIELDS = {
     "lastError": "last_error",
     "processedAt": "processed_at",
     "processedBy": "processed_by",
+    "cancellationRequestedAt": "cancellation_requested_at",
+    "cancellationRequestedBy": "cancellation_requested_by",
 }
 CANDIDATE_FIELDS = {
     "importRunId": "import_run_id",

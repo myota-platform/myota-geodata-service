@@ -8,6 +8,7 @@ import math
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -50,6 +51,21 @@ from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 GEODATA_IMPORT_BUCKET = os.environ.get(
     "MYOTA_GEODATA_IMPORT_BUCKET", "myota-geodata-imports"
 )
+
+
+class ImportCancelled(Exception):
+    """Raised inside preprocessing when an administrator cancels a run."""
+
+
+def _import_status(run_id: str) -> str | None:
+    if GeoHandler.store.durable:
+        with GeoHandler.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT status FROM import_run WHERE id=%s", (run_id,)
+            ).fetchone()
+        return str(row[0]).upper() if row else None
+    run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+    return str(run.get("status") or "").upper() if run else None
 
 
 def entity_type_codes(value: Any, fallback: Any = None) -> list[str]:
@@ -1266,7 +1282,11 @@ class GeoHandler(JsonHandler):
         )
 
     @staticmethod
-    def _import_features(body: dict[str, Any], run_id: str) -> dict[str, Any]:
+    def _import_features(
+        body: dict[str, Any],
+        run_id: str,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         if len(body["features"]) > MAX_IMPORT_FEATURES:
             raise ValueError(
                 f"an import may contain at most {MAX_IMPORT_FEATURES} features"
@@ -1284,6 +1304,8 @@ class GeoHandler(JsonHandler):
                 "importCandidates", {}
             )
         for index, raw_feature in enumerate(body["features"]):
+            if cancel_event and cancel_event.is_set():
+                raise ImportCancelled("preprocessing was cancelled")
             try:
                 feature = normalize(adapter, raw_feature)
                 props = feature.get("properties", {})
@@ -1448,6 +1470,8 @@ class GeoHandler(JsonHandler):
                 # failures outside this loop still fail the whole run.
                 errors.append({"index": index, "message": str(error)})
         seen_refs = {record["sourceRef"] for record in records}
+        if cancel_event and cancel_event.is_set():
+            raise ImportCancelled("preprocessing was cancelled")
         disappeared = (
             GeoHandler._apply_disappearance(
                 programme_slug,
@@ -1678,6 +1702,9 @@ class GeoHandler(JsonHandler):
     ) -> dict[str, Any]:
         with GeoHandler.store.lock:
             run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+            if _import_status(run_id) == "CANCELLING":
+                run["status"] = "CANCELLING"
+                raise ImportCancelled("preprocessing was cancelled")
             run.update(
                 {
                     "status": "COMPLETED"
@@ -1719,6 +1746,15 @@ class GeoHandler(JsonHandler):
     def _fail_import_run(run_id: str, error: Exception) -> dict[str, Any]:
         with GeoHandler.store.lock:
             run = GeoHandler.store.data.setdefault("importRuns", {})[run_id]
+            current_status = _import_status(run_id)
+            if current_status in {"CANCELLING", "CANCELLED"}:
+                run["status"] = current_status
+                return run
+            if str(run.get("status") or "").upper() in {
+                "CANCELLING",
+                "CANCELLED",
+            }:
+                return run
             run.update(
                 {
                     "status": "FAILED",
@@ -1746,6 +1782,89 @@ class GeoHandler(JsonHandler):
         return run
 
     @staticmethod
+    def _finish_import_cancellation(run_id: str) -> dict[str, Any] | None:
+        """Finalize cancellation and remove records staged by preprocessing."""
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            return None
+        status = _import_status(run_id) or str(run.get("status") or "").upper()
+        if status not in {"CANCELLING", "CANCELLED"}:
+            return run
+        run["status"] = status
+        run.update(
+            {
+                "status": "CANCELLED",
+                "completedAt": now(),
+                "heartbeatAt": None,
+                "leaseUntil": None,
+                "lastError": None,
+                "stats": {
+                    "preprocessed": 0,
+                    "created": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                    "disappeared": 0,
+                },
+            }
+        )
+        for candidate_id, candidate in list(
+            GeoHandler.store.data.setdefault("importCandidates", {}).items()
+        ):
+            if candidate.get("importRunId") == run_id:
+                GeoHandler.store.data["importCandidates"].pop(
+                    candidate_id, None
+                )
+                GeoHandler.store.mark_import_candidate_deleted(candidate_id)
+        GeoHandler.store.data.setdefault("sourceManifests", {}).pop(
+            run_id, None
+        )
+        if GeoHandler.store.durable:
+            with GeoHandler.store.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM geodata_import_candidate WHERE import_run_id=%s",
+                    (run_id,),
+                )
+                connection.execute(
+                    "UPDATE import_run SET status='CANCELLED', completed_at=now(), "
+                    "heartbeat_at=NULL, lease_until=NULL, stats='{}'::jsonb, last_error=NULL "
+                    "WHERE id=%s AND status IN ('CANCELLING','CANCELLED')",
+                    (run_id,),
+                )
+        GeoHandler.store.event(
+            "geodata.import.cancelled.v1",
+            "import_run",
+            run_id,
+            {"importRunId": run_id},
+        )
+        return run
+
+    @staticmethod
+    def _delete_import_source(run_id: str) -> None:
+        """Delete temporary source bytes and local upload spool after cancel."""
+        run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
+        if not run:
+            return
+        spool = run.get("uploadSpoolPath")
+        if spool:
+            spool_root = Path(
+                os.environ.get(
+                    "MYOTA_UPLOAD_SPOOL_DIR", "/tmp/myota-geodata-uploads"
+                )
+            ).resolve()
+            spool_path = Path(spool).resolve()
+            if spool_path.is_relative_to(spool_root):
+                spool_path.unlink(missing_ok=True)
+        source = run.get("source") or {}
+        bucket = source.get("bucket")
+        object_key = source.get("objectKey")
+        if bucket == GEODATA_IMPORT_BUCKET and object_key:
+            from storage import ObjectStore
+
+            ObjectStore().delete(bucket, object_key)
+        run["uploadSpoolPath"] = None
+
+    @staticmethod
     def _finish_uploaded_import(
         run_id: str,
         body: dict[str, Any],
@@ -1758,6 +1877,18 @@ class GeoHandler(JsonHandler):
     ) -> None:
         """Finish durable storage after the upload HTTP request has returned."""
         try:
+            with GeoHandler.store.lock:
+                run = GeoHandler.store.data.setdefault("importRuns", {}).get(
+                    run_id
+                )
+                if not run or _import_status(run_id) in {
+                    "CANCELLING",
+                    "CANCELLED",
+                }:
+                    GeoHandler._finish_import_cancellation(run_id)
+                    GeoHandler._delete_import_source(run_id)
+                    GeoHandler.store.persist(include_import_state=True)
+                    return
             from storage import ObjectStore
 
             stored = ObjectStore().put_file(
@@ -1768,6 +1899,19 @@ class GeoHandler(JsonHandler):
                 sha256=str(scan["sha256"]),
                 size=int(scan["size"]),
             )
+            with GeoHandler.store.lock:
+                run = GeoHandler.store.data.setdefault("importRuns", {}).get(
+                    run_id
+                )
+                if not run or _import_status(run_id) in {
+                    "CANCELLING",
+                    "CANCELLED",
+                }:
+                    ObjectStore().delete(bucket, object_key)
+                    GeoHandler._finish_import_cancellation(run_id)
+                    GeoHandler._delete_import_source(run_id)
+                    GeoHandler.store.persist(include_import_state=True)
+                    return
             source = {
                 **(body.get("source") or {}),
                 "objectKey": object_key,
@@ -1779,6 +1923,12 @@ class GeoHandler(JsonHandler):
                 run = GeoHandler.store.data.setdefault("importRuns", {})[
                     run_id
                 ]
+                if _import_status(run_id) in {"CANCELLING", "CANCELLED"}:
+                    run["status"] = _import_status(run_id)
+                    GeoHandler._finish_import_cancellation(run_id)
+                    GeoHandler._delete_import_source(run_id)
+                    GeoHandler.store.persist(include_import_state=True)
+                    return
                 run.update(
                     {
                         "source": source,
@@ -1940,28 +2090,49 @@ class GeoHandler(JsonHandler):
         return True
 
     @staticmethod
-    def _heartbeat_import_run(run_id: str, stop: threading.Event) -> None:
+    def _heartbeat_import_run(
+        run_id: str,
+        stop: threading.Event,
+        cancel_event: threading.Event,
+    ) -> None:
         interval = max(
             15, int(os.environ.get("MYOTA_IMPORT_HEARTBEAT_SECONDS", "30"))
         )
         lease_seconds = max(
             60, int(os.environ.get("MYOTA_IMPORT_LEASE_SECONDS", "900"))
         )
-        while not stop.wait(interval):
+        last_heartbeat = time.monotonic()
+        while not stop.wait(min(2, interval)):
             try:
                 if GeoHandler.store.durable:
                     with GeoHandler.store.transaction() as connection:
-                        connection.execute(
-                            "UPDATE import_run SET heartbeat_at=now(), lease_until=now() + make_interval(secs => %s) "
-                            "WHERE id=%s AND status='PROCESSING'",
-                            (lease_seconds, run_id),
-                        )
+                        row = connection.execute(
+                            "SELECT status FROM import_run WHERE id=%s",
+                            (run_id,),
+                        ).fetchone()
+                        if not row or row[0] != "PROCESSING":
+                            if row and row[0] == "CANCELLING":
+                                cancel_event.set()
+                            return
+                        if time.monotonic() - last_heartbeat >= interval:
+                            connection.execute(
+                                "UPDATE import_run SET heartbeat_at=now(), lease_until=now() + make_interval(secs => %s) "
+                                "WHERE id=%s AND status='PROCESSING'",
+                                (lease_seconds, run_id),
+                            )
+                            last_heartbeat = time.monotonic()
                     continue
                 with GeoHandler.store.lock:
                     run = GeoHandler.store.data.setdefault(
                         "importRuns", {}
                     ).get(run_id)
                     if run:
+                        if (
+                            str(run.get("status") or "").upper()
+                            == "CANCELLING"
+                        ):
+                            cancel_event.set()
+                            return
                         run["heartbeatAt"] = now()
             except Exception:
                 # A heartbeat failure must not hide the original import error.
@@ -1977,9 +2148,10 @@ class GeoHandler(JsonHandler):
         if not already_claimed and not GeoHandler._claim_import_run(run_id):
             return False
         stop = threading.Event()
+        cancel_event = threading.Event()
         heartbeat = threading.Thread(
             target=GeoHandler._heartbeat_import_run,
-            args=(run_id, stop),
+            args=(run_id, stop, cancel_event),
             name=f"geodata-import-heartbeat-{run_id[:8]}",
             daemon=True,
         )
@@ -1987,18 +2159,31 @@ class GeoHandler(JsonHandler):
         try:
             with GeoHandler.store.lock:
                 GeoHandler.store.persist(include_import_state=True)
+            if cancel_event.is_set():
+                raise ImportCancelled("preprocessing was cancelled")
             features = loader()
+            if cancel_event.is_set():
+                raise ImportCancelled("preprocessing was cancelled")
             prepared = GeoHandler._prepare_import_body(body, features)
             with GeoHandler.store.lock:
                 GeoHandler.store.data["importRuns"][run_id]["featureCount"] = (
                     len(features)
                 )
             result = GeoHandler._import_features(
-                {**prepared, "features": features}, run_id
+                {**prepared, "features": features}, run_id, cancel_event
             )
             with GeoHandler.store.lock:
                 GeoHandler._complete_import_run(run_id, result)
                 GeoHandler.store.persist(include_import_state=True)
+        except ImportCancelled:
+            with GeoHandler.store.lock:
+                GeoHandler.store.rollback_pending()
+                GeoHandler.store.data.setdefault("importRuns", {}).setdefault(
+                    run_id, {"id": run_id}
+                )["status"] = "CANCELLING"
+                GeoHandler._finish_import_cancellation(run_id)
+                GeoHandler.store.persist(include_import_state=True)
+            GeoHandler._delete_import_source(run_id)
         except Exception as error:  # imports must report failure in the run, not fail the HTTP request
             with GeoHandler.store.lock:
                 GeoHandler.store.rollback_pending()
@@ -2014,6 +2199,12 @@ class GeoHandler(JsonHandler):
         """Resume a queued/stale run from its immutable object-storage source."""
         run = GeoHandler.store.data.setdefault("importRuns", {}).get(run_id)
         if not run:
+            return True
+        if str(run.get("status") or "").upper() == "CANCELLING":
+            with GeoHandler.store.lock:
+                GeoHandler._finish_import_cancellation(run_id)
+                GeoHandler.store.persist(include_import_state=True)
+            GeoHandler._delete_import_source(run_id)
             return True
         if str(run.get("status") or "").upper() not in {
             "QUEUED",
@@ -2103,7 +2294,7 @@ class GeoHandler(JsonHandler):
         with GeoHandler.store.transaction() as connection:
             rows = connection.execute(
                 "SELECT id::text, status, lease_until FROM import_run "
-                "WHERE status IN ('UPLOAD_PENDING', 'QUEUED', 'PROCESSING')"
+                "WHERE status IN ('UPLOAD_PENDING', 'QUEUED', 'PROCESSING', 'CANCELLING')"
             ).fetchall()
         recovered_ids = []
         with GeoHandler.store.lock:
@@ -2127,6 +2318,11 @@ class GeoHandler(JsonHandler):
                 # durable state rather than leaving PROCESSING rows behind.
                 GeoHandler.store.persist(include_import_state=True)
         for run_id, status in recovered_ids:
+            if status == "CANCELLING":
+                GeoHandler.import_executor.submit(
+                    GeoHandler._recover_import_run, run_id
+                )
+                continue
             executor = (
                 GeoHandler.upload_executor
                 if status == "UPLOAD_PENDING"
@@ -2610,6 +2806,88 @@ class GeoHandler(JsonHandler):
         GeoHandler.store.refresh_import_runs()
         run = GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
         return GeoHandler._import_run_view(run)
+
+    @staticmethod
+    def cancel_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
+        """Request cancellation of a pending or active preprocessing run."""
+        GeoHandler._authorize_import(p)
+        run_id = p["runId"]
+        actor = GeoHandler._import_owner(p)
+        with GeoHandler.store.lock:
+            run = GeoHandler.store.data.setdefault("importRuns", {}).get(
+                run_id
+            )
+            if not run:
+                raise KeyError("import run not found")
+            if GeoHandler.store.durable:
+                with GeoHandler.store.transaction() as connection:
+                    row = connection.execute(
+                        "SELECT status FROM import_run WHERE id=%s FOR UPDATE",
+                        (run_id,),
+                    ).fetchone()
+                if not row:
+                    raise KeyError("import run not found")
+                current_status = str(row[0]).upper()
+                run["status"] = current_status
+            else:
+                current_status = str(run.get("status") or "").upper()
+            if current_status in {"PREPROCESSED", "PREPROCESSED_WITH_ERRORS"}:
+                raise ValueError(
+                    "preprocessing has finished; reviewed imports cannot be cancelled"
+                )
+            if current_status not in {
+                "UPLOAD_PENDING",
+                "QUEUED",
+                "PROCESSING",
+                "CANCELLING",
+                "CANCELLED",
+            }:
+                raise ValueError(
+                    f"an import in {current_status.lower()} state cannot be cancelled"
+                )
+            if current_status in {"CANCELLED", "CANCELLING"}:
+                return {
+                    **GeoHandler._import_run_view(run),
+                    "_status": 202 if current_status == "CANCELLING" else 200,
+                }
+
+            event_type = (
+                "geodata.import.cancellation-requested.v1"
+                if current_status == "PROCESSING"
+                else "geodata.import.cancelled.v1"
+            )
+            next_status = (
+                "CANCELLING" if current_status == "PROCESSING" else "CANCELLED"
+            )
+            if GeoHandler.store.durable:
+                with GeoHandler.store.transaction() as connection:
+                    connection.execute(
+                        "UPDATE import_run SET status=%s, cancellation_requested_at=now(), "
+                        "cancellation_requested_by=%s WHERE id=%s",
+                        (next_status, actor, run_id),
+                    )
+            run.update(
+                {
+                    "status": next_status,
+                    "cancellationRequestedAt": now(),
+                    "cancellationRequestedBy": actor,
+                }
+            )
+            if current_status != "PROCESSING":
+                GeoHandler._finish_import_cancellation(run_id)
+                GeoHandler._delete_import_source(run_id)
+            if current_status == "PROCESSING":
+                GeoHandler.store.event(
+                    event_type,
+                    "import_run",
+                    run_id,
+                    {"importRunId": run_id, "requestedBy": actor},
+                )
+            GeoHandler.store.persist(include_import_state=True)
+            return {
+                **GeoHandler._import_run_view(run),
+                "_status": 202 if current_status == "PROCESSING" else 200,
+            }
 
     @staticmethod
     def mark_import_processed(
@@ -4633,6 +4911,10 @@ GeoHandler.routes = {
         "/v1/geodata/import-uploads/{uploadId}",
     ): GeoHandler.get_import_upload,
     ("GET", "/v1/geodata/imports/{runId}"): GeoHandler.get_import,
+    (
+        "PUT",
+        "/v1/geodata/imports/{runId}/cancellation",
+    ): GeoHandler.cancel_import,
     (
         "GET",
         "/v1/geodata/imports/{runId}/candidates",
