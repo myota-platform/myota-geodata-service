@@ -4,6 +4,7 @@ The paid/server-side BigDataCloud endpoint is used here because imports and
 geometry edits are server-side operations. The client-side free endpoint must
 not be used for stored or batch coordinates.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,7 +19,11 @@ from common import now
 
 def _load_local_env() -> None:
     """Load the service-local .env without overwriting deployment variables."""
-    env_path = Path(os.environ.get("MYOTA_GEODATA_ENV_FILE", Path(__file__).with_name(".env")))
+    env_path = Path(
+        os.environ.get(
+            "MYOTA_GEODATA_ENV_FILE", Path(__file__).with_name(".env")
+        )
+    )
     if not env_path.is_file():
         return
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
@@ -37,17 +42,35 @@ _load_local_env()
 
 
 LOCATION_FIELDS = (
-    "continent", "continentCode", "country", "countryCode", "region", "regionCode",
-    "subdivision", "subdivisionCode", "province", "provinceCode", "county", "countyCode",
-    "city", "municipality", "locality",
+    "continent",
+    "continentCode",
+    "country",
+    "countryCode",
+    "region",
+    "regionCode",
+    "subdivision",
+    "subdivisionCode",
+    "province",
+    "provinceCode",
+    "county",
+    "countyCode",
+    "city",
+    "municipality",
+    "locality",
 )
 
 
 def _entry_text(entry: dict[str, Any]) -> str:
-    return " ".join(str(entry.get(key) or "") for key in ("name", "description", "isoName")).lower()
+    return " ".join(
+        str(entry.get(key) or "") for key in ("name", "description", "isoName")
+    ).lower()
 
 
-def _pick_entry(entries: list[dict[str, Any]], patterns: tuple[str, ...], levels: tuple[int, ...]) -> dict[str, Any] | None:
+def _pick_entry(
+    entries: list[dict[str, Any]],
+    patterns: tuple[str, ...],
+    levels: tuple[int, ...],
+) -> dict[str, Any] | None:
     for entry in entries:
         if any(pattern in _entry_text(entry) for pattern in patterns):
             return entry
@@ -62,18 +85,34 @@ def _pick_entry(entries: list[dict[str, Any]], patterns: tuple[str, ...], levels
 
 def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
     """Map the provider response to the stable MyOTA entity location shape."""
-    entries = sorted(payload.get("localityInfo", {}).get("administrative", []) or [],
-                     key=lambda entry: (entry.get("order", 999), entry.get("adminLevel", 999)))
+    entries = sorted(
+        payload.get("localityInfo", {}).get("administrative", []) or [],
+        key=lambda entry: (
+            entry.get("order", 999),
+            entry.get("adminLevel", 999),
+        ),
+    )
     principal_code = payload.get("principalSubdivisionCode")
     principal_name = str(payload.get("principalSubdivision") or "").casefold()
-    entries = [entry for entry in entries if not (
-        principal_code and entry.get("isoCode") == principal_code
-    ) and not (
-        principal_name and str(entry.get("name") or "").casefold() == principal_name
-    )]
+    entries = [
+        entry
+        for entry in entries
+        if not (principal_code and entry.get("isoCode") == principal_code)
+        and not (
+            principal_name
+            and str(entry.get("name") or "").casefold() == principal_name
+        )
+    ]
     province_entry = _pick_entry(
         entries,
-        ("province", "provincia", "state", "department", "prefecture", "oblast"),
+        (
+            "province",
+            "provincia",
+            "state",
+            "department",
+            "prefecture",
+            "oblast",
+        ),
         (6,),
     )
     county_entry = _pick_entry(
@@ -92,7 +131,10 @@ def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
     province_name = value(province_entry, "name", "isoName")
     county_name = value(county_entry, "name", "isoName")
     city_name = payload.get("city") or payload.get("locality")
-    if county_name and str(county_name).casefold() in {str(province_name or "").casefold(), str(city_name or "").casefold()}:
+    if county_name and str(county_name).casefold() in {
+        str(province_name or "").casefold(),
+        str(city_name or "").casefold(),
+    }:
         county_entry = None
         county_name = None
     return {
@@ -126,9 +168,13 @@ class ReverseGeocoder:
 
     def __init__(self) -> None:
         self.api_key = os.environ.get("BIGDATACLOUD_API_KEY", "").strip()
-        self.endpoint = os.environ.get("BIGDATACLOUD_REVERSE_GEOCODE_URL", self.endpoint)
+        self.endpoint = os.environ.get(
+            "BIGDATACLOUD_REVERSE_GEOCODE_URL", self.endpoint
+        )
         self.language = os.environ.get("BIGDATACLOUD_LOCALITY_LANGUAGE", "en")
-        self.timeout = float(os.environ.get("BIGDATACLOUD_TIMEOUT_SECONDS", "10"))
+        self.timeout = float(
+            os.environ.get("BIGDATACLOUD_TIMEOUT_SECONDS", "10")
+        )
         self._cache: dict[tuple[float, float, str], dict[str, Any]] = {}
 
     @property
@@ -136,22 +182,49 @@ class ReverseGeocoder:
         return bool(self.api_key)
 
     def lookup(self, latitude: float, longitude: float) -> dict[str, Any]:
-        key = (round(float(latitude), 5), round(float(longitude), 5), self.language)
+        key = (
+            round(float(latitude), 5),
+            round(float(longitude), 5),
+            self.language,
+        )
         if key in self._cache:
             return self._cache[key]
         if not self.configured:
-            return {"geocodeProvider": "BIGDATACLOUD", "geocodeStatus": "NOT_CONFIGURED", "geocodedAt": now()}
-        query = urlencode({"latitude": key[0], "longitude": key[1], "localityLanguage": self.language, "key": self.api_key})
-        request = Request(f"{self.endpoint}?{query}", headers={"Accept": "application/json", "User-Agent": "MyOTA-geodata-service/1.0"})
+            return {
+                "geocodeProvider": "BIGDATACLOUD",
+                "geocodeStatus": "NOT_CONFIGURED",
+                "geocodedAt": now(),
+            }
+        query = urlencode(
+            {
+                "latitude": key[0],
+                "longitude": key[1],
+                "localityLanguage": self.language,
+                "key": self.api_key,
+            }
+        )
+        request = Request(
+            f"{self.endpoint}?{query}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "MyOTA-geodata-service/1.0",
+            },
+        )
         try:
             with urlopen(request, timeout=self.timeout) as response:  # nosec B310 - endpoint is configured by deployment
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
-                raise ValueError("reverse-geocoding response was not an object")
+                raise ValueError(
+                    "reverse-geocoding response was not an object"
+                )
             result = normalize_response(payload)
         except Exception as error:  # enrichment must not reject an otherwise valid geodata import
-            result = {"geocodeProvider": "BIGDATACLOUD", "geocodeStatus": "FAILED",
-                      "geocodeError": str(error), "geocodedAt": now()}
+            result = {
+                "geocodeProvider": "BIGDATACLOUD",
+                "geocodeStatus": "FAILED",
+                "geocodeError": str(error),
+                "geocodedAt": now(),
+            }
         self._cache[key] = result
         return result
 
@@ -160,16 +233,26 @@ GEOCODER = ReverseGeocoder()
 
 
 def _sync_location_snapshot(entity: dict[str, Any]) -> None:
-    entity["location"] = {field: entity.get(field) for field in LOCATION_FIELDS}
+    entity["location"] = {
+        field: entity.get(field) for field in LOCATION_FIELDS
+    }
 
 
-def apply_location_result(entity: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def apply_location_result(
+    entity: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any]:
     """Merge provider data without overwriting explicitly managed fields."""
     manual_fields = set(entity.get("manualLocationFields") or [])
     for field in LOCATION_FIELDS:
         if field in result and field not in manual_fields:
             entity[field] = result[field]
-    for field in ("geocodeProvider", "geocodeStatus", "geocodeLookupSource", "geocodeError", "geocodedAt"):
+    for field in (
+        "geocodeProvider",
+        "geocodeStatus",
+        "geocodeLookupSource",
+        "geocodeError",
+        "geocodedAt",
+    ):
         if field in result:
             entity[field] = result[field]
     entity["manualLocationFields"] = sorted(manual_fields)
@@ -177,24 +260,38 @@ def apply_location_result(entity: dict[str, Any], result: dict[str, Any]) -> dic
     return entity
 
 
-def enrich_entity_location(entity: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+def enrich_entity_location(
+    entity: dict[str, Any], *, force: bool = False
+) -> dict[str, Any]:
     """Enrich an entity from its centroid while keeping provider provenance.
 
     ``force`` is reserved for an explicit refresh after automatic values have
     been released. Normal imports, geometry changes, and metadata edits reuse
     an existing successful provider result and do not issue another request.
     """
-    if not force and entity.get("geocodeStatus") == "ENRICHED" and entity.get("countryCode"):
+    if (
+        not force
+        and entity.get("geocodeStatus") == "ENRICHED"
+        and entity.get("countryCode")
+    ):
         _sync_location_snapshot(entity)
         return entity
     centroid = entity.get("centroid") or {}
     try:
-        result = GEOCODER.lookup(float(centroid["lat"]), float(centroid["lon"]))
+        result = GEOCODER.lookup(
+            float(centroid["lat"]), float(centroid["lon"])
+        )
     except (KeyError, TypeError, ValueError):
-        result = {"geocodeProvider": "BIGDATACLOUD", "geocodeStatus": "SKIPPED_NO_CENTROID", "geocodedAt": now()}
+        result = {
+            "geocodeProvider": "BIGDATACLOUD",
+            "geocodeStatus": "SKIPPED_NO_CENTROID",
+            "geocodedAt": now(),
+        }
     apply_location_result(entity, result)
     provenance = entity.setdefault("provenance", {})
-    provenance["reverseGeocoding"] = {key: value for key, value in result.items() if key != "geocodePayload"}
+    provenance["reverseGeocoding"] = {
+        key: value for key, value in result.items() if key != "geocodePayload"
+    }
     if "geocodePayload" in result:
         provenance["reverseGeocoding"]["response"] = result["geocodePayload"]
     return entity

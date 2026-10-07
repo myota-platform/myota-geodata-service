@@ -11,15 +11,33 @@ class GeometryWayTests(unittest.TestCase):
         self.previous_items = GeoHandler.store.items
         self.previous_events = GeoHandler.store.events
         self.previous_data = GeoHandler.store.data
-        self.previous_dirty_candidates = GeoHandler.store._dirty_import_candidate_ids
-        self.previous_deleted_candidates = GeoHandler.store._deleted_import_candidate_ids
+        self.previous_dirty_candidates = (
+            GeoHandler.store._dirty_import_candidate_ids
+        )
+        self.previous_deleted_candidates = (
+            GeoHandler.store._deleted_import_candidate_ids
+        )
         GeoHandler.store.items = {
             "entity-1": {
-                "id": "entity-1", "programmeSlug": "regional-ota", "entityType": "TRAIL",
+                "id": "entity-1",
+                "programmeSlug": "regional-ota",
+                "entityType": "TRAIL",
                 "status": "CANDIDATE",
-                "geometry": {"type": "Polygon", "coordinates": [[[-5.99, 37.39], [-5.98, 37.39],
-                                                                         [-5.98, 37.40], [-5.99, 37.40], [-5.99, 37.39]]]},
-                "reviewHistory": [], "geometryHistory": [], "provenance": {},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-5.99, 37.39],
+                            [-5.98, 37.39],
+                            [-5.98, 37.40],
+                            [-5.99, 37.40],
+                            [-5.99, 37.39],
+                        ]
+                    ],
+                },
+                "reviewHistory": [],
+                "geometryHistory": [],
+                "provenance": {},
             },
         }
         GeoHandler.store.events = []
@@ -31,175 +49,453 @@ class GeometryWayTests(unittest.TestCase):
         GeoHandler.store.items = self.previous_items
         GeoHandler.store.events = self.previous_events
         GeoHandler.store.data = self.previous_data
-        GeoHandler.store._dirty_import_candidate_ids = self.previous_dirty_candidates
-        GeoHandler.store._deleted_import_candidate_ids = self.previous_deleted_candidates
+        GeoHandler.store._dirty_import_candidate_ids = (
+            self.previous_dirty_candidates
+        )
+        GeoHandler.store._deleted_import_candidate_ids = (
+            self.previous_deleted_candidates
+        )
 
     def test_linestring_is_valid_and_way_alias_is_canonicalized(self):
-        self.assertEqual(normalize_geometry({"type": "way", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})["type"], "LineString")
+        self.assertEqual(
+            normalize_geometry(
+                {
+                    "type": "way",
+                    "coordinates": [[-5.99, 37.39], [-5.98, 37.40]],
+                }
+            )["type"],
+            "LineString",
+        )
 
     def test_multilinestring_is_valid(self):
-        geometry = normalize_geometry({"type": "MultiLineString", "coordinates": [
-            [[-5.99, 37.39], [-5.98, 37.40]], [[-5.97, 37.41], [-5.96, 37.42]]
-        ]})
+        geometry = normalize_geometry(
+            {
+                "type": "MultiLineString",
+                "coordinates": [
+                    [[-5.99, 37.39], [-5.98, 37.40]],
+                    [[-5.97, 37.41], [-5.96, 37.42]],
+                ],
+            }
+        )
         self.assertEqual(geometry["type"], "MultiLineString")
 
-    @unittest.skipUnless(importlib.util.find_spec("pyproj"), "pyproj is installed in the service image")
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyproj"),
+        "pyproj is installed in the service image",
+    )
     def test_projected_epsg_geometry_is_reprojected_to_wgs84(self):
         from pyproj import Transformer
 
         source = (-5.99, 37.39)
-        projected = Transformer.from_crs("EPSG:4326", "EPSG:25830", always_xy=True).transform(*source)
-        geometry = normalize_geometry({"type": "Point", "coordinates": list(projected)}, "EPSG:25830")
+        projected = Transformer.from_crs(
+            "EPSG:4326", "EPSG:25830", always_xy=True
+        ).transform(*source)
+        geometry = normalize_geometry(
+            {"type": "Point", "coordinates": list(projected)}, "EPSG:25830"
+        )
         self.assertAlmostEqual(geometry["coordinates"][0], source[0], places=5)
         self.assertAlmostEqual(geometry["coordinates"][1], source[1], places=5)
 
-    @unittest.skipUnless(importlib.util.find_spec("pyproj"), "pyproj is installed in the service image")
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyproj"),
+        "pyproj is installed in the service image",
+    )
     def test_import_reprojects_declared_crs_once(self):
         from pyproj import Transformer
 
-        projected = Transformer.from_crs("EPSG:4326", "EPSG:25830", always_xy=True).transform(-5.99, 37.39)
-        result = GeoHandler._import_features({
-            "adapter": "MANUAL",
-            "source": {"name": "projected-fixture", "license": "CC0"},
-            "features": [{"type": "Feature", "crs": {"type": "name", "properties": {"name": "EPSG:25830"}},
-                          "properties": {"name": "Projected Sevilla point"},
-                          "geometry": {"type": "Point", "coordinates": list(projected)}}],
-        }, "crs-test-run")
-        candidate = GeoHandler.store.data["importCandidates"][result["preprocessed"][0]]
-        self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][0], -5.99, places=5)
-        self.assertAlmostEqual(candidate["entity"]["geometry"]["coordinates"][1], 37.39, places=5)
-        self.assertEqual(candidate["entity"]["provenance"]["sourceCrs"]["properties"]["name"], "EPSG:25830")
+        projected = Transformer.from_crs(
+            "EPSG:4326", "EPSG:25830", always_xy=True
+        ).transform(-5.99, 37.39)
+        result = GeoHandler._import_features(
+            {
+                "adapter": "MANUAL",
+                "source": {"name": "projected-fixture", "license": "CC0"},
+                "features": [
+                    {
+                        "type": "Feature",
+                        "crs": {
+                            "type": "name",
+                            "properties": {"name": "EPSG:25830"},
+                        },
+                        "properties": {"name": "Projected Sevilla point"},
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": list(projected),
+                        },
+                    }
+                ],
+            },
+            "crs-test-run",
+        )
+        candidate = GeoHandler.store.data["importCandidates"][
+            result["preprocessed"][0]
+        ]
+        self.assertAlmostEqual(
+            candidate["entity"]["geometry"]["coordinates"][0], -5.99, places=5
+        )
+        self.assertAlmostEqual(
+            candidate["entity"]["geometry"]["coordinates"][1], 37.39, places=5
+        )
+        self.assertEqual(
+            candidate["entity"]["provenance"]["sourceCrs"]["properties"][
+                "name"
+            ],
+            "EPSG:25830",
+        )
 
     def test_replaying_preprocessing_reuses_run_ordinal_candidate(self):
         body = {
             "adapter": "MANUAL",
             "source": {"name": "recovery-replay", "license": "CC0"},
-            "features": [{"type": "Feature", "properties": {"name": "Replay trail"},
-                          "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}],
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"name": "Replay trail"},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[-5.99, 37.39], [-5.98, 37.40]],
+                    },
+                }
+            ],
         }
 
         first = GeoHandler._import_features(body, "replay-run")
         candidate_id = first["preprocessed"][0]
-        GeoHandler.store.data["importCandidates"][candidate_id]["validationNote"] = "Keep reviewer note"
+        GeoHandler.store.data["importCandidates"][candidate_id][
+            "validationNote"
+        ] = "Keep reviewer note"
         replay = GeoHandler._import_features(body, "replay-run")
 
         self.assertEqual(replay["preprocessed"], [candidate_id])
         self.assertEqual(len(GeoHandler.store.data["importCandidates"]), 1)
-        self.assertEqual(GeoHandler.store.data["importCandidates"][candidate_id]["validationNote"], "Keep reviewer note")
+        self.assertEqual(
+            GeoHandler.store.data["importCandidates"][candidate_id][
+                "validationNote"
+            ],
+            "Keep reviewer note",
+        )
 
     def test_osm_style_way_record_is_importable(self):
-        feature = normalize("MANUAL", {"type": "way", "id": "way/42", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})
+        feature = normalize(
+            "MANUAL",
+            {
+                "type": "way",
+                "id": "way/42",
+                "coordinates": [[-5.99, 37.39], [-5.98, 37.40]],
+            },
+        )
         self.assertEqual(feature["geometry"]["type"], "LineString")
         self.assertEqual(feature["properties"]["featureType"], "way")
 
-        trail = normalize("OSM", {"type": "way", "id": "way/43", "tags": {"highway": "path"},
-                                  "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]})
+        trail = normalize(
+            "OSM",
+            {
+                "type": "way",
+                "id": "way/43",
+                "tags": {"highway": "path"},
+                "coordinates": [[-5.99, 37.39], [-5.98, 37.40]],
+            },
+        )
         self.assertEqual(trail["geometry"]["type"], "LineString")
         self.assertNotIn("skipReason", trail["properties"])
 
     def test_geometry_type_conversion_supports_way_and_round_trips(self):
-        result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "WAY", "editorId": "admin"}})
+        result = GeoHandler.change_geometry_type(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {"geometryType": "WAY", "editorId": "admin"},
+            },
+        )
         self.assertEqual(result["geometry"]["type"], "LineString")
         self.assertGreaterEqual(len(result["geometry"]["coordinates"]), 2)
 
-        result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "POLYGON", "editorId": "admin"}})
+        result = GeoHandler.change_geometry_type(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {"geometryType": "POLYGON", "editorId": "admin"},
+            },
+        )
         self.assertEqual(result["geometry"]["type"], "Polygon")
 
-        result = GeoHandler.change_geometry_type(None, {"entityId": "entity-1", "_body": {"geometryType": "MULTILINESTRING", "editorId": "admin"}})
+        result = GeoHandler.change_geometry_type(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "geometryType": "MULTILINESTRING",
+                    "editorId": "admin",
+                },
+            },
+        )
         self.assertEqual(result["geometry"]["type"], "MultiLineString")
 
     def test_entity_category_change_is_audited(self):
         GeoHandler.store.items["entity-1"]["entityType"] = "MUNICIPAL_PARK"
-        result = GeoHandler.change_entity_type(None, {"entityId": "entity-1", "_body": {
-            "entityType": "TRAIL", "editorId": "admin", "note": "Reclassified as a trail"
-        }})
+        result = GeoHandler.change_entity_type(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "entityType": "TRAIL",
+                    "editorId": "admin",
+                    "note": "Reclassified as a trail",
+                },
+            },
+        )
         self.assertEqual(result["entityType"], "TRAIL")
-        self.assertEqual(result["reviewHistory"][-1]["action"], "ENTITY_TYPE_CHANGED")
-        self.assertEqual(result["reviewHistory"][-1]["previousEntityType"], "MUNICIPAL_PARK")
+        self.assertEqual(
+            result["reviewHistory"][-1]["action"], "ENTITY_TYPE_CHANGED"
+        )
+        self.assertEqual(
+            result["reviewHistory"][-1]["previousEntityType"], "MUNICIPAL_PARK"
+        )
 
     def test_platform_wide_category_and_name_change_are_audited(self):
         GeoHandler.store.items["entity-1"]["programmeSlug"] = None
-        category = GeoHandler.change_entity_type(None, {"entityId": "entity-1", "_body": {
-            "entityType": "MUNICIPAL_PARK", "editorId": "admin", "note": "Shared category correction"
-        }})
-        renamed = GeoHandler.change_entity_name(None, {"entityId": "entity-1", "_body": {
-            "name": "Sevilla trail", "editorId": "admin", "note": "Corrected display name"
-        }})
+        category = GeoHandler.change_entity_type(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "entityType": "MUNICIPAL_PARK",
+                    "editorId": "admin",
+                    "note": "Shared category correction",
+                },
+            },
+        )
+        renamed = GeoHandler.change_entity_name(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "name": "Sevilla trail",
+                    "editorId": "admin",
+                    "note": "Corrected display name",
+                },
+            },
+        )
         self.assertIsNone(category["programmeSlug"])
         self.assertEqual(category["entityType"], "MUNICIPAL_PARK")
         self.assertEqual(renamed["name"], "Sevilla trail")
-        self.assertEqual(renamed["reviewHistory"][-1]["action"], "ENTITY_NAME_CHANGED")
+        self.assertEqual(
+            renamed["reviewHistory"][-1]["action"], "ENTITY_NAME_CHANGED"
+        )
 
     def test_import_can_create_platform_wide_candidate(self):
-        result = GeoHandler.import_manual(None, {"_body": {
-            "adapter": "MANUAL", "source": {"name": "shared-catalogue-test", "license": "CC0"},
-            "entityType": "TRAIL", "features": [{"type": "Feature", "properties": {"name": "Unassigned trail"},
-            "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}]
-        }, "Idempotency-Key": "import-unscoped-1"})
+        result = GeoHandler.import_manual(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "source": {
+                        "name": "shared-catalogue-test",
+                        "license": "CC0",
+                    },
+                    "entityType": "TRAIL",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Unassigned trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [
+                                    [-5.99, 37.39],
+                                    [-5.98, 37.40],
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "Idempotency-Key": "import-unscoped-1",
+            },
+        )
         self.assertEqual(result["status"], "PREPROCESSED")
         candidate_id = result["preprocessed"][0]
-        GeoHandler.validate_import_candidates(None, {"runId": result["importRunId"], "_body": {"candidateIds": [candidate_id], "reviewerId": "admin"}})
-        queue = GeoHandler.process_import_candidates(None, {"runId": result["importRunId"], "_body": {"candidateIds": [candidate_id], "targetStatus": "CANDIDATE", "processorId": "admin"}})
-        entity = GeoHandler.get_entity(None, {"entityId": queue["result"]["created"][0]})
+        GeoHandler.validate_import_candidates(
+            None,
+            {
+                "runId": result["importRunId"],
+                "_body": {
+                    "candidateIds": [candidate_id],
+                    "reviewerId": "admin",
+                },
+            },
+        )
+        queue = GeoHandler.process_import_candidates(
+            None,
+            {
+                "runId": result["importRunId"],
+                "_body": {
+                    "candidateIds": [candidate_id],
+                    "targetStatus": "CANDIDATE",
+                    "processorId": "admin",
+                },
+            },
+        )
+        entity = GeoHandler.get_entity(
+            None, {"entityId": queue["result"]["created"][0]}
+        )
         self.assertIsNone(entity["programmeSlug"])
         self.assertEqual(entity["entityType"], "TRAIL")
         self.assertEqual(entity["status"], "CANDIDATE")
 
     def test_manual_draw_can_create_platform_wide_candidate(self):
-        result = GeoHandler.draw_proposal(None, {"_body": {
-            "source": {"name": "manual-map-test", "license": "CC0"},
-            "feature": {"properties": {"name": "Unassigned drawn trail", "entityType": "TRAIL"},
-                        "geometry": {"type": "LineString", "coordinates": [[-5.99, 37.39], [-5.98, 37.40]]}}
-        }})
-        entity = GeoHandler.get_entity(None, {"entityId": result["created"][0]})
+        result = GeoHandler.draw_proposal(
+            None,
+            {
+                "_body": {
+                    "source": {"name": "manual-map-test", "license": "CC0"},
+                    "feature": {
+                        "properties": {
+                            "name": "Unassigned drawn trail",
+                            "entityType": "TRAIL",
+                        },
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[-5.99, 37.39], [-5.98, 37.40]],
+                        },
+                    },
+                }
+            },
+        )
+        entity = GeoHandler.get_entity(
+            None, {"entityId": result["created"][0]}
+        )
         self.assertIsNone(entity["programmeSlug"])
         self.assertEqual(entity["status"], "CANDIDATE")
 
-    def test_review_filters_support_multiple_statuses_location_and_paging(self):
+    def test_review_filters_support_multiple_statuses_location_and_paging(
+        self,
+    ):
         self.previous_items = GeoHandler.store.items
         GeoHandler.store.items = {
-            "a": {"id": "a", "name": "Alpha", "status": "APPROVED", "entityType": "MUNICIPAL_PARK", "programmeSlug": None,
-                  "country": "Spain", "region": "Andalucia", "province": "Sevilla", "city": "Sevilla", "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]}},
-            "b": {"id": "b", "name": "Bravo", "status": "CANDIDATE", "entityType": "TRAIL", "programmeSlug": None,
-                  "country": "Spain", "region": "Andalucia", "province": "Sevilla", "city": "Dos Hermanas", "geometry": {"type": "Point", "coordinates": [-5.95, 37.28]}},
-            "c": {"id": "c", "name": "Charlie", "status": "REJECTED", "entityType": "TRAIL", "programmeSlug": None,
-                  "country": "Spain", "region": "Andalucia", "province": "Cadiz", "city": "Cadiz", "geometry": {"type": "Point", "coordinates": [-6.29, 36.53]}},
+            "a": {
+                "id": "a",
+                "name": "Alpha",
+                "status": "APPROVED",
+                "entityType": "MUNICIPAL_PARK",
+                "programmeSlug": None,
+                "country": "Spain",
+                "region": "Andalucia",
+                "province": "Sevilla",
+                "city": "Sevilla",
+                "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]},
+            },
+            "b": {
+                "id": "b",
+                "name": "Bravo",
+                "status": "CANDIDATE",
+                "entityType": "TRAIL",
+                "programmeSlug": None,
+                "country": "Spain",
+                "region": "Andalucia",
+                "province": "Sevilla",
+                "city": "Dos Hermanas",
+                "geometry": {"type": "Point", "coordinates": [-5.95, 37.28]},
+            },
+            "c": {
+                "id": "c",
+                "name": "Charlie",
+                "status": "REJECTED",
+                "entityType": "TRAIL",
+                "programmeSlug": None,
+                "country": "Spain",
+                "region": "Andalucia",
+                "province": "Cadiz",
+                "city": "Cadiz",
+                "geometry": {"type": "Point", "coordinates": [-6.29, 36.53]},
+            },
         }
         try:
-            result = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?status=CANDIDATE&status=APPROVED&country=Spain&region=Andalucia&province=Sevilla&pageSize=1"})
+            result = GeoHandler.list_entities(
+                None,
+                {
+                    "_path": "/v1/geodata/entities?status=CANDIDATE&status=APPROVED&country=Spain&region=Andalucia&province=Sevilla&pageSize=1"
+                },
+            )
             self.assertEqual(result["total"], 2)
             self.assertEqual(result["items"][0]["name"], "Alpha")
-            next_page = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?status=CANDIDATE,APPROVED&city=Dos%20Hermanas&pageSize=10"})
-            self.assertEqual([item["name"] for item in next_page["items"]], ["Bravo"])
+            next_page = GeoHandler.list_entities(
+                None,
+                {
+                    "_path": "/v1/geodata/entities?status=CANDIDATE,APPROVED&city=Dos%20Hermanas&pageSize=10"
+                },
+            )
+            self.assertEqual(
+                [item["name"] for item in next_page["items"]], ["Bravo"]
+            )
         finally:
             GeoHandler.store.items = self.previous_items
 
-    def test_phase2_resource_aliases_cover_review_metadata_categories_and_bbox(self):
-        reviewed = GeoHandler.review_resource(None, {"entityId": "entity-1", "_body": {
-            "status": "APPROVED", "reviewerId": "admin", "note": "Resource review"
-        }})
+    def test_phase2_resource_aliases_cover_review_metadata_categories_and_bbox(
+        self,
+    ):
+        reviewed = GeoHandler.review_resource(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "status": "APPROVED",
+                    "reviewerId": "admin",
+                    "note": "Resource review",
+                },
+            },
+        )
         self.assertEqual(reviewed["status"], "APPROVED")
-        changed = GeoHandler.patch_entity_metadata(None, {"entityId": "entity-1", "_body": {
-            "editorId": "admin", "name": "Sevilla trail resource", "note": "Resource metadata"
-        }})
+        changed = GeoHandler.patch_entity_metadata(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "editorId": "admin",
+                    "name": "Sevilla trail resource",
+                    "note": "Resource metadata",
+                },
+            },
+        )
         self.assertEqual(changed["name"], "Sevilla trail resource")
-        categorised = GeoHandler.put_entity_categories(None, {"entityId": "entity-1", "_body": {
-            "entityTypes": ["TRAIL", "MUNICIPAL_PARK"], "editorId": "admin"
-        }})
-        self.assertEqual(categorised["entityTypes"], ["TRAIL", "MUNICIPAL_PARK"])
-        GeoHandler.store.items["entity-1"]["geometry"] = {"type": "Point", "coordinates": [-5.99, 37.39]}
-        listed = GeoHandler.list_entities(None, {"_path": "/v1/geodata/entities?bbox=-6.00,37.38,-5.98,37.40&pageSize=10"})
-        self.assertEqual([item["id"] for item in listed["items"]], ["entity-1"])
+        categorised = GeoHandler.put_entity_categories(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "entityTypes": ["TRAIL", "MUNICIPAL_PARK"],
+                    "editorId": "admin",
+                },
+            },
+        )
+        self.assertEqual(
+            categorised["entityTypes"], ["TRAIL", "MUNICIPAL_PARK"]
+        )
+        GeoHandler.store.items["entity-1"]["geometry"] = {
+            "type": "Point",
+            "coordinates": [-5.99, 37.39],
+        }
+        listed = GeoHandler.list_entities(
+            None,
+            {
+                "_path": "/v1/geodata/entities?bbox=-6.00,37.38,-5.98,37.40&pageSize=10"
+            },
+        )
+        self.assertEqual(
+            [item["id"] for item in listed["items"]], ["entity-1"]
+        )
 
     def test_deletion_job_requires_confirmation_and_cascades_entity(self):
         GeoHandler.store.items["entity-1"]["status"] = "REJECTED"
-        job = GeoHandler.create_deletion_job(None, {"_body": {
-            "entityId": "entity-1", "requestedBy": "admin"
-        }})
+        job = GeoHandler.create_deletion_job(
+            None, {"_body": {"entityId": "entity-1", "requestedBy": "admin"}}
+        )
         self.assertEqual(job["status"], "AWAITING_CONFIRMATION")
-        completed = GeoHandler.confirm_deletion_job(None, {"jobId": job["id"], "_body": {
-            "confirmation": "DELETE", "deletedBy": "admin"
-        }})
+        completed = GeoHandler.confirm_deletion_job(
+            None,
+            {
+                "jobId": job["id"],
+                "_body": {"confirmation": "DELETE", "deletedBy": "admin"},
+            },
+        )
         self.assertEqual(completed["status"], "COMPLETED")
         self.assertNotIn("entity-1", GeoHandler.store.items)
 

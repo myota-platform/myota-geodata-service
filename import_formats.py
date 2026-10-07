@@ -4,6 +4,7 @@ The decoder produces ordinary GeoJSON features.  It deliberately does not
 decide lifecycle status or programme eligibility; those decisions belong to
 the import service and the review workflow.
 """
+
 from __future__ import annotations
 
 import io
@@ -16,11 +17,21 @@ from xml.etree import ElementTree
 
 TEXT_FORMATS = {"GEOJSON", "KML", "GPX"}
 BINARY_FORMATS = {"SHAPEFILE", "SHP", "OSM_PBF", "PARKSERVE_US"}
-SUPPORTED_FORMATS = TEXT_FORMATS | BINARY_FORMATS | {"WFS", "ARCGIS_FEATURESERVER"}
+SUPPORTED_FORMATS = (
+    TEXT_FORMATS | BINARY_FORMATS | {"WFS", "ARCGIS_FEATURESERVER"}
+)
 
 
-def _feature(geometry: dict[str, Any] | None, properties: dict[str, Any] | None = None, feature_id: Any = None) -> dict[str, Any]:
-    value: dict[str, Any] = {"type": "Feature", "geometry": geometry, "properties": properties or {}}
+def _feature(
+    geometry: dict[str, Any] | None,
+    properties: dict[str, Any] | None = None,
+    feature_id: Any = None,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": properties or {},
+    }
     if feature_id is not None:
         value["id"] = feature_id
     return value
@@ -34,7 +45,9 @@ def _geojson(value: Any) -> list[dict[str, Any]]:
     kind = value.get("type")
     document_crs = value.get("crs") or value.get("spatialReference")
 
-    def with_document_crs(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def with_document_crs(
+        features: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         if not document_crs:
             return features
         result = []
@@ -47,13 +60,27 @@ def _geojson(value: Any) -> list[dict[str, Any]]:
     if kind == "FeatureCollection":
         features = value.get("features")
         if not isinstance(features, list):
-            raise ValueError("GeoJSON FeatureCollection must contain a features array")
+            raise ValueError(
+                "GeoJSON FeatureCollection must contain a features array"
+            )
         return with_document_crs(features)
     if kind == "Feature":
         return with_document_crs([value])
     if isinstance(value.get("geometry"), dict):
-        return with_document_crs([_feature(value["geometry"], value.get("properties"), value.get("id"))])
-    if kind in {"Point", "LineString", "MultiLineString", "Polygon", "MultiPolygon"}:
+        return with_document_crs(
+            [
+                _feature(
+                    value["geometry"], value.get("properties"), value.get("id")
+                )
+            ]
+        )
+    if kind in {
+        "Point",
+        "LineString",
+        "MultiLineString",
+        "Polygon",
+        "MultiPolygon",
+    }:
         return with_document_crs([_feature(value)])
     raise ValueError("unsupported GeoJSON document type")
 
@@ -65,7 +92,10 @@ def _local_name(tag: str) -> str:
 def _kml_geometry(node: ElementTree.Element) -> dict[str, Any] | None:
     points: list[list[float]] = []
     for child in node.iter():
-        if _local_name(child.tag) != "coordinates" or not (child.text or "").strip():
+        if (
+            _local_name(child.tag) != "coordinates"
+            or not (child.text or "").strip()
+        ):
             continue
         for token in (child.text or "").replace("\n", " ").split():
             values = token.split(",")
@@ -101,7 +131,14 @@ def parse_kml(content: str) -> list[dict[str, Any]]:
     for placemark in root.iter():
         if _local_name(placemark.tag) != "Placemark":
             continue
-        name = next((child.text.strip() for child in placemark if _local_name(child.tag) == "name" and child.text), None)
+        name = next(
+            (
+                child.text.strip()
+                for child in placemark
+                if _local_name(child.tag) == "name" and child.text
+            ),
+            None,
+        )
         properties = {"name": name} if name else {}
         geometry = _kml_geometry(placemark)
         if geometry:
@@ -126,17 +163,33 @@ def parse_gpx(content: str) -> list[dict[str, Any]]:
             continue
         properties = {}
         for child in waypoint:
-            if _local_name(child.tag) in {"name", "desc", "type"} and child.text:
+            if (
+                _local_name(child.tag) in {"name", "desc", "type"}
+                and child.text
+            ):
                 properties[_local_name(child.tag)] = child.text.strip()
-        features.append(_feature({"type": "Point", "coordinates": _gpx_point(waypoint)}, properties))
+        features.append(
+            _feature(
+                {"type": "Point", "coordinates": _gpx_point(waypoint)},
+                properties,
+            )
+        )
     for track in root.iter():
         if _local_name(track.tag) != "trkseg":
             continue
-        points = [_gpx_point(node) for node in track if _local_name(node.tag) == "trkpt"]
+        points = [
+            _gpx_point(node)
+            for node in track
+            if _local_name(node.tag) == "trkpt"
+        ]
         if len(points) >= 2:
-            features.append(_feature({"type": "LineString", "coordinates": points}, {}))
+            features.append(
+                _feature({"type": "LineString", "coordinates": points}, {})
+            )
     if not features:
-        raise ValueError("GPX contains no supported waypoint, route, or track geometry")
+        raise ValueError(
+            "GPX contains no supported waypoint, route, or track geometry"
+        )
     return features
 
 
@@ -151,10 +204,14 @@ def parse_text(format_code: str, content: str) -> list[dict[str, Any]]:
         return parse_kml(content)
     if code == "GPX":
         return parse_gpx(content)
-    raise ValueError(f"{code} is a binary or remote-source format; upload a file or use its source URL")
+    raise ValueError(
+        f"{code} is a binary or remote-source format; upload a file or use its source URL"
+    )
 
 
-def parse_uploaded(format_code: str, content: bytes, filename: str = "upload") -> list[dict[str, Any]]:
+def parse_uploaded(
+    format_code: str, content: bytes, filename: str = "upload"
+) -> list[dict[str, Any]]:
     code = format_code.upper().replace(".SHP", "SHAPEFILE")
     if code in TEXT_FORMATS or code in {"WFS", "ARCGIS_FEATURESERVER"}:
         return parse_text(code, content.decode("utf-8-sig"))
@@ -162,27 +219,64 @@ def parse_uploaded(format_code: str, content: bytes, filename: str = "upload") -
         try:
             import shapefile  # pyshp, optional in the lightweight service image
         except ImportError as exc:
-            raise ValueError("Shapefile support requires the pyshp package") from exc
+            raise ValueError(
+                "Shapefile support requires the pyshp package"
+            ) from exc
         raw = content
         if filename.lower().endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(content)) as archive:
-                shp_name = next((name for name in archive.namelist() if name.lower().endswith(".shp")), None)
+                shp_name = next(
+                    (
+                        name
+                        for name in archive.namelist()
+                        if name.lower().endswith(".shp")
+                    ),
+                    None,
+                )
                 if not shp_name:
-                    raise ValueError("shapefile archive does not contain a .shp member")
+                    raise ValueError(
+                        "shapefile archive does not contain a .shp member"
+                    )
                 raw = archive.read(shp_name)
                 # pyshp needs the sibling DBF/SHX streams as well; use an in-memory
                 # reader when all sidecars are present.
                 stem = str(PurePosixPath(shp_name).with_suffix(""))
-                reader = shapefile.Reader(shp=io.BytesIO(raw),
-                                          shx=io.BytesIO(archive.read(stem + ".shx")) if stem + ".shx" in archive.namelist() else None,
-                                          dbf=io.BytesIO(archive.read(stem + ".dbf")) if stem + ".dbf" in archive.namelist() else None)
-                projection_name = next((name for name in archive.namelist()
-                                        if str(PurePosixPath(name)).with_suffix("").casefold() == stem.casefold()
-                                        and name.lower().endswith(".prj")), None)
-                source_crs = archive.read(projection_name).decode("utf-8", "replace") if projection_name else None
+                reader = shapefile.Reader(
+                    shp=io.BytesIO(raw),
+                    shx=io.BytesIO(archive.read(stem + ".shx"))
+                    if stem + ".shx" in archive.namelist()
+                    else None,
+                    dbf=io.BytesIO(archive.read(stem + ".dbf"))
+                    if stem + ".dbf" in archive.namelist()
+                    else None,
+                )
+                projection_name = next(
+                    (
+                        name
+                        for name in archive.namelist()
+                        if str(PurePosixPath(name)).with_suffix("").casefold()
+                        == stem.casefold()
+                        and name.lower().endswith(".prj")
+                    ),
+                    None,
+                )
+                source_crs = (
+                    archive.read(projection_name).decode("utf-8", "replace")
+                    if projection_name
+                    else None
+                )
         else:
-            raise ValueError("upload a .zip containing the .shp, .shx, and .dbf sidecars")
+            raise ValueError(
+                "upload a .zip containing the .shp, .shx, and .dbf sidecars"
+            )
         fields = [field[0] for field in reader.fields[1:]]
-        return [{**_feature(shape.__geo_interface__, dict(zip(fields, record))), **({"crs": source_crs} if source_crs else {})}
-                for shape, record in zip(reader.shapes(), reader.records())]
-    raise ValueError(f"binary format {code} is accepted for queued processing but has no local decoder")
+        return [
+            {
+                **_feature(shape.__geo_interface__, dict(zip(fields, record))),
+                **({"crs": source_crs} if source_crs else {}),
+            }
+            for shape, record in zip(reader.shapes(), reader.records())
+        ]
+    raise ValueError(
+        f"binary format {code} is accepted for queued processing but has no local decoder"
+    )

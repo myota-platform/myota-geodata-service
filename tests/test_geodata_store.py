@@ -46,16 +46,28 @@ class _Connection:
 class GeodataStoreHydrationTests(unittest.TestCase):
     def test_relational_status_overrides_stale_compatibility_snapshot(self):
         snapshot = {
-            "items": {"entity-1": {
-                "id": "entity-1", "name": "Parque de los Príncipes",
-                "status": "CANDIDATE", "entityType": "MUNICIPAL_PARK",
-            }},
-            "events": [], "data": {},
+            "items": {
+                "entity-1": {
+                    "id": "entity-1",
+                    "name": "Parque de los Príncipes",
+                    "status": "CANDIDATE",
+                    "entityType": "MUNICIPAL_PARK",
+                }
+            },
+            "events": [],
+            "data": {},
         }
         entity_row = (
-            "entity-1", None, "MUNICIPAL_PARK", "Parque de los Príncipes", "APPROVED",
+            "entity-1",
+            None,
+            "MUNICIPAL_PARK",
+            "Parque de los Príncipes",
+            "APPROVED",
             {"type": "Point", "coordinates": [-6.006222, 37.3739359]},
-            json.dumps({"reviewHistory": [{"action": "APPROVED"}]}), "CURRENT", None, [],
+            json.dumps({"reviewHistory": [{"action": "APPROVED"}]}),
+            "CURRENT",
+            None,
+            [],
         )
         connection = _Connection(snapshot, [entity_row])
         store = GeodataStore()
@@ -69,15 +81,25 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             store.hydrate()
 
         self.assertEqual(store.items["entity-1"]["status"], "APPROVED")
-        self.assertEqual(store.items["entity-1"]["name"], "Parque de los Príncipes")
+        self.assertEqual(
+            store.items["entity-1"]["name"], "Parque de los Príncipes"
+        )
         self.assertEqual(store.items["entity-1"]["geometry"]["type"], "Point")
-        self.assertEqual(store.items["entity-1"]["entityTypes"], ["MUNICIPAL_PARK"])
+        self.assertEqual(
+            store.items["entity-1"]["entityTypes"], ["MUNICIPAL_PARK"]
+        )
 
-    def test_snapshot_only_persistence_does_not_flush_or_clear_dirty_imports(self):
+    def test_snapshot_only_persistence_does_not_flush_or_clear_dirty_imports(
+        self,
+    ):
         store = GeodataStore()
-        store.data = {"importCandidates": {"active-candidate": {"id": "active-candidate"}},
-                      "importProcessingQueues": {"active-queue": {"id": "active-queue"}},
-                      "importRuns": {"other-run": {"id": "other-run"}}}
+        store.data = {
+            "importCandidates": {
+                "active-candidate": {"id": "active-candidate"}
+            },
+            "importProcessingQueues": {"active-queue": {"id": "active-queue"}},
+            "importRuns": {"other-run": {"id": "other-run"}},
+        }
         store._dirty_import_candidate_ids.add("active-candidate")
         store._dirty_import_queue_ids.add("active-queue")
 
@@ -85,7 +107,9 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             store.persist_snapshot_only()
 
         relational_sync.assert_not_called()
-        self.assertEqual(store._dirty_import_candidate_ids, {"active-candidate"})
+        self.assertEqual(
+            store._dirty_import_candidate_ids, {"active-candidate"}
+        )
         self.assertEqual(store._dirty_import_queue_ids, {"active-queue"})
 
 

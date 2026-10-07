@@ -10,68 +10,131 @@ from geodata import GeoHandler
 
 class LoadTestCleanupSafetyTests(unittest.TestCase):
     def test_cleanup_requires_explicit_enablement(self):
-        with patch.dict(os.environ, {
-            "MYOTA_ENV": "development",
-        }, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "MYOTA_ENV": "development",
+            },
+            clear=False,
+        ):
             os.environ.pop("MYOTA_LOAD_TEST_CLEANUP_ENABLED", None)
-            with self.assertRaisesRegex(PermissionError, "disabled unless explicitly enabled"):
-                GeoHandler.cleanup_load_test_run(None, {"testRunId": "lt-test"})
+            with self.assertRaisesRegex(
+                PermissionError, "disabled unless explicitly enabled"
+            ):
+                GeoHandler.cleanup_load_test_run(
+                    None, {"testRunId": "lt-test"}
+                )
 
     def test_cleanup_is_disabled_when_environment_is_not_declared(self):
-        with patch.dict(os.environ, {"MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1"}, clear=False):
+        with patch.dict(
+            os.environ, {"MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1"}, clear=False
+        ):
             os.environ.pop("MYOTA_ENV", None)
-            with self.assertRaisesRegex(PermissionError, "disabled unless explicitly enabled"):
-                GeoHandler.cleanup_load_test_run(None, {"testRunId": "lt-test"})
+            with self.assertRaisesRegex(
+                PermissionError, "disabled unless explicitly enabled"
+            ):
+                GeoHandler.cleanup_load_test_run(
+                    None, {"testRunId": "lt-test"}
+                )
 
     def test_production_cleanup_requires_its_separate_explicit_switch(self):
-        with patch.dict(os.environ, {
-            "MYOTA_ENV": "production",
-            "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
-        }, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "MYOTA_ENV": "production",
+                "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
+            },
+            clear=False,
+        ):
             os.environ.pop("MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP", None)
-            with self.assertRaisesRegex(PermissionError, "production load-test cleanup requires explicit"):
-                GeoHandler.cleanup_load_test_run(None, {"testRunId": "lt-production-test"})
+            with self.assertRaisesRegex(
+                PermissionError,
+                "production load-test cleanup requires explicit",
+            ):
+                GeoHandler.cleanup_load_test_run(
+                    None, {"testRunId": "lt-production-test"}
+                )
 
-    def test_enabled_production_cleanup_still_requires_bearer_authentication(self):
-        with patch.dict(os.environ, {
-            "MYOTA_ENV": "production",
-            "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
-            "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
-        }, clear=False):
-            with self.assertRaisesRegex(PermissionError, "Bearer authentication is required"):
-                GeoHandler.cleanup_load_test_run(None, {"testRunId": "lt-production-test"})
+    def test_enabled_production_cleanup_still_requires_bearer_authentication(
+        self,
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "MYOTA_ENV": "production",
+                "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
+                "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                PermissionError, "Bearer authentication is required"
+            ):
+                GeoHandler.cleanup_load_test_run(
+                    None, {"testRunId": "lt-production-test"}
+                )
 
     def test_cleanup_accepts_identity_global_operator_role(self):
-        with patch.dict(os.environ, {
-            "MYOTA_ENV": "production",
-            "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
-            "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
-        }, clear=False), patch.object(geodata, "verify_token", return_value={
-            "roles": [{"role": "GLOBAL_OPERATOR"}], "scp": ["*"],
-        }):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MYOTA_ENV": "production",
+                    "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
+                    "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
+                },
+                clear=False,
+            ),
+            patch.object(
+                geodata,
+                "verify_token",
+                return_value={
+                    "roles": [{"role": "GLOBAL_OPERATOR"}],
+                    "scp": ["*"],
+                },
+            ),
+        ):
             params = {
                 "Authorization": "Bearer valid-test-token",
                 "testRunId": "lt-production-test",
                 "_body": {"confirmation": "not-the-required-confirmation"},
             }
             # Reaching confirmation validation proves the canonical identity role passed auth.
-            with self.assertRaisesRegex(ValueError, "confirmation must exactly match"):
+            with self.assertRaisesRegex(
+                ValueError, "confirmation must exactly match"
+            ):
                 GeoHandler.cleanup_load_test_run(None, params)
 
     def test_cleanup_rejects_non_global_role_even_with_wildcard_scope(self):
-        with patch.dict(os.environ, {
-            "MYOTA_ENV": "production",
-            "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
-            "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
-        }, clear=False), patch.object(geodata, "verify_token", return_value={
-            "roles": ["GIS_ADMIN"], "scp": ["*"],
-        }):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MYOTA_ENV": "production",
+                    "MYOTA_LOAD_TEST_CLEANUP_ENABLED": "1",
+                    "MYOTA_LOAD_TEST_ALLOW_PRODUCTION_CLEANUP": "YES",
+                },
+                clear=False,
+            ),
+            patch.object(
+                geodata,
+                "verify_token",
+                return_value={
+                    "roles": ["GIS_ADMIN"],
+                    "scp": ["*"],
+                },
+            ),
+        ):
             params = {
                 "Authorization": "Bearer valid-test-token",
                 "testRunId": "lt-production-test",
-                "_body": {"confirmation": "DELETE LOAD TEST DATA lt-production-test"},
+                "_body": {
+                    "confirmation": "DELETE LOAD TEST DATA lt-production-test"
+                },
             }
-            with self.assertRaisesRegex(PermissionError, "global administrator access is required"):
+            with self.assertRaisesRegex(
+                PermissionError, "global administrator access is required"
+            ):
                 GeoHandler.cleanup_load_test_run(None, params)
 
 

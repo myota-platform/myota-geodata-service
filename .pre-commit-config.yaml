@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: python-format
+        name: Check Python formatting (79 columns)
+        entry: python -m ruff format --check .
+        language: system
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
+      - id: python-lint
+        name: Lint Python
+        entry: python -m ruff check .
+        language: system
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
