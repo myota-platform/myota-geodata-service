@@ -4,11 +4,22 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
+  test-load-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify k6 workload contracts without network or production credentials
+        run: node --experimental-vm-modules --test loadtests/tests/geodata-workloads.test.mjs
+
   test-relational-boundaries:
     runs-on: ubuntu-latest
     services:
@@ -60,7 +71,8 @@ jobs:
           done
           python -m unittest discover -s tests
   build-and-publish:
-    needs: test-relational-boundaries
+    needs: [test-relational-boundaries, test-load-harness]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read

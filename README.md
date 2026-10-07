@@ -102,7 +102,7 @@ in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 ### Write and worker profiles
 
 `loadtests/geodata-workloads.js` separates five mutating profiles: `large-upload`
-(one multipart upload per VU), `simultaneous-edits` (concurrent edits to a
+(one resumable upload session per VU), `simultaneous-edits` (concurrent edits to a
 test-owned entity), `preprocessing` (imports left in the validation queue),
 `promotion` (validation and candidate promotion), and `queue-backlog` (steady
 accepted import submissions without waiting for workers). They can run in
@@ -114,6 +114,14 @@ promotion). Large uploads run once per VU
 and default to 2,500 features with 1 KiB
 of synthetic payload padding per feature (roughly 3–4 MiB per file); padding is
 capped at 4 KiB per feature so the largest generated file stays around 23 MiB.
+The upload profile uses `POST /v1/geodata/import-uploads`, raw checksum-verified
+parts, and session completion; it does not use the disabled single-request
+`/imports/upload` endpoint. Parts are bounded at 16 MiB and completion reads
+the nested `importRun.id`. Failed transfers abort their session, while a lost
+completion response is reconciled with the session's durable status. There is
+exactly one real upload iteration per VU; duration is its maximum time budget,
+not a period filled with idle iterations. Each failed stage prints sanitized
+HTTP problem details and request/correlation IDs.
 
 Install k6 on macOS with `brew install k6`. Use a dedicated, least-use
 global-admin account for each target environment; never reuse development
@@ -187,7 +195,8 @@ Every run receives a unique fixture tag and the k6 teardown calls
 this endpoint; it additionally requires a global administrator and exact
 confirmation. Cleanup refuses active import/promotion jobs and refuses to
 delete any fixture entity with linked activations, QSOs, or award progress. It
-removes the run's source objects, staged candidates, queue rows, audit/outbox
+removes the run's source objects, terminal resumable sessions and their part
+records, staged candidates, queue rows, audit/outbox
 events, imports, and created entities. If k6 is interrupted, run cleanup with
 the same dedicated account and exact confirmation before repeating the test.
 Helm does not enable cleanup by default; operators must deliberately enable it
@@ -205,7 +214,31 @@ harness prints its HTTP status and a bounded, credential-redacted API problem
 response (including request/correlation IDs when supplied). Cleanup retry waits
 also report the safe API detail and attempt number; use those diagnostics to
 identify backend or worker failures rather than relaxing the acceptance or
-request-failure thresholds.
+request-failure thresholds. Active upload sessions are also refused and retried;
+after an interrupted process, abort only the upload IDs logged for that exact
+test run through the user-bound upload DELETE API before cleanup. Terminal
+session cleanup reports `uploadSessionsDeleted` and does not delete another
+run's sessions or delete the same source object twice.
+
+Upload-harness regressions need no production credentials or network access:
+
+```bash
+node --experimental-vm-modules --test loadtests/tests/geodata-workloads.test.mjs
+```
+
+With k6 installed, this transport smoke test starts an ephemeral localhost-only
+protocol fixture, transfers an 8.46 MB synthetic document in two parts and
+asserts teardown removed all fixture sessions. It is not a production or
+SeaweedFS performance qualification:
+
+```bash
+node loadtests/tests/k6-smoke.mjs
+```
+
+CI gates image publishing on upload-harness regressions and the Python suite,
+including terminal-session cleanup with foreign-key part cascades in an
+isolated `*_tests` database. See the
+[verification record and recovery guidance](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-load-test-upload-verification.md).
 
 For example, reuse the production target and credentials from the production
 command above, replacing its profile and adding the failed run ID:
