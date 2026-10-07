@@ -34,14 +34,17 @@ class MetricsRegistry:
         ] = {}
 
     def inc(
-        self, name: str, labels: Mapping[str, object] | None = None
+        self,
+        name: str,
+        labels: Mapping[str, object] | None = None,
+        value: float = 1,
     ) -> None:
         key = (
             name,
             tuple(sorted((str(k), str(v)) for k, v in (labels or {}).items())),
         )
         with self._lock:
-            self._counters[key] += 1
+            self._counters[key] += value
 
     def set_gauge(
         self,

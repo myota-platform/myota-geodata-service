@@ -19,7 +19,9 @@ class SharedCompatibilityTests(unittest.TestCase):
     def test_bounded_server_is_available_to_integration_runner(self):
         from common import JsonHandler
 
-        server = BoundedThreadingHTTPServer(("127.0.0.1", 0), JsonHandler)
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), JsonHandler, bind_and_activate=False
+        )
         try:
             self.assertTrue(server.daemon_threads)
         finally:
