@@ -57,11 +57,17 @@ if (PROFILE === 'queue-backlog' && Number(__ENV.MYOTA_LOAD_TEST_ITERATIONS_PER_S
 const thresholds = PROFILE === 'cleanup-only' ? {
   http_req_failed: ['rate<0.05'],
 } : {
-  http_req_failed: [{ threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '30s' }],
+  // Production thresholds are report-only until teardown has had a chance to
+  // finish the full workload and clean its fixtures. Aborting mid-run leaves
+  // accepted imports active, which the cleanup endpoint correctly refuses to
+  // delete. Non-production may stop early to shorten feedback cycles.
+  http_req_failed: [PRODUCTION_TARGET ? 'rate<0.05' : {
+    threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '30s',
+  }],
   checks: ['rate>0.90'],
 };
 if (PRODUCTION_TARGET && PROFILE !== 'cleanup-only') {
-  thresholds.http_req_duration = [{ threshold: 'p(95)<2000', abortOnFail: true, delayAbortEval: '30s' }];
+  thresholds.http_req_duration = ['p(95)<2000'];
 }
 const cleanupExpectedStatuses = http.expectedStatuses(200, 400, 401);
 // Import POST returns 202 before the durable run projection is visible. A

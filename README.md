@@ -160,6 +160,12 @@ until the run appears, while other error statuses still count against
 `http_req_failed`. If polling times out, the error reports the last HTTP status
 and sanitized API details.
 
+Production pass/fail thresholds are evaluated after the configured workload
+finishes instead of aborting it on an early latency spike. This lets accepted
+imports drain and gives teardown a chance to clean every fixture; threshold
+failures are still reported in the final k6 result. Non-production runs retain
+early abort behavior.
+
 Every run receives a unique fixture tag and the k6 teardown calls
 `DELETE /v1/geodata/load-test-runs/{testRunId}`. Local Compose explicitly enables
 this endpoint; it additionally requires a global administrator and exact
