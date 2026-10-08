@@ -156,6 +156,8 @@ class CompatibilityGeodataStore(Store):
         properties = dict(entity)
         properties.pop("geometry", None)
         properties.pop("centroid", None)
+        properties.pop("maidenheadGridSquares4", None)
+        properties.pop("maidenheadLocators6", None)
         return properties
 
     def _upsert_entity(self, connection: Any, entity: dict[str, Any]) -> None:

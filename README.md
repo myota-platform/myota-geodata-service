@@ -34,6 +34,12 @@ separate decision.
 - A dedicated two-stage intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit durable queue events. Parsing and normalization stop at `PREPROCESSED`; no entity is created until an administrator validates selected records.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
+- Automatically calculated Maidenhead coverage is returned as sorted,
+  read-only `maidenheadGridSquares4` and `maidenheadLocators6` arrays. Points
+  have one canonical cell; lines and areas include every cell they intersect.
+  The database migration backfills existing entities and a geometry trigger
+  keeps both arrays current. See the [Maidenhead field
+  reference](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-maidenhead-locators.md).
 - Imports retain source-provided administrative location fields. When a source
   supplies a country code and location metadata, the entity is marked
   `geocodeStatus=SOURCE_DATA`; normal enrichment does not make a redundant

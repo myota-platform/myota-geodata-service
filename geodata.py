@@ -45,6 +45,7 @@ from import_formats import (
     parse_uploaded,
 )
 from location_catalog import build_location_tree, derive_location_codes
+from maidenhead import apply_maidenhead_fields
 from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
 
 GEODATA_IMPORT_BUCKET = os.environ.get(
@@ -1430,6 +1431,7 @@ class GeoHandler(JsonHandler):
                 GeoHandler._apply_import_location_metadata(entity, props)
                 GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
+                apply_maidenhead_fields(entity)
                 possible_duplicates = GeoHandler._possible_duplicates(entity)
                 candidate = {
                     "importRunId": run_id,
@@ -1575,6 +1577,7 @@ class GeoHandler(JsonHandler):
             )
         entity["status"] = target_status
         entity["updatedAt"] = now()
+        apply_maidenhead_fields(entity)
         if target_status == "APPROVED":
             previous = existing.get("status") if existing else "CANDIDATE"
             entity["review"] = {
@@ -4150,6 +4153,7 @@ class GeoHandler(JsonHandler):
         )
         entity["geometry"] = normalize_geometry(geometry)
         entity["centroid"] = geometry_centroid(entity["geometry"])
+        apply_maidenhead_fields(entity)
         enrich_entity_location(entity)
         entity["updatedAt"] = now()
         GeoHandler.store.event(
@@ -4511,6 +4515,7 @@ class GeoHandler(JsonHandler):
         )
         entity["geometry"] = converted
         entity["centroid"] = geometry_centroid(converted)
+        apply_maidenhead_fields(entity)
         enrich_entity_location(entity)
         entity["updatedAt"] = changed_at
         GeoHandler.store.event(

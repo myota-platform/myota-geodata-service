@@ -50,6 +50,9 @@ ordered SQL files define the `myota_geo` database:
     is cancelled immediately and staged rows/source artifacts are removed.
 18. `018_import_lookup_indexes.sql` adds a source-reference lookup index;
     candidate replay uses the existing `(import_run_id, ordinal)` index.
+19. `019_maidenhead_locators.sql` adds sorted four- and six-character
+    Maidenhead cell arrays, backfills existing entities, and recalculates the
+    arrays automatically whenever an entity geometry changes.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the

@@ -94,6 +94,8 @@ PROJECTIONS = {
             "name": "name",
             "status": "lifecycle_status",
             "geometry": "ST_AsGeoJSON(geom)::jsonb",
+            "maidenheadGridSquares4": "maidenhead_grid_squares_4",
+            "maidenheadLocators6": "maidenhead_locators_6",
             "sourceState": "source_state",
             "jurisdiction": "jurisdiction",
             "attachments": "attachments",
