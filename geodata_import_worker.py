@@ -25,6 +25,9 @@ ACK_WAIT_SECONDS = int(
     os.environ.get("GEODATA_WORKER_ACK_WAIT_SECONDS", "120")
 )
 MAX_ACK_PENDING = int(os.environ.get("GEODATA_WORKER_MAX_ACK_PENDING", "1"))
+CANCELLATION_RECONCILE_SECONDS = int(
+    os.environ.get("GEODATA_CANCELLATION_RECONCILE_SECONDS", "30")
+)
 
 
 def _event_key(event: dict[str, Any]) -> tuple[str, str]:
@@ -59,6 +62,47 @@ def _record_processed(consumer: str, event: dict[str, Any]) -> None:
             "SET last_event_id=EXCLUDED.last_event_id, updated_at=now()",
             (consumer, event["eventId"]),
         )
+
+
+def _stale_cancellation_ids() -> list[str]:
+    """Return cancellation requests whose worker lease has expired."""
+    GeoHandler.store.refresh_import_runs()
+    with GeoHandler.store.transaction() as connection:
+        rows = connection.execute(
+            "SELECT id::text FROM import_run "
+            "WHERE status='CANCELLING' "
+            "AND (lease_until IS NULL OR lease_until <= now()) "
+            "ORDER BY cancellation_requested_at, id"
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+async def _reconcile_stale_cancellations(stop_event: asyncio.Event) -> None:
+    """Finalize cancellations left behind by a stopped or lost worker."""
+    interval = max(5, CANCELLATION_RECONCILE_SECONDS)
+    while not stop_event.is_set():
+        try:
+            run_ids = await asyncio.to_thread(_stale_cancellation_ids)
+            for run_id in run_ids:
+                # Refresh immediately before finalization so the worker uses
+                # the authoritative relational status and source metadata.
+                await asyncio.to_thread(
+                    GeoHandler.store.refresh_import_run, run_id
+                )
+                finalized = await asyncio.to_thread(
+                    GeoHandler._recover_import_run, run_id
+                )
+                if finalized:
+                    LOG.info(
+                        "finalized stale import cancellation for run %s",
+                        run_id,
+                    )
+        except Exception:
+            LOG.exception("failed to reconcile stale import cancellations")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
 
 
 async def _with_ack_heartbeat(
@@ -269,6 +313,10 @@ async def run() -> None:
                 stop_event,
             ),
             name="geodata-promotion-consumer",
+        ),
+        asyncio.create_task(
+            _reconcile_stale_cancellations(stop_event),
+            name="geodata-stale-cancellation-reconciler",
         ),
     ]
     try:

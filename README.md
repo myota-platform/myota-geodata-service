@@ -383,6 +383,12 @@ the cancelled run summary. Preprocessed runs cannot be cancelled because they
 have entered administrator review. Cancelled/stalled summaries remain subject
 to the configured import-retention policy.
 
+The dedicated import worker also reconciles `CANCELLING` runs whose processing
+lease has expired. This lease-aware sweep runs every 30 seconds (configurable
+with `GEODATA_CANCELLATION_RECONCILE_SECONDS`) so a worker crash or lost event
+cannot leave a cancelled upload in the active queue indefinitely. It does not
+interfere with runs that still have a live worker lease.
+
 Cancellation uses the row repository as the sole lifecycle/timestamp writer;
 the worker finalizer reloads and locks the authoritative run through staged-row
 cleanup and persistence. This avoids cancellation timestamp conflicts and
