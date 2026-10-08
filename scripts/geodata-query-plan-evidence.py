@@ -24,6 +24,13 @@ def main() -> int:
     parser.add_argument(
         "--output", help="optional path for the JSON evidence report"
     )
+    parser.add_argument(
+        "--programme",
+        help="optional programme filter used by the live map query",
+    )
+    parser.add_argument(
+        "--status", help="optional lifecycle status used by the live map query"
+    )
     args = parser.parse_args()
 
     environment = os.environ.get("MYOTA_ENV", "").lower()
@@ -74,21 +81,7 @@ def main() -> int:
     if not 1 <= args.statement_timeout_ms <= 30000:
         parser.error("--statement-timeout-ms must be between 1 and 30000")
 
-    map_sql = """EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-        SELECT id::text, programme_slug, entity_type_code, name,
-               lifecycle_status, ST_AsGeoJSON(geom)::jsonb, public_properties
-        FROM geodata_entity
-        WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-          AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
-          AND (%s::text IS NULL OR programme_slug = %s::text)
-          AND (%s::text IS NULL OR lifecycle_status::text = %s::text)
-        ORDER BY name, id
-        LIMIT %s"""
-    catalogue_filter = "geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)"
-    catalogue_count_sql = f"""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-        SELECT count(*) FROM geodata_entity WHERE {catalogue_filter}"""
-    catalogue_page_sql = f"""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-        SELECT public_properties || jsonb_build_object(
+    entity_projection = """public_properties || jsonb_build_object(
             'id', id::text,
             'programmeSlug', programme_slug,
             'entityType', entity_type_code,
@@ -99,9 +92,28 @@ def main() -> int:
             'jurisdiction', jurisdiction,
             'attachments', attachments,
             'version', revision
-        )
+        )"""
+    map_projection = """id::text, programme_slug, entity_type_code, name,
+        lifecycle_status, ST_AsGeoJSON(geom)::jsonb, public_properties"""
+    # Mirror catalogue_page() and page_query() in relational_queries.py:
+    # map bounds use the GiST-compatible && predicate, while the count and
+    # page projections are separate SQL statements in the production path.
+    map_sql = f"""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+        SELECT {map_projection}
         FROM geodata_entity
-        WHERE {catalogue_filter}
+        WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+          AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+          AND (%s::text IS NULL OR programme_slug = %s)
+          AND (%s::text IS NULL OR lifecycle_status = %s)
+        ORDER BY name, id
+        LIMIT %s"""
+    catalogue_filter = "geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)"
+    catalogue_count_sql = f"""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+        SELECT count(*) FROM geodata_entity WHERE {catalogue_filter}"""
+    catalogue_page_sql = f"""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+        SELECT {entity_projection}
+        FROM geodata_entity
+        WHERE true
         ORDER BY lower(name), id
         LIMIT %s OFFSET 0"""
     report = {
@@ -111,6 +123,8 @@ def main() -> int:
         "bbox": bounds,
         "limit": args.limit,
         "statementTimeoutMs": args.statement_timeout_ms,
+        "programmeFilter": args.programme,
+        "statusFilter": args.status,
     }
     with psycopg.connect(dsn, autocommit=True) as connection:
         connection.execute("SET default_transaction_read_only = on")
@@ -138,10 +152,10 @@ def main() -> int:
                 (
                     *bbox_params,
                     *bbox_params,
-                    None,
-                    None,
-                    None,
-                    None,
+                    args.programme,
+                    args.programme,
+                    args.status,
+                    args.status,
                     args.limit,
                 ),
             ).fetchone()[0],
@@ -149,7 +163,7 @@ def main() -> int:
                 catalogue_count_sql, bbox_params
             ).fetchone()[0],
             "cataloguePage": connection.execute(
-                catalogue_page_sql, (*bbox_params, args.limit)
+                catalogue_page_sql, (args.limit,)
             ).fetchone()[0],
         }
     encoded = json.dumps(report, indent=2, default=str)
