@@ -1,5 +1,7 @@
 import importlib.util
 import unittest
+from contextlib import nullcontext
+from unittest.mock import Mock, patch
 
 from geodata import GeoHandler
 from geodata_pipeline import normalize_geometry
@@ -498,6 +500,32 @@ class GeometryWayTests(unittest.TestCase):
         )
         self.assertEqual(completed["status"], "COMPLETED")
         self.assertNotIn("entity-1", GeoHandler.store.items)
+
+    def test_missing_deletion_job_is_not_acknowledged_as_success(self):
+        with self.assertRaisesRegex(KeyError, "does not exist"):
+            GeoHandler._execute_deletion_job("missing-deletion-job")
+
+    def test_deletion_execution_refreshes_the_job_from_the_database(self):
+        store = Mock(
+            durable=True,
+            operation=Mock(return_value=nullcontext()),
+            data={
+                "entityDeletionJobs": {
+                    "database-deletion-job": {
+                        "id": "database-deletion-job",
+                        "status": "COMPLETED",
+                    }
+                }
+            },
+        )
+        with patch.object(GeoHandler, "store", store):
+            self.assertTrue(
+                GeoHandler._execute_deletion_job("database-deletion-job")
+            )
+
+        store.refresh_entity_deletion_job.assert_called_once_with(
+            "database-deletion-job"
+        )
 
 
 if __name__ == "__main__":

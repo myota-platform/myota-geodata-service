@@ -28,6 +28,10 @@ MAX_ACK_PENDING = int(os.environ.get("GEODATA_WORKER_MAX_ACK_PENDING", "1"))
 CANCELLATION_RECONCILE_SECONDS = int(
     os.environ.get("GEODATA_CANCELLATION_RECONCILE_SECONDS", "30")
 )
+DELETION_RECONCILE_SECONDS = int(
+    os.environ.get("GEODATA_DELETION_RECONCILE_SECONDS", "15")
+)
+DELETION_RECOVERY_BATCH_SIZE = 50
 
 
 def _event_key(event: dict[str, Any]) -> tuple[str, str]:
@@ -77,6 +81,33 @@ def _stale_cancellation_ids() -> list[str]:
     return [str(row[0]) for row in rows]
 
 
+def _pending_entity_deletion_ids() -> list[str]:
+    """Find queued or lease-expired deletion jobs for durable recovery."""
+    with GeoHandler.store.transaction() as connection:
+        rows = connection.execute(
+            "SELECT id FROM geodata_control_record "
+            "WHERE kind=%s AND ("
+            "payload->>'status'='QUEUED' OR ("
+            "payload->>'status'='PROCESSING' AND ("
+            "NULLIF(payload->>'leaseUntil','') IS NULL OR "
+            "(payload->>'leaseUntil')::timestamptz <= now()))) "
+            "ORDER BY updated_at, id LIMIT %s",
+            ("entityDeletionJobs", DELETION_RECOVERY_BATCH_SIZE),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def _entity_deletion_status(job_id: str) -> str | None:
+    """Read the authoritative job status before deduplicating an event."""
+    with GeoHandler.store.transaction() as connection:
+        row = connection.execute(
+            "SELECT payload->>'status' FROM geodata_control_record "
+            "WHERE kind=%s AND id=%s",
+            ("entityDeletionJobs", job_id),
+        ).fetchone()
+    return str(row[0]).upper() if row and row[0] else None
+
+
 async def _reconcile_stale_cancellations(stop_event: asyncio.Event) -> None:
     """Finalize cancellations left behind by a stopped or lost worker."""
     interval = max(5, CANCELLATION_RECONCILE_SECONDS)
@@ -99,6 +130,30 @@ async def _reconcile_stale_cancellations(stop_event: asyncio.Event) -> None:
                     )
         except Exception:
             LOG.exception("failed to reconcile stale import cancellations")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _reconcile_pending_entity_deletions(
+    stop_event: asyncio.Event,
+) -> None:
+    """Recover confirmed deletions even if their JetStream event was acked."""
+    interval = max(5, DELETION_RECONCILE_SECONDS)
+    while not stop_event.is_set():
+        try:
+            job_ids = await asyncio.to_thread(_pending_entity_deletion_ids)
+            for job_id in job_ids:
+                processed = await asyncio.to_thread(
+                    GeoHandler._execute_deletion_job, job_id
+                )
+                if processed:
+                    LOG.info(
+                        "reconciled pending entity deletion job %s", job_id
+                    )
+        except Exception:
+            LOG.exception("failed to reconcile pending entity deletion jobs")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
         except asyncio.TimeoutError:
@@ -150,11 +205,37 @@ async def _consume(
             event: dict[str, Any] = {}
             try:
                 event = json.loads(message.data)
-                event_id, _ = _event_key(event)
+                event_id, event_type = _event_key(event)
                 if _already_processed(consumer, event_id):
-                    await message.ack()
-                    continue
-                await _with_ack_heartbeat(message, handler(event))
+                    aggregate = event.get("aggregate")
+                    if not isinstance(aggregate, dict):
+                        aggregate = {}
+                    job_id = aggregate.get("id")
+                    if (
+                        event_type == "geodata.entity-deletion-job.queued.v1"
+                        and aggregate.get("type") == "entity_deletion_job"
+                        and job_id
+                    ):
+                        status = await asyncio.to_thread(
+                            _entity_deletion_status, str(job_id)
+                        )
+                        if status in {"QUEUED", "PROCESSING"}:
+                            LOG.warning(
+                                "replaying deletion event %s because "
+                                "job %s remains %s",
+                                event_id,
+                                job_id,
+                                status,
+                            )
+                            await _with_ack_heartbeat(message, handler(event))
+                        else:
+                            await message.ack()
+                            continue
+                    else:
+                        await message.ack()
+                        continue
+                else:
+                    await _with_ack_heartbeat(message, handler(event))
                 _record_processed(consumer, event)
                 await message.ack()
             except Exception as error:
@@ -317,6 +398,10 @@ async def run() -> None:
         asyncio.create_task(
             _reconcile_stale_cancellations(stop_event),
             name="geodata-stale-cancellation-reconciler",
+        ),
+        asyncio.create_task(
+            _reconcile_pending_entity_deletions(stop_event),
+            name="geodata-pending-deletion-reconciler",
         ),
     ]
     try:

@@ -18,6 +18,10 @@ separate decision.
   worker reads or rewrites the archived whole-service JSON snapshot.
 - Entity deletion jobs are consumed by the durable
   `geodata-entity-deletion-v1` JetStream consumer, not an API-local executor.
+  The worker also reconciles confirmed `QUEUED` and lease-expired
+  `PROCESSING` jobs from PostgreSQL, so an acknowledged or unavailable broker
+  event cannot strand a permanent deletion. A missing job is a processing
+  failure, never a successful no-op.
 - Migration 016 is a coordinated upgrade: old writers are fenced, and new API
   and consumer processes wait for its completion before accepting work.
   Follow the [Phase 1 upgrade and evidence record](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).

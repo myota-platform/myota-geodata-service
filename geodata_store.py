@@ -689,6 +689,13 @@ class GeodataStore(CompatibilityGeodataStore):
             self._repository.invalidate("importProcessingQueues", queue_id)
             self._repository.invalidate("importCandidates")
 
+    def refresh_entity_deletion_job(self, job_id):
+        """Reload a deletion job created or changed by another service pod."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.reload("entityDeletionJobs", str(job_id))
+        return self.data.get("entityDeletionJobs", {}).get(job_id)
+
     def mark_import_candidate_dirty(self, candidate_id):
         if not self.durable:
             super().mark_import_candidate_dirty(candidate_id)

@@ -4775,10 +4775,12 @@ class GeoHandler(JsonHandler):
     def _execute_deletion_job(
         job_id: str, p: dict[str, str] | None = None
     ) -> bool:
+        if GeoHandler.store.durable:
+            GeoHandler.store.refresh_entity_deletion_job(job_id)
         jobs = GeoHandler.store.data.setdefault("entityDeletionJobs", {})
         job = jobs.get(job_id)
         if not job:
-            return True
+            raise KeyError(f"entity deletion job {job_id} does not exist")
         if job.get("status") in {"COMPLETED", "FAILED"}:
             return True
         if GeoHandler.store.durable:
