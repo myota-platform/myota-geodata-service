@@ -77,13 +77,7 @@ class ImportQueueTests(unittest.TestCase):
             "source": {"name": "large pasted dataset", "license": "CC0"},
             "content": '{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"name":"Queued trail"},"geometry":{"type":"LineString","coordinates":[[-5.99,37.39],[-5.98,37.40]]}}]}',
         }
-        with (
-            patch(
-                "geodata.enrich_entity_location",
-                side_effect=lambda entity, force=False: entity,
-            ),
-            patch.object(GeoHandler, "_authorize_import"),
-        ):
+        with patch.object(GeoHandler, "_authorize_import"):
             result = GeoHandler.enqueue_import(
                 None,
                 {
@@ -297,7 +291,7 @@ class ImportQueueTests(unittest.TestCase):
         ):
             self.assertTrue(GeoHandler._process_import_queue("deleted-queue"))
 
-    def test_preprocessing_keeps_valid_entities_when_one_feature_errors(self):
+    def test_preprocessing_does_not_wait_for_reverse_geocoding(self):
         body = {
             "adapter": "MANUAL",
             "format": "GEOJSON",
@@ -323,41 +317,24 @@ class ImportQueueTests(unittest.TestCase):
             ],
         }
 
-        def enrich(entity, force=False):
-            if entity["name"] == "Broken trail":
-                raise RuntimeError("reverse geocoder failed for this feature")
-            return entity
-
-        with patch("geodata.enrich_entity_location", side_effect=enrich):
+        with patch("geodata.lookup_entity_location") as lookup:
             result = GeoHandler.enqueue_import(None, {"_body": body})
 
         run = GeoHandler.store.data["importRuns"][result["importRunId"]]
-        self.assertEqual(run["status"], "PREPROCESSED_WITH_ERRORS")
-        self.assertEqual(run["stats"]["preprocessed"], 1)
-        self.assertEqual(run["stats"]["errors"], 1)
+        self.assertEqual(run["status"], "PREPROCESSED")
+        self.assertEqual(run["stats"]["preprocessed"], 2)
+        self.assertEqual(run["stats"]["errors"], 0)
+        lookup.assert_not_called()
         candidates = GeoHandler.list_import_candidates(
             None, {"runId": result["importRunId"], "_path": "?pageSize=10"}
         )
-        self.assertEqual(candidates["total"], 1)
+        self.assertEqual(candidates["total"], 2)
         self.assertEqual(candidates["items"][0]["name"], "Valid trail")
-        self.assertIn("reverse geocoder failed", run["errors"][0]["message"])
+        self.assertEqual(candidates["items"][1]["name"], "Broken trail")
 
     def test_concurrent_imports_safely_update_shared_candidate_and_manifest_state(
         self,
     ):
-        start_together = threading.Barrier(2)
-        first_call_by_thread = set()
-        first_call_lock = threading.Lock()
-
-        def synchronize_enrichment(entity, force=False):
-            thread_id = threading.get_ident()
-            with first_call_lock:
-                first_call = thread_id not in first_call_by_thread
-                first_call_by_thread.add(thread_id)
-            if first_call:
-                start_together.wait(timeout=3)
-            return entity
-
         def make_body(label):
             return {
                 "adapter": "MANUAL",
@@ -383,23 +360,19 @@ class ImportQueueTests(unittest.TestCase):
                 ],
             }
 
-        with patch(
-            "geodata.enrich_entity_location",
-            side_effect=synchronize_enrichment,
-        ):
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = []
-                for label in ("alpha", "bravo"):
-                    body = make_body(label)
-                    futures.append(
-                        pool.submit(
-                            GeoHandler._start_import,
-                            body,
-                            body["features"],
-                            {},
-                        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = []
+            for label in ("alpha", "bravo"):
+                body = make_body(label)
+                futures.append(
+                    pool.submit(
+                        GeoHandler._start_import,
+                        body,
+                        body["features"],
+                        {},
                     )
-                results = [future.result(timeout=10) for future in futures]
+                )
+            results = [future.result(timeout=10) for future in futures]
 
         self.assertEqual(
             [len(result["preprocessed"]) for result in results], [20, 20]
@@ -828,11 +801,7 @@ class ImportQueueTests(unittest.TestCase):
                 }
             ],
         }
-        with patch(
-            "geodata.enrich_entity_location",
-            side_effect=lambda entity, force=False: entity,
-        ):
-            result = GeoHandler.enqueue_import(None, {"_body": body})
+        result = GeoHandler.enqueue_import(None, {"_body": body})
         candidates = GeoHandler.list_import_candidates(
             None, {"runId": result["importRunId"], "_path": "?pageSize=10"}
         )

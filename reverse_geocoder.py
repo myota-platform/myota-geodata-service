@@ -239,13 +239,33 @@ def _sync_location_snapshot(entity: dict[str, Any]) -> None:
 
 
 def apply_location_result(
-    entity: dict[str, Any], result: dict[str, Any]
+    entity: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    only_missing: bool = False,
 ) -> dict[str, Any]:
     """Merge provider data without overwriting explicitly managed fields."""
     manual_fields = set(entity.get("manualLocationFields") or [])
+    code_parents = {
+        "continentCode": ("continent",),
+        "countryCode": ("country",),
+        "regionCode": ("region", "subdivision"),
+        "subdivisionCode": ("region", "subdivision"),
+        "provinceCode": ("province",),
+        "countyCode": ("county",),
+    }
+    location_aliases = {"region": "subdivision", "subdivision": "region"}
     for field in LOCATION_FIELDS:
-        if field in result and field not in manual_fields:
-            entity[field] = result[field]
+        if field not in result or field in manual_fields:
+            continue
+        if location_aliases.get(field) in manual_fields:
+            continue
+        if manual_fields.intersection(code_parents.get(field, ())):
+            continue
+        current = entity.get(field)
+        if only_missing and current not in (None, ""):
+            continue
+        entity[field] = result[field]
     for field in (
         "geocodeProvider",
         "geocodeStatus",
@@ -257,7 +277,26 @@ def apply_location_result(
             entity[field] = result[field]
     entity["manualLocationFields"] = sorted(manual_fields)
     _sync_location_snapshot(entity)
+    provenance = entity.setdefault("provenance", {})
+    provenance["reverseGeocoding"] = {
+        key: value for key, value in result.items() if key != "geocodePayload"
+    }
+    if "geocodePayload" in result:
+        provenance["reverseGeocoding"]["response"] = result["geocodePayload"]
     return entity
+
+
+def lookup_entity_location(entity: dict[str, Any]) -> dict[str, Any]:
+    """Look up location metadata for the entity's current representative point."""
+    centroid = entity.get("centroid") or {}
+    try:
+        return GEOCODER.lookup(float(centroid["lat"]), float(centroid["lon"]))
+    except (KeyError, TypeError, ValueError):
+        return {
+            "geocodeProvider": "BIGDATACLOUD",
+            "geocodeStatus": "SKIPPED_NO_CENTROID",
+            "geocodedAt": now(),
+        }
 
 
 def enrich_entity_location(
@@ -276,22 +315,6 @@ def enrich_entity_location(
     ):
         _sync_location_snapshot(entity)
         return entity
-    centroid = entity.get("centroid") or {}
-    try:
-        result = GEOCODER.lookup(
-            float(centroid["lat"]), float(centroid["lon"])
-        )
-    except (KeyError, TypeError, ValueError):
-        result = {
-            "geocodeProvider": "BIGDATACLOUD",
-            "geocodeStatus": "SKIPPED_NO_CENTROID",
-            "geocodedAt": now(),
-        }
+    result = lookup_entity_location(entity)
     apply_location_result(entity, result)
-    provenance = entity.setdefault("provenance", {})
-    provenance["reverseGeocoding"] = {
-        key: value for key, value in result.items() if key != "geocodePayload"
-    }
-    if "geocodePayload" in result:
-        provenance["reverseGeocoding"]["response"] = result["geocodePayload"]
     return entity

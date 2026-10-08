@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import hashlib
 import json
 import math
@@ -46,10 +47,23 @@ from import_formats import (
 )
 from location_catalog import build_location_tree, derive_location_codes
 from maidenhead import apply_maidenhead_fields
-from reverse_geocoder import LOCATION_FIELDS, enrich_entity_location
+from reverse_geocoder import (
+    LOCATION_FIELDS,
+    apply_location_result,
+    lookup_entity_location,
+)
 
 GEODATA_IMPORT_BUCKET = os.environ.get(
     "MYOTA_GEODATA_IMPORT_BUCKET", "myota-geodata-imports"
+)
+LOCATION_REQUIRED_GROUPS = (
+    ("continent",),
+    ("continentCode",),
+    ("country",),
+    ("countryCode",),
+    ("region", "subdivision"),
+    ("regionCode", "subdivisionCode"),
+    ("city", "municipality"),
 )
 
 
@@ -110,6 +124,10 @@ class GeoHandler(JsonHandler):
     import_executor = ThreadPoolExecutor(
         max_workers=max(1, int(os.environ.get("MYOTA_IMPORT_WORKERS", "2"))),
         thread_name_prefix="geodata-import",
+    )
+    location_executor = ThreadPoolExecutor(
+        max_workers=max(1, int(os.environ.get("MYOTA_LOCATION_WORKERS", "2"))),
+        thread_name_prefix="geodata-location",
     )
     deletion_executor = ThreadPoolExecutor(
         max_workers=max(1, int(os.environ.get("MYOTA_DELETION_WORKERS", "2"))),
@@ -1244,6 +1262,153 @@ class GeoHandler(JsonHandler):
             )
 
     @staticmethod
+    def _missing_location_fields(entity: dict[str, Any]) -> list[str]:
+        """Return required location fields that neither data nor manual values satisfy."""
+        manual_fields = set(entity.get("manualLocationFields") or [])
+        missing = []
+        for group in LOCATION_REQUIRED_GROUPS:
+            if any(entity.get(field) not in (None, "") for field in group):
+                continue
+            if any(field in manual_fields for field in group):
+                continue
+            missing.append(group[0])
+        return missing
+
+    @staticmethod
+    def _queue_location_enrichment(
+        entity: dict[str, Any],
+        *,
+        reason: str,
+        requested_by: str | None = None,
+        only_missing: bool = False,
+    ) -> dict[str, Any]:
+        """Queue an enrichment request tied to the entity's current geometry."""
+        geometry = entity.get("geometry")
+        if not isinstance(geometry, dict):
+            entity["locationEnrichmentStatus"] = "FAILED"
+            entity["locationEnrichmentError"] = "Entity has no geometry."
+            return entity
+
+        geometry_hash = digest(geometry)
+        if (
+            entity.get("locationEnrichmentStatus") == "QUEUED"
+            and entity.get("locationEnrichmentGeometryHash") == geometry_hash
+        ):
+            return entity
+
+        request_id = new_id()
+        requested_at = now()
+        entity.update(
+            {
+                "locationEnrichmentRequestId": request_id,
+                "locationEnrichmentGeometryHash": geometry_hash,
+                "locationEnrichmentStatus": "QUEUED",
+                "locationEnrichmentRequestedAt": requested_at,
+                "locationEnrichmentRequestedBy": requested_by,
+            }
+        )
+        entity.pop("locationEnrichmentError", None)
+        payload = {
+            "entityId": entity["id"],
+            "requestId": request_id,
+            "geometryHash": geometry_hash,
+            "onlyMissing": only_missing,
+            "reason": reason,
+            "requestedBy": requested_by,
+            "natsSubject": "myota.geodata.entity.location-enrichment.v1",
+        }
+        GeoHandler.store.event(
+            "geodata.entity.location-enrichment-requested.v1",
+            "entity",
+            entity["id"],
+            payload,
+        )
+        if not GeoHandler.store.durable:
+            GeoHandler.location_executor.submit(
+                GeoHandler._process_location_enrichment,
+                entity["id"],
+                request_id,
+                geometry_hash,
+                only_missing,
+                reason,
+            )
+        return entity
+
+    @staticmethod
+    def _process_location_enrichment(
+        entity_id: str,
+        request_id: str,
+        geometry_hash: str,
+        only_missing: bool,
+        reason: str,
+    ) -> bool:
+        """Geocode outside a transaction, then commit only if the request is current."""
+        store = GeoHandler.store
+        try:
+            with store.operation(write=False):
+                entity = store.items[entity_id]
+                if (
+                    entity.get("locationEnrichmentRequestId") != request_id
+                    or digest(entity.get("geometry")) != geometry_hash
+                ):
+                    return False
+                if entity.get("locationEnrichmentStatus") in {
+                    "COMPLETED",
+                    "FAILED",
+                }:
+                    # The database commit may have succeeded immediately
+                    # before the worker lost its acknowledgement. Do not
+                    # repeat a paid provider lookup when JetStream redelivers.
+                    return True
+                snapshot = copy.deepcopy(entity)
+        except KeyError:
+            return False
+
+        result = lookup_entity_location(snapshot)
+        result_status = str(result.get("geocodeStatus") or "FAILED")
+        enrichment_status = (
+            "COMPLETED" if result_status == "ENRICHED" else "FAILED"
+        )
+        with store.operation(write=True, atomic=True):
+            try:
+                entity = store.items[entity_id]
+            except KeyError:
+                return False
+            if (
+                entity.get("locationEnrichmentRequestId") != request_id
+                or digest(entity.get("geometry")) != geometry_hash
+            ):
+                return False
+            apply_location_result(entity, result, only_missing=only_missing)
+            completed_at = now()
+            entity.update(
+                {
+                    "locationEnrichmentStatus": enrichment_status,
+                    "locationEnrichmentCompletedAt": completed_at,
+                    "locationEnrichmentGeometryHash": geometry_hash,
+                    "locationEnrichmentReason": reason,
+                    "updatedAt": completed_at,
+                }
+            )
+            if result.get("geocodeError"):
+                entity["locationEnrichmentError"] = result["geocodeError"]
+            else:
+                entity.pop("locationEnrichmentError", None)
+            GeoHandler.store.event(
+                "geodata.entity.location-enriched.v1",
+                "entity",
+                entity_id,
+                {
+                    "entityId": entity_id,
+                    "requestId": request_id,
+                    "geometryHash": geometry_hash,
+                    "status": enrichment_status,
+                    "reason": reason,
+                },
+            )
+        return True
+
+    @staticmethod
     def _apply_import_location_metadata(
         entity: dict[str, Any], properties: dict[str, Any]
     ) -> None:
@@ -1430,7 +1595,6 @@ class GeoHandler(JsonHandler):
                 }
                 GeoHandler._apply_import_location_metadata(entity, props)
                 GeoHandler._preserve_manual_location(existing, entity)
-                enrich_entity_location(entity)
                 apply_maidenhead_fields(entity)
                 possible_duplicates = GeoHandler._possible_duplicates(entity)
                 candidate = {
@@ -1567,6 +1731,10 @@ class GeoHandler(JsonHandler):
         entity = {**(candidate.get("entity") or {})}
         entity_id = entity["id"]
         existing = GeoHandler.store.items.get(entity_id)
+        previous_geometry_hash = (
+            digest(existing.get("geometry")) if existing else None
+        )
+        geometry_hash = digest(entity.get("geometry"))
         if (
             existing
             and existing.get("status") == "APPROVED"
@@ -1595,6 +1763,27 @@ class GeoHandler(JsonHandler):
                 }
             )
         GeoHandler.store.items[entity_id] = entity
+        geometry_changed = (
+            previous_geometry_hash is not None
+            and previous_geometry_hash != geometry_hash
+        )
+        missing_location = GeoHandler._missing_location_fields(entity)
+        if geometry_changed:
+            GeoHandler._queue_location_enrichment(
+                entity,
+                reason="IMPORTED_GEOMETRY_CHANGED",
+                requested_by=actor,
+                only_missing=False,
+            )
+        elif missing_location:
+            GeoHandler._queue_location_enrichment(
+                entity,
+                reason="ENTITY_CREATED"
+                if existing is None
+                else "MISSING_METADATA",
+                requested_by=actor,
+                only_missing=True,
+            )
         GeoHandler._create_conflation_candidates(entity)
         if existing:
             GeoHandler.store.event(
@@ -4143,6 +4332,7 @@ class GeoHandler(JsonHandler):
                 "geometry must be a GeoJSON Point, LineString, MultiLineString, Polygon, or MultiPolygon"
             )
         previous = entity.get("geometry")
+        previous_geometry_hash = digest(previous)
         entity.setdefault("geometryHistory", []).append(
             {
                 "editorId": body["editorId"],
@@ -4154,7 +4344,13 @@ class GeoHandler(JsonHandler):
         entity["geometry"] = normalize_geometry(geometry)
         entity["centroid"] = geometry_centroid(entity["geometry"])
         apply_maidenhead_fields(entity)
-        enrich_entity_location(entity)
+        geometry_hash = digest(entity["geometry"])
+        if geometry_hash != previous_geometry_hash:
+            GeoHandler._queue_location_enrichment(
+                entity,
+                reason="GEOMETRY_CHANGED",
+                requested_by=body["editorId"],
+            )
         entity["updatedAt"] = now()
         GeoHandler.store.event(
             "geodata.entity.geometry-updated.v1",
@@ -4235,7 +4431,13 @@ class GeoHandler(JsonHandler):
         for field in released_fields:
             entity[field] = None
         entity["manualLocationFields"] = sorted(manual_fields)
-        enrich_entity_location(entity, force=bool(released_fields))
+        if released_fields:
+            GeoHandler._queue_location_enrichment(
+                entity,
+                reason="MANUAL_FIELDS_RELEASED",
+                requested_by=body["editorId"],
+                only_missing=True,
+            )
         changed_at = now()
         entity.setdefault("reviewHistory", []).append(
             {
@@ -4269,6 +4471,36 @@ class GeoHandler(JsonHandler):
             },
         )
         return entity
+
+    @staticmethod
+    def request_location_enrichment(
+        _: JsonHandler, p: dict[str, str]
+    ) -> dict[str, Any]:
+        entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_gis_admin(p, entity, "geodata.location.manage")
+        body = p["_body"]
+        require(body, "editorId")
+        missing = GeoHandler._missing_location_fields(entity)
+        if not missing:
+            from relational_state import StateConflict
+
+            raise StateConflict("location metadata is already complete")
+        if not isinstance(entity.get("geometry"), dict):
+            raise ValueError("location enrichment requires entity geometry")
+        GeoHandler._queue_location_enrichment(
+            entity,
+            reason="ADMIN_REQUESTED_MISSING_METADATA",
+            requested_by=body["editorId"],
+            only_missing=True,
+        )
+        return {
+            "entityId": entity["id"],
+            "requestId": entity.get("locationEnrichmentRequestId"),
+            "status": entity.get("locationEnrichmentStatus"),
+            "missingFields": missing,
+            "queued": True,
+            "_status": 202,
+        }
 
     @staticmethod
     def change_entity_type(
@@ -4516,7 +4748,11 @@ class GeoHandler(JsonHandler):
         entity["geometry"] = converted
         entity["centroid"] = geometry_centroid(converted)
         apply_maidenhead_fields(entity)
-        enrich_entity_location(entity)
+        GeoHandler._queue_location_enrichment(
+            entity,
+            reason="GEOMETRY_TYPE_CHANGED",
+            requested_by=body["editorId"],
+        )
         entity["updatedAt"] = changed_at
         GeoHandler.store.event(
             "geodata.entity.geometry-type-changed.v1",
@@ -5041,6 +5277,10 @@ GeoHandler.routes = {
         "POST",
         "/v1/geodata/entities/{entityId}/location",
     ): GeoHandler.update_location,
+    (
+        "POST",
+        "/v1/geodata/entities/{entityId}/location-enrichment-requests",
+    ): GeoHandler.request_location_enrichment,
     (
         "POST",
         "/v1/geodata/entities/{entityId}/entity-type",

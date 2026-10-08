@@ -364,6 +364,26 @@ async def run() -> None:
             if not processed:
                 raise RuntimeError("deletion lease is active; defer delivery")
 
+    async def enrich_location(event: dict[str, Any]) -> None:
+        payload = event.get("payload") or {}
+        entity_id = payload.get("entityId") or event.get("aggregate", {}).get(
+            "id"
+        )
+        request_id = payload.get("requestId")
+        geometry_hash = payload.get("geometryHash")
+        if not entity_id or not request_id or not geometry_hash:
+            raise ValueError(
+                "location-enrichment event is missing identifiers"
+            )
+        await asyncio.to_thread(
+            GeoHandler._process_location_enrichment,
+            str(entity_id),
+            str(request_id),
+            str(geometry_hash),
+            bool(payload.get("onlyMissing", False)),
+            str(payload.get("reason") or "UNSPECIFIED"),
+        )
+
     tasks = [
         asyncio.create_task(
             _consume(
@@ -394,6 +414,16 @@ async def run() -> None:
                 stop_event,
             ),
             name="geodata-promotion-consumer",
+        ),
+        asyncio.create_task(
+            _consume(
+                js,
+                "geodata-location-enrichment-v1",
+                "myota.geodata.entity.location-enrichment.v1",
+                enrich_location,
+                stop_event,
+            ),
+            name="geodata-location-enrichment-consumer",
         ),
         asyncio.create_task(
             _reconcile_stale_cancellations(stop_event),

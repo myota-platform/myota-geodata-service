@@ -92,9 +92,29 @@ class ReverseGeocoderTests(unittest.TestCase):
         self.assertEqual(entity["country"], "Reino de España")
         self.assertEqual(entity["countryCode"], "ES")
         self.assertEqual(entity["region"], "Andalucía manual")
-        self.assertEqual(entity["regionCode"], "ES-AN")
+        # The provider code must not be paired with manually supplied text;
+        # codes are resolved from the selected text in the location catalogue.
+        self.assertNotIn("regionCode", entity)
         self.assertEqual(entity["city"], "Sevilla")
         self.assertEqual(entity["location"]["municipality"], "Sevilla")
+
+    def test_manual_subdivision_alias_protects_its_derived_code(self):
+        entity = {
+            "subdivision": "Andalucía manual",
+            "subdivisionCode": "ES-AN",
+            "manualLocationFields": ["subdivision"],
+        }
+        apply_location_result(
+            entity,
+            {
+                "region": "Algarve",
+                "regionCode": "PT-08",
+                "subdivision": "Algarve",
+                "subdivisionCode": "PT-08",
+            },
+        )
+        self.assertEqual(entity["subdivision"], "Andalucía manual")
+        self.assertEqual(entity["subdivisionCode"], "ES-AN")
 
     def test_existing_successful_data_does_not_trigger_remote_refresh(self):
         entity = {

@@ -202,36 +202,37 @@ class GeometryWayTests(unittest.TestCase):
         self.assertNotIn("skipReason", trail["properties"])
 
     def test_geometry_type_conversion_supports_way_and_round_trips(self):
-        result = GeoHandler.change_geometry_type(
-            None,
-            {
-                "entityId": "entity-1",
-                "_body": {"geometryType": "WAY", "editorId": "admin"},
-            },
-        )
-        self.assertEqual(result["geometry"]["type"], "LineString")
-        self.assertGreaterEqual(len(result["geometry"]["coordinates"]), 2)
-
-        result = GeoHandler.change_geometry_type(
-            None,
-            {
-                "entityId": "entity-1",
-                "_body": {"geometryType": "POLYGON", "editorId": "admin"},
-            },
-        )
-        self.assertEqual(result["geometry"]["type"], "Polygon")
-
-        result = GeoHandler.change_geometry_type(
-            None,
-            {
-                "entityId": "entity-1",
-                "_body": {
-                    "geometryType": "MULTILINESTRING",
-                    "editorId": "admin",
+        with patch.object(GeoHandler, "_queue_location_enrichment"):
+            result = GeoHandler.change_geometry_type(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {"geometryType": "WAY", "editorId": "admin"},
                 },
-            },
-        )
-        self.assertEqual(result["geometry"]["type"], "MultiLineString")
+            )
+            self.assertEqual(result["geometry"]["type"], "LineString")
+            self.assertGreaterEqual(len(result["geometry"]["coordinates"]), 2)
+
+            result = GeoHandler.change_geometry_type(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {"geometryType": "POLYGON", "editorId": "admin"},
+                },
+            )
+            self.assertEqual(result["geometry"]["type"], "Polygon")
+
+            result = GeoHandler.change_geometry_type(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {
+                        "geometryType": "MULTILINESTRING",
+                        "editorId": "admin",
+                    },
+                },
+            )
+            self.assertEqual(result["geometry"]["type"], "MultiLineString")
 
     def test_entity_category_change_is_audited(self):
         GeoHandler.store.items["entity-1"]["entityType"] = "MUNICIPAL_PARK"

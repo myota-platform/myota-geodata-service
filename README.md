@@ -373,10 +373,12 @@ For a containerized PostGIS environment, use `docker compose up --build` after s
 
 ## Reverse geocoding
 
-Server-side imports and geometry edits use BigDataCloud's Reverse Geocoding to
-City API. The service calls `https://api-bdc.net/data/reverse-geocode` with the
-entity centroid, keeps the normalized response on the entity, and preserves the
-provider response under `provenance.reverseGeocoding`.
+Server-side entity materialization and geometry changes use BigDataCloud's
+Reverse Geocoding to City API. The service calls
+`https://api-bdc.net/data/reverse-geocode` asynchronously from the durable
+geodata worker with the persisted geometry centroid, keeps normalized values on
+the entity, and preserves the provider response under
+`provenance.reverseGeocoding`. Preprocessing does not call the provider.
 
 Copy `.env.example` to `.env` for local development and set
 `BIGDATACLOUD_API_KEY`. The real `.env` is ignored and must never be committed.
@@ -392,15 +394,25 @@ administrative subdivision after the country (`principalSubdivisionCode`).
 Province and county are populated only when the provider supplies a matching
 administrative unit; the full administrative chain remains in provenance.
 
-Administrators can edit these fields through
-`POST /v1/geodata/entities/{entityId}/location` with `location`,
-`manualFields`, `editorId`, and an optional note. The service records the
-manual field set in `manualLocationFields` and never overwrites those fields
-when an import, geometry edit, or reverse-geocoding refresh runs. Removing a
-field from `manualFields` explicitly returns it to provider-managed values.
-Successful provider data is reused by subsequent imports, geometry edits and
-metadata saves; a new remote lookup is made only when location data is missing
-or an administrator explicitly releases fields back to automatic management.
+Administrators can edit these fields through the entity metadata resource (the
+legacy `POST /v1/geodata/entities/{entityId}/location` alias remains available)
+with `location`, `manualFields`, `editorId`, and an optional note. The service
+records the manual field set in `manualLocationFields`; provider responses
+never replace those values or their corresponding codes. Removing a field from
+`manualFields` returns it to provider-managed values and queues an `only
+missing` lookup.
+
+Enrichment runs after a candidate/approved entity is materialized when required
+location values are missing, and after a geometry or geometry-type change. A
+geometry change queues a refresh for the new coordinates; manual values remain
+protected. The request ID and geometry hash are rechecked after the provider
+call, so stale results cannot overwrite a later edit. Administrators can
+manually queue missing metadata from Entity Management; the endpoint is
+`POST /v1/geodata/entities/{entityId}/location-enrichment-requests`. It writes a
+transactional outbox event consumed by the durable
+`geodata-location-enrichment-v1` worker. A queued or failed lookup leaves the
+entity persisted and visible; retry is available while required metadata is
+still missing.
 The hierarchy editor uses `GET /v1/geodata/location-options`, which aggregates
 the stored BigDataCloud names and codes into continent → country → first
 subdivision → province options. BigDataCloud documents these values as
@@ -500,8 +512,9 @@ import run and outbox event, while the geodata-owned `geodata_import_worker.py`
 process consumes durable NATS JetStream pull consumers with explicit ACKs,
 bounded pending work, lease/heartbeat/attempt tracking, retry backoff, and a
 terminal dead-letter path. Preprocessing (`geodata-preprocessing-v1`), promotion
-(`geodata-import-processing-v2`) and confirmed entity deletion
-(`geodata-entity-deletion-v1`) use separate durable consumers and subjects.
+(`geodata-import-processing-v2`), confirmed entity deletion
+(`geodata-entity-deletion-v1`) and location enrichment
+(`geodata-location-enrichment-v1`) use separate durable consumers and subjects.
 The worker is deployed independently of the API; increasing replicas still
 requires the qualification gates below. Stable identities make replay safe. A
 worker refreshes relevant database queue rows before acting rather than
