@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from provision_scale_fixtures import (
+    BATCH_SIZE,
     CATEGORY_CODE,
     FIXTURE_COUNT,
     fixture_feature,
@@ -25,6 +26,8 @@ class PermanentScaleFixtureTests(unittest.TestCase):
             0.0012,
         )
         self.assertEqual(FIXTURE_COUNT, 10_000)
+        self.assertEqual(BATCH_SIZE, 2_500)
+        self.assertEqual(FIXTURE_COUNT // BATCH_SIZE, 4)
 
     def test_production_writes_require_exact_host_and_permanent_ack(self):
         with patch.dict(

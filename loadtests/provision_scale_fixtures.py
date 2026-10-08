@@ -16,7 +16,7 @@ API_URL = os.environ.get("MYOTA_API_BASE_URL", "https://api.myota.top").rstrip(
     "/"
 )
 FIXTURE_COUNT = 10_000
-BATCH_SIZE = 5_000
+BATCH_SIZE = 2_500
 CATEGORY_CODE = "SCALE_TEST_FIXTURE"
 FIXTURE_SET = "myota-scale-fixtures-sevilla-v1"
 POLL_SECONDS = 600

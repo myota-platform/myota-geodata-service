@@ -112,7 +112,7 @@ in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 ### Permanent Sevilla scale fixtures
 
 `loadtests/provision_scale_fixtures.py` provisions one bounded 10,000-point
-synthetic dataset through the authenticated public APIs, in two 5,000-feature
+synthetic dataset through the authenticated public APIs, in four 2,500-feature
 imports. It creates the dedicated `SCALE_TEST_FIXTURE` point category, keeps the
 entities unassigned to every programme, marks them approved for catalogue/map
 query coverage, uses deterministic source references, and stores its generated
@@ -138,7 +138,7 @@ python3 loadtests/provision_scale_fixtures.py
 unset MYOTA_LOAD_TEST_PASSWORD
 ```
 
-The importer batches within the service's 5,000-feature cap, waits for
+The importer sends four 2,500-feature batches, waits for
 preprocessing and promotion, verifies the catalogue count after each batch,
 then finalizes each import so temporary staged records are discarded. These
 fixtures are not test-run rows and will not be removed by normal load-test
