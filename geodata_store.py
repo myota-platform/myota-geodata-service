@@ -619,6 +619,70 @@ class GeodataStore(CompatibilityGeodataStore):
             self.hydrate()
             self._repository.invalidate("importCandidates")
 
+    def import_candidates_for_run(self, run_id):
+        """Return candidates for a single import keyed by source ordinal."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.import_candidates_for_run(run_id)
+        with self.lock:
+            return {
+                int(candidate.get("ordinal", -1)): candidate
+                for candidate in self.data.setdefault(
+                    "importCandidates", {}
+                ).values()
+                if candidate.get("importRunId") == run_id
+            }
+
+    def stage_import_candidate(self, candidate, *, is_new):
+        """Stage a single import candidate in the current transaction scope."""
+        if self.durable:
+            self.hydrate()
+            self._repository.stage_import_candidate(candidate, is_new=is_new)
+            return
+        candidate_id = str(candidate["id"])
+        with self.lock:
+            self.data.setdefault("importCandidates", {})[candidate_id] = (
+                candidate
+            )
+            self.mark_import_candidate_dirty(candidate_id)
+
+    def entity_by_source_ref(self, source_ref, programme_slug):
+        """Look up an imported entity without materializing the full catalogue."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.entity_by_source_ref(
+                source_ref, programme_slug
+            )
+        with self.lock:
+            return next(
+                (
+                    item
+                    for item in self.items.values()
+                    if item.get("sourceRef") == source_ref
+                    and item.get("programmeSlug") == programme_slug
+                ),
+                None,
+            )
+
+    def nearby_entity_ids(self, geometry, exclude_id, distance_meters):
+        """Return nearby entity ids using PostGIS or the in-memory test store."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.nearby_entity_ids(
+                geometry, exclude_id, distance_meters
+            )
+        from geodata_pipeline import geometry_distance_meters
+
+        with self.lock:
+            matches = []
+            for item in self.items.values():
+                if item.get("id") == exclude_id or not item.get("geometry"):
+                    continue
+                distance = geometry_distance_meters(geometry, item["geometry"])
+                if distance < distance_meters:
+                    matches.append((str(item["id"]), distance))
+            return sorted(matches, key=lambda match: (match[1], match[0]))
+
     def refresh_import_queue(self, queue_id):
         if self.durable:
             self.hydrate()

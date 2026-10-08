@@ -48,6 +48,8 @@ ordered SQL files define the `myota_geo` database:
     for queued uploads and active preprocessing runs. Active workers observe
     `CANCELLING` at bounded checkpoints and finish as `CANCELLED`; queued work
     is cancelled immediately and staged rows/source artifacts are removed.
+18. `018_import_lookup_indexes.sql` adds a source-reference lookup index;
+    candidate replay uses the existing `(import_run_id, ordinal)` index.
 
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
@@ -69,6 +71,10 @@ background run is started. The geodata service claims a PostgreSQL lease,
 refreshes its heartbeat while parsing and normalizing, and clears the lease
 when the run reaches `PREPROCESSED` or `FAILED`. On startup, queued runs and
 processing runs whose lease has expired are requeued from their stored source.
+Preprocessing loads existing candidates through the import-run index and
+resolves source references through a dedicated entity index. The worker stops
+and joins its heartbeat before refreshing the authoritative run row and writing
+terminal status, preventing a stale heartbeat from conflicting with cleanup.
 Runs without a recoverable source are marked `FAILED` with an explanatory
 error instead of remaining indefinitely in `PROCESSING`. The lease duration
 defaults to 15 minutes and can be tuned with

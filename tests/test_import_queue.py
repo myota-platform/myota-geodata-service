@@ -190,6 +190,61 @@ class ImportQueueTests(unittest.TestCase):
             "candidate-1", GeoHandler.store.data["importCandidates"]
         )
 
+    def test_import_completion_joins_heartbeat_before_refresh_and_finalize(
+        self,
+    ):
+        run_id = "run-heartbeat-finalize"
+        run = {"id": run_id, "status": "PROCESSING"}
+        GeoHandler.store.data["importRuns"] = {run_id: run}
+        heartbeat_finished = threading.Event()
+        refresh_calls = []
+
+        def heartbeat(_run_id, stop, _cancel_event):
+            stop.wait()
+            run["heartbeatAt"] = "last-heartbeat"
+            heartbeat_finished.set()
+
+        def refresh(_run_id):
+            self.assertTrue(heartbeat_finished.is_set())
+            refresh_calls.append(_run_id)
+            return run
+
+        result = {
+            "preprocessed": ["candidate-1"],
+            "created": [],
+            "updated": [],
+            "skipped": [],
+            "errors": [],
+            "disappeared": [],
+            "conflationCandidates": [],
+            "manifest": None,
+        }
+        body = {
+            "adapter": "MANUAL",
+            "source": {"name": "heartbeat test"},
+            "entityType": "TRAIL",
+        }
+
+        with (
+            patch.object(GeoHandler, "_claim_import_run", return_value=True),
+            patch.object(
+                GeoHandler, "_heartbeat_import_run", side_effect=heartbeat
+            ),
+            patch.object(GeoHandler, "_import_features", return_value=result),
+            patch.object(
+                GeoHandler.store, "refresh_import_run", side_effect=refresh
+            ),
+            patch.object(GeoHandler.store, "persist"),
+        ):
+            self.assertTrue(
+                GeoHandler._process_import_run(
+                    run_id, body, lambda: [], already_claimed=True
+                )
+            )
+
+        self.assertEqual(refresh_calls, [run_id])
+        self.assertEqual(run["status"], "PREPROCESSED")
+
     def test_empty_pasted_content_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "content must not be empty"):
             GeoHandler.enqueue_import(

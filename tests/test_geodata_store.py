@@ -7,6 +7,110 @@ from relational_state import RowMap, RowRepository
 
 
 class GeodataStoreHydrationTests(unittest.TestCase):
+    def test_run_candidate_lookup_is_scoped_and_primes_repository_baseline(
+        self,
+    ):
+        class Result:
+            @staticmethod
+            def fetchall():
+                return [
+                    (
+                        {
+                            "id": "candidate-1",
+                            "ordinal": 12,
+                            "importRunId": "run-1",
+                            "entity": {"name": "Park"},
+                        },
+                    )
+                ]
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql, self.params = sql, params
+                return Result()
+
+        repository = RowRepository(None, None)
+        connection = Connection()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        repository.connection = transaction
+        candidates = repository.import_candidates_for_run("run-1")
+
+        self.assertIn("WHERE import_run_id=%s", connection.sql)
+        self.assertEqual(connection.params, ("run-1",))
+        self.assertEqual(candidates[12]["id"], "candidate-1")
+        identity = ("importCandidates", "candidate-1")
+        self.assertIn(identity, repository.scope.original)
+        self.assertEqual(repository.scope.original[identity]["ordinal"], 12)
+
+    def test_candidate_staging_does_not_query_for_new_row_existence(self):
+        repository = RowRepository(None, None)
+        candidate = {"id": "candidate-new", "ordinal": 2}
+        repository.stage_import_candidate(candidate, is_new=True)
+
+        identity = ("importCandidates", "candidate-new")
+        self.assertIsNone(repository.scope.original[identity])
+        self.assertIs(repository.scope.loaded[identity], candidate)
+
+    def test_entity_source_lookup_uses_targeted_indexable_predicate(self):
+        class Result:
+            @staticmethod
+            def fetchone():
+                return ({"id": "entity-1", "sourceRef": "osm:1"},)
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql, self.params = sql, params
+                return Result()
+
+        repository = RowRepository(None, None)
+        connection = Connection()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        repository.connection = transaction
+        result = repository.entity_by_source_ref("osm:1", "mpota")
+
+        self.assertIn("public_properties->>'sourceRef'=%s", connection.sql)
+        self.assertIn("programme_slug=%s", connection.sql)
+        self.assertEqual(connection.params, ("osm:1", "mpota"))
+        self.assertEqual(result["id"], "entity-1")
+
+    def test_nearby_lookup_uses_postgis_distance_and_radius_filter(self):
+        class Result:
+            @staticmethod
+            def fetchall():
+                return [("entity-2", 17.5)]
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql, self.params = sql, params
+                return Result()
+
+        repository = RowRepository(
+            type("Store", (), {"_observe_postgis_query": lambda *_: None})(),
+            None,
+        )
+        connection = Connection()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        repository.connection = transaction
+        geometry = {"type": "Point", "coordinates": [-5.99, 37.39]}
+        matches = repository.nearby_entity_ids(geometry, "entity-1", 50)
+
+        self.assertIn("ST_DWithin(geom::geography", connection.sql)
+        self.assertEqual(connection.params[1], "entity-1")
+        self.assertEqual(connection.params[3], 50)
+        self.assertEqual(matches, [("entity-2", 17.5)])
+
     def test_cancellation_discards_only_loaded_rows_from_its_import(self):
         class Connection:
             def execute(self, sql, params):

@@ -31,7 +31,6 @@ from geodata_pipeline import (
     digest,
     geometry_bbox,
     geometry_centroid,
-    geometry_distance_meters,
     normalize_geometry,
     source_manifest,
     validate_attachments,
@@ -1251,15 +1250,15 @@ class GeoHandler(JsonHandler):
             return []
         matches = []
         candidate_digest = digest(geometry)
-        with GeoHandler.store.lock:
-            existing_entities = list(GeoHandler.store.items.values())
-        for existing in existing_entities:
-            if existing.get("id") == entity.get("id") or not existing.get(
-                "geometry"
-            ):
-                continue
-            distance = geometry_distance_meters(geometry, existing["geometry"])
+        nearby = GeoHandler.store.nearby_entity_ids(
+            geometry, entity.get("id"), 50
+        )
+        for existing_id, distance in nearby:
             if distance >= 50:
+                continue
+            try:
+                existing = GeoHandler.store.items[existing_id]
+            except KeyError:
                 continue
             existing_geometry = existing["geometry"]
             matches.append(
@@ -1299,10 +1298,9 @@ class GeoHandler(JsonHandler):
         source_key = GeoHandler._source_key(source)
         records = []
         preprocessed, skipped, errors = [], [], []
-        with GeoHandler.store.lock:
-            import_candidates = GeoHandler.store.data.setdefault(
-                "importCandidates", {}
-            )
+        previous_candidates = GeoHandler.store.import_candidates_for_run(
+            run_id
+        )
         for index, raw_feature in enumerate(body["features"]):
             if cancel_event and cancel_event.is_set():
                 raise ImportCancelled("preprocessing was cancelled")
@@ -1339,17 +1337,13 @@ class GeoHandler(JsonHandler):
                 attachments = validate_attachments(
                     raw_feature.get("attachments") or props.get("attachments")
                 )
-                with GeoHandler.store.lock:
-                    existing = next(
-                        (
-                            item
-                            for item in GeoHandler.store.items.values()
-                            if source_ref
-                            and item.get("sourceRef") == source_ref
-                            and item.get("programmeSlug") == programme_slug
-                        ),
-                        None,
+                existing = (
+                    GeoHandler.store.entity_by_source_ref(
+                        source_ref, programme_slug
                     )
+                    if source_ref
+                    else None
+                )
                 occurred_at = now()
                 default_entity_type = (
                     "TRAIL"
@@ -1425,36 +1419,28 @@ class GeoHandler(JsonHandler):
                     "processedAt": None,
                     "entity": entity,
                 }
-                with GeoHandler.store.lock:
-                    # A recovered preprocessing run replays the same source
-                    # ordinals. Reuse the staged identity (and review state)
-                    # rather than creating a second row that violates the
-                    # (import_run_id, ordinal) database constraint.
-                    previous = next(
-                        (
-                            item
-                            for item in import_candidates.values()
-                            if item.get("importRunId") == run_id
-                            and int(item.get("ordinal", -1)) == index
-                        ),
-                        None,
-                    )
-                    candidate_id = previous.get("id") if previous else new_id()
-                    candidate["id"] = candidate_id
-                    if previous:
-                        for field in (
-                            "validationStatus",
-                            "validationNote",
-                            "validatedBy",
-                            "validatedAt",
-                            "targetStatus",
-                            "processedEntityId",
-                            "processedAt",
-                        ):
-                            if field in previous:
-                                candidate[field] = previous[field]
-                    import_candidates[candidate_id] = candidate
-                    GeoHandler.store.mark_import_candidate_dirty(candidate_id)
+                # A recovered preprocessing run replays the same source
+                # ordinals. Reuse the staged identity and review state rather
+                # than creating a duplicate row. The run-scoped index avoids
+                # scanning every candidate for every feature.
+                previous = previous_candidates.get(index)
+                candidate_id = previous.get("id") if previous else new_id()
+                candidate["id"] = candidate_id
+                if previous:
+                    for field in (
+                        "validationStatus",
+                        "validationNote",
+                        "validatedBy",
+                        "validatedAt",
+                        "targetStatus",
+                        "processedEntityId",
+                        "processedAt",
+                    ):
+                        if field in previous:
+                            candidate[field] = previous[field]
+                GeoHandler.store.stage_import_candidate(
+                    candidate, is_new=previous is None
+                )
                 preprocessed.append(candidate_id)
                 records.append(
                     {
@@ -2167,6 +2153,11 @@ class GeoHandler(JsonHandler):
             daemon=True,
         )
         heartbeat.start()
+
+        def stop_heartbeat() -> None:
+            stop.set()
+            heartbeat.join()
+
         try:
             with GeoHandler.store.lock:
                 GeoHandler.store.persist(include_import_state=True)
@@ -2183,10 +2174,21 @@ class GeoHandler(JsonHandler):
             result = GeoHandler._import_features(
                 {**prepared, "features": features}, run_id, cancel_event
             )
+            # Heartbeats update import_run outside this worker's repository
+            # scope. Join before refreshing and writing the terminal status so
+            # a final heartbeat cannot race with completion.
+            stop_heartbeat()
+            run = GeoHandler.store.refresh_import_run(run_id)
+            if str((run or {}).get("status") or "").upper() == "CANCELLING":
+                raise ImportCancelled("preprocessing was cancelled")
             with GeoHandler.store.lock:
+                GeoHandler.store.data["importRuns"][run_id]["featureCount"] = (
+                    len(features)
+                )
                 GeoHandler._complete_import_run(run_id, result)
                 GeoHandler.store.persist(include_import_state=True)
         except ImportCancelled:
+            stop_heartbeat()
             with GeoHandler.store.lock:
                 GeoHandler.store.rollback_pending()
                 GeoHandler.store.data.setdefault("importRuns", {}).setdefault(
@@ -2196,13 +2198,14 @@ class GeoHandler(JsonHandler):
                 GeoHandler.store.persist(include_import_state=True)
             GeoHandler._delete_import_source(run_id)
         except Exception as error:  # imports must report failure in the run, not fail the HTTP request
+            stop_heartbeat()
             with GeoHandler.store.lock:
                 GeoHandler.store.rollback_pending()
+                GeoHandler.store.refresh_import_run(run_id)
                 GeoHandler._fail_import_run(run_id, error)
                 GeoHandler.store.persist(include_import_state=True)
         finally:
-            stop.set()
-            heartbeat.join(timeout=2)
+            stop_heartbeat()
         return True
 
     @staticmethod
