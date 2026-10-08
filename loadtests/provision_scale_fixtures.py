@@ -17,6 +17,7 @@ API_URL = os.environ.get("MYOTA_API_BASE_URL", "https://api.myota.top").rstrip(
 )
 FIXTURE_COUNT = 10_000
 BATCH_SIZE = 2_500
+PROMOTION_PERCENT = 5
 CATEGORY_CODE = "SCALE_TEST_FIXTURE"
 FIXTURE_SET = "myota-scale-fixtures-sevilla-v1"
 POLL_SECONDS = 600
@@ -175,6 +176,33 @@ def entity_count(token: str) -> int:
     return int(result.get("total", 0))
 
 
+def promotion_counts(batch_index: int) -> tuple[int, int]:
+    """Return an exact 2.5%/2.5% split across the four bounded batches."""
+    if not 0 <= batch_index < FIXTURE_COUNT // BATCH_SIZE:
+        raise ValueError("batch index is outside the configured fixture set")
+    # 2.5% of 2,500 is 62.5. Alternate 62/63 so the four batches total
+    # exactly 250 candidates and 250 approved entities.
+    candidate_count = 63 if batch_index % 2 == 0 else 62
+    approved_count = (BATCH_SIZE * PROMOTION_PERCENT // 100) - candidate_count
+    return candidate_count, approved_count
+
+
+def expected_prefix_counts() -> list[int]:
+    """Expected entity totals after each 5%-promotion batch."""
+    totals = [0]
+    for batch_index in range(FIXTURE_COUNT // BATCH_SIZE):
+        totals.append(totals[-1] + sum(promotion_counts(batch_index)))
+    return totals
+
+
+def legacy_complete_count() -> int:
+    """Expected total when resuming the already-approved legacy first batch."""
+    return BATCH_SIZE + sum(
+        sum(promotion_counts(index))
+        for index in range(1, FIXTURE_COUNT // BATCH_SIZE)
+    )
+
+
 def import_batch(token: str, start: int, count: int) -> None:
     features = [
         fixture_feature(index) for index in range(start, start + count)
@@ -233,30 +261,56 @@ def import_batch(token: str, start: int, count: int) -> None:
         )
 
     actor = "myota-scale-fixture-provisioner"
+    batch_index = start // BATCH_SIZE
+    candidate_count, approved_count = promotion_counts(batch_index)
+    selected_candidate_ids = candidate_ids[:candidate_count]
+    selected_approved_ids = candidate_ids[
+        candidate_count : candidate_count + approved_count
+    ]
+    rejected_ids = candidate_ids[candidate_count + approved_count :]
+    note = "Permanent synthetic scale-test fixture dataset."
+    baseline_entity_count = entity_count(token)
+
+    for selected_ids in (selected_candidate_ids, selected_approved_ids):
+        request_json(
+            "POST",
+            f"/v1/geodata/imports/{run_id}/candidates/validate",
+            token,
+            {
+                "candidateIds": selected_ids,
+                "reviewerId": actor,
+                "validationStatus": "VALID",
+                "note": note,
+            },
+        )
     request_json(
         "POST",
         f"/v1/geodata/imports/{run_id}/candidates/validate",
         token,
         {
-            "candidateIds": candidate_ids,
+            "candidateIds": rejected_ids,
             "reviewerId": actor,
-            "validationStatus": "VALID",
-            "note": "Permanent synthetic scale-test fixture dataset.",
+            "validationStatus": "REJECTED",
+            "note": "Not selected for the bounded scale-test promotion sample.",
         },
     )
-    request_json(
-        "POST",
-        f"/v1/geodata/imports/{run_id}/process",
-        token,
-        {
-            "candidateIds": candidate_ids,
-            "targetStatus": "APPROVED",
-            "processorId": actor,
-            "note": "Permanent synthetic scale-test fixture dataset.",
-        },
-    )
+    for selected_ids, target_status in (
+        (selected_candidate_ids, "CANDIDATE"),
+        (selected_approved_ids, "APPROVED"),
+    ):
+        request_json(
+            "POST",
+            f"/v1/geodata/imports/{run_id}/process",
+            token,
+            {
+                "candidateIds": selected_ids,
+                "targetStatus": target_status,
+                "processorId": actor,
+                "note": note,
+            },
+        )
 
-    expected_total = start + count
+    expected_total = baseline_entity_count + candidate_count + approved_count
     deadline = time.monotonic() + POLL_SECONDS
     while time.monotonic() < deadline:
         if entity_count(token) >= expected_total:
@@ -273,7 +327,12 @@ def import_batch(token: str, start: int, count: int) -> None:
         token,
         {"processedBy": actor},
     )
-    print(f"Permanent fixtures promoted: total={expected_total}", flush=True)
+    print(
+        "Batch promoted: "
+        f"candidate={candidate_count}; approved={approved_count}; "
+        f"rejected={len(rejected_ids)}; total_entities={expected_total}",
+        flush=True,
+    )
 
 
 def main() -> int:
@@ -281,21 +340,36 @@ def main() -> int:
         require_production_acknowledgement()
         token = login()
         current = entity_count(token)
-        if current == FIXTURE_COUNT:
+        prefix_counts = expected_prefix_counts()
+        if current in {prefix_counts[-1], legacy_complete_count()}:
             print(
-                f"Fixture set already exists: {current} entities; no changes made."
+                f"Fixture set already has {current} promoted entities; no changes made."
             )
             return 0
-        if current:
+        legacy_first_batch = current == BATCH_SIZE
+        if current not in prefix_counts and not legacy_first_batch:
             raise RuntimeError(
-                f"found {current} {CATEGORY_CODE} records; refusing partial or duplicate provisioning"
+                f"found {current} {CATEGORY_CODE} entities; refusing to continue "
+                "while a batch is partially promoted"
             )
         ensure_category(token)
-        for start in range(0, FIXTURE_COUNT, BATCH_SIZE):
+        completed_batches = (
+            1 if legacy_first_batch else prefix_counts.index(current)
+        )
+        expected_final_total = current + sum(
+            sum(promotion_counts(index))
+            for index in range(completed_batches, FIXTURE_COUNT // BATCH_SIZE)
+        )
+        for start in range(
+            completed_batches * BATCH_SIZE,
+            FIXTURE_COUNT,
+            BATCH_SIZE,
+        ):
             import_batch(token, start, min(BATCH_SIZE, FIXTURE_COUNT - start))
         print(
-            f"Provisioned {FIXTURE_COUNT} permanent synthetic fixtures in Sevilla. "
-            "The script intentionally provides no cleanup operation."
+            f"Processed {FIXTURE_COUNT} permanent synthetic fixture records in Sevilla; "
+            f"{expected_final_total} entities were promoted. The script intentionally "
+            "provides no cleanup operation."
         )
         return 0
     except (RuntimeError, ValueError, KeyError) as error:

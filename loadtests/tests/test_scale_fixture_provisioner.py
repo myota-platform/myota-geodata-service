@@ -6,7 +6,10 @@ from provision_scale_fixtures import (
     BATCH_SIZE,
     CATEGORY_CODE,
     FIXTURE_COUNT,
+    expected_prefix_counts,
     fixture_feature,
+    legacy_complete_count,
+    promotion_counts,
     require_production_acknowledgement,
 )
 
@@ -28,6 +31,19 @@ class PermanentScaleFixtureTests(unittest.TestCase):
         self.assertEqual(FIXTURE_COUNT, 10_000)
         self.assertEqual(BATCH_SIZE, 2_500)
         self.assertEqual(FIXTURE_COUNT // BATCH_SIZE, 4)
+
+    def test_each_batch_promotes_exact_five_percent_with_balanced_statuses(
+        self,
+    ):
+        batches = [promotion_counts(index) for index in range(4)]
+
+        self.assertEqual([125] * 4, [sum(batch) for batch in batches])
+        self.assertEqual([63, 62, 63, 62], [batch[0] for batch in batches])
+        self.assertEqual([62, 63, 62, 63], [batch[1] for batch in batches])
+        self.assertEqual(sum(batch[0] for batch in batches), 250)
+        self.assertEqual(sum(batch[1] for batch in batches), 250)
+        self.assertEqual(expected_prefix_counts(), [0, 125, 250, 375, 500])
+        self.assertEqual(legacy_complete_count(), 2_875)
 
     def test_production_writes_require_exact_host_and_permanent_ack(self):
         with patch.dict(

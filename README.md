@@ -111,20 +111,30 @@ in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 
 ### Permanent Sevilla scale fixtures
 
-`loadtests/provision_scale_fixtures.py` provisions one bounded 10,000-point
-synthetic dataset through the authenticated public APIs, in four 2,500-feature
-imports. It creates the dedicated `SCALE_TEST_FIXTURE` point category, keeps the
-entities unassigned to every programme, marks them approved for catalogue/map
-query coverage, uses deterministic source references, and stores its generated
-location metadata with the source provenance. They are explicitly synthetic
-coordinates, not parks or programme-eligible entities. The script uses no
-load-test cleanup tag and intentionally has no delete operation. It refuses
-the wrong API hostname, requires separate production and permanent-data
-acknowledgements, and exits without writes if the complete fixture set already
-exists. A partial set also fails closed for operator review.
+`loadtests/provision_scale_fixtures.py` sends 10,000 synthetic point records
+through the authenticated public APIs in four 2,500-feature imports. For each
+freshly processed import it promotes exactly 5%: 2.5% to `CANDIDATE` and 2.5%
+to `APPROVED`; the remaining 95% are rejected from the preprocessing queue.
+Because 2.5% of 2,500 is fractional, the four imports alternate 62/63 records
+per status, yielding exactly 250 candidates and 250 approved entities overall.
+It creates the dedicated `SCALE_TEST_FIXTURE` point category, keeps promoted
+entities unassigned to every programme, uses deterministic source references,
+and stores generated location metadata with source provenance. These are
+explicitly synthetic coordinates, not parks or programme-eligible entities.
+The script uses no load-test cleanup tag and intentionally has no delete
+operation. It refuses the wrong API hostname and requires separate production
+and permanent-data acknowledgements.
+
+The first 2,500-record import in the current deployment had already been
+queued for full approval before the 5% sampling change. Approved entities are
+immutable except for retirement, so the provisioner recognizes that exact
+legacy prefix and resumes at the next import rather than attempting a downgrade
+or duplicate. The remaining three imports use the 5% split. The current
+deployed fixture distribution therefore differs from a fresh run and is
+recorded explicitly in the Phase 0 evidence.
 
 Run it once from a trusted workstation or the K3s host only after confirming
-that retaining 10,000 synthetic records in the catalogue is intended. Do not
+that retaining the imported records and promoted scale fixtures is intended. Do not
 put the password in shell history or command arguments; on the host, read it
 from the already-provisioned protected file without printing it:
 
@@ -138,9 +148,9 @@ python3 loadtests/provision_scale_fixtures.py
 unset MYOTA_LOAD_TEST_PASSWORD
 ```
 
-The importer sends four 2,500-feature batches, waits for
-preprocessing and promotion, verifies the catalogue count after each batch,
-then finalizes each import so temporary staged records are discarded. These
+The importer sends four 2,500-feature batches, waits for preprocessing and
+promotion, verifies the catalogue count after each batch, then finalizes each
+import so rejected and processed staging records are discarded. Promoted
 fixtures are not test-run rows and will not be removed by normal load-test
 cleanup or import-object retention. Record their category and source prefix
 when an administrator later removes them through the API.
