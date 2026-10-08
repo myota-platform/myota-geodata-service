@@ -30,6 +30,11 @@ separate decision.
 - A dedicated two-stage intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit durable queue events. Parsing and normalization stop at `PREPROCESSED`; no entity is created until an administrator validates selected records.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
+- Imports retain source-provided administrative location fields. When a source
+  supplies a country code and location metadata, the entity is marked
+  `geocodeStatus=SOURCE_DATA`; normal enrichment does not make a redundant
+  remote lookup. Explicitly refreshed BigDataCloud results and manually edited
+  fields keep their existing precedence rules.
 - Lifecycle transitions are API-owned and audited; QGIS is a controlled
   graphical editing tool, not an approval bypass.
 - A daily retention worker deletes source objects and import history/logs
@@ -103,6 +108,42 @@ gates are documented in the [Phase 0 evidence record](https://github.com/myota-p
 
 View service, request-size, process, PostgreSQL-pool, import, and outbox metrics
 in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
+
+### Permanent Sevilla scale fixtures
+
+`loadtests/provision_scale_fixtures.py` provisions one bounded 10,000-point
+synthetic dataset through the authenticated public APIs, in two 5,000-feature
+imports. It creates the dedicated `SCALE_TEST_FIXTURE` point category, keeps the
+entities unassigned to every programme, marks them approved for catalogue/map
+query coverage, uses deterministic source references, and stores its generated
+location metadata with the source provenance. They are explicitly synthetic
+coordinates, not parks or programme-eligible entities. The script uses no
+load-test cleanup tag and intentionally has no delete operation. It refuses
+the wrong API hostname, requires separate production and permanent-data
+acknowledgements, and exits without writes if the complete fixture set already
+exists. A partial set also fails closed for operator review.
+
+Run it once from a trusted workstation or the K3s host only after confirming
+that retaining 10,000 synthetic records in the catalogue is intended. Do not
+put the password in shell history or command arguments; on the host, read it
+from the already-provisioned protected file without printing it:
+
+```bash
+export MYOTA_API_BASE_URL=https://api.myota.top
+export MYOTA_LOAD_TEST_EMAIL=demo@example.test
+export MYOTA_SCALE_FIXTURES_ALLOW_PRODUCTION=YES
+export MYOTA_SCALE_FIXTURES_PERMANENT=YES
+export MYOTA_LOAD_TEST_PASSWORD="$(< /root/4test)"
+python3 loadtests/provision_scale_fixtures.py
+unset MYOTA_LOAD_TEST_PASSWORD
+```
+
+The importer batches within the service's 5,000-feature cap, waits for
+preprocessing and promotion, verifies the catalogue count after each batch,
+then finalizes each import so temporary staged records are discarded. These
+fixtures are not test-run rows and will not be removed by normal load-test
+cleanup or import-object retention. Record their category and source prefix
+when an administrator later removes them through the API.
 
 ### Write and worker profiles
 

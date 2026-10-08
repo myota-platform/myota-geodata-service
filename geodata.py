@@ -1243,6 +1243,32 @@ class GeoHandler(JsonHandler):
             )
 
     @staticmethod
+    def _apply_import_location_metadata(
+        entity: dict[str, Any], properties: dict[str, Any]
+    ) -> None:
+        """Preserve location fields supplied by the imported source feature."""
+        nested = properties.get("location")
+        location = nested if isinstance(nested, dict) else {}
+        found = False
+        for field in LOCATION_FIELDS:
+            value = properties.get(field)
+            if value in (None, ""):
+                value = location.get(field)
+            if value not in (None, ""):
+                entity[field] = value
+                found = True
+        if found and entity.get("countryCode"):
+            entity["geocodeProvider"] = "IMPORT_SOURCE"
+            entity["geocodeStatus"] = "SOURCE_DATA"
+            entity["geocodeLookupSource"] = (
+                properties.get("geocodeLookupSource") or "import-properties"
+            )
+        if found:
+            entity["location"] = {
+                field: entity.get(field) for field in LOCATION_FIELDS
+            }
+
+    @staticmethod
     def _possible_duplicates(entity: dict[str, Any]) -> list[dict[str, Any]]:
         """Find existing entities whose geometry is identical or under 50 m away."""
         geometry = entity.get("geometry")
@@ -1401,6 +1427,7 @@ class GeoHandler(JsonHandler):
                     else occurred_at,
                     "updatedAt": occurred_at,
                 }
+                GeoHandler._apply_import_location_metadata(entity, props)
                 GeoHandler._preserve_manual_location(existing, entity)
                 enrich_entity_location(entity)
                 possible_duplicates = GeoHandler._possible_duplicates(entity)

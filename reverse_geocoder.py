@@ -271,7 +271,7 @@ def enrich_entity_location(
     """
     if (
         not force
-        and entity.get("geocodeStatus") == "ENRICHED"
+        and entity.get("geocodeStatus") in {"ENRICHED", "SOURCE_DATA"}
         and entity.get("countryCode")
     ):
         _sync_location_snapshot(entity)

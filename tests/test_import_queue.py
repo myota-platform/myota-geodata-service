@@ -41,6 +41,32 @@ class ImportQueueTests(unittest.TestCase):
         GeoHandler.store.events = self.previous_events
         GeoHandler.store.idempotency = self.previous_idempotency
 
+    def test_imported_location_metadata_is_preserved_without_remote_lookup(
+        self,
+    ):
+        entity = {"centroid": {"lat": 37.39, "lon": -5.99}}
+        GeoHandler._apply_import_location_metadata(
+            entity,
+            {
+                "continent": "Europe",
+                "continentCode": "EU",
+                "country": "Spain",
+                "countryCode": "ES",
+                "region": "Andalucía",
+                "regionCode": "ES-AN",
+                "city": "Sevilla",
+            },
+        )
+        with patch("reverse_geocoder.GEOCODER.lookup") as lookup:
+            from reverse_geocoder import enrich_entity_location
+
+            enrich_entity_location(entity)
+
+        lookup.assert_not_called()
+        self.assertEqual(entity["geocodeStatus"], "SOURCE_DATA")
+        self.assertEqual(entity["location"]["countryCode"], "ES")
+        self.assertEqual(entity["city"], "Sevilla")
+
     def test_http_text_import_returns_before_processing_and_exposes_summary(
         self,
     ):
