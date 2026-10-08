@@ -494,3 +494,32 @@ class RelationalConcurrencyTests(unittest.TestCase):
                 "DELETE FROM idempotency_record WHERE key LIKE %s",
                 (f"%promotion-{candidate_id}",),
             )
+
+    def test_finalizing_import_uses_one_processed_timestamp(self):
+        from geodata import GeoHandler
+
+        store = self.stores[0]
+        with store.operation(write=True):
+            store.data["importRuns"][self.run_id] = {
+                "id": self.run_id,
+                "adapter": "MANUAL",
+                "status": "PREPROCESSED",
+                "queuedAt": now(),
+                "source": {},
+                "stats": {},
+            }
+
+        with patch.object(GeoHandler, "store", store):
+            finalized = GeoHandler.mark_import_processed(
+                None,
+                {
+                    "runId": self.run_id,
+                    "_body": {"processedBy": "test-admin"},
+                },
+            )
+
+        self.assertEqual(finalized["status"], "PROCESSED")
+        self.assertTrue(finalized["processedAt"])
+        with self.stores[1].operation():
+            persisted = self.stores[1].data["importRuns"][self.run_id]
+        self.assertEqual(persisted["processedAt"], finalized["processedAt"])

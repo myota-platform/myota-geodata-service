@@ -2944,9 +2944,9 @@ class GeoHandler(JsonHandler):
                     (run_id,),
                 )
                 connection.execute(
-                    "UPDATE import_run SET status='PROCESSED', processed_at=now(), processed_by=%s, "
+                    "UPDATE import_run SET status='PROCESSED', processed_at=%s, processed_by=%s, "
                     "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s",
-                    (actor, run_id),
+                    (processed_at, actor, run_id),
                 )
         for candidate_id in sorted(set(candidate_ids)):
             candidates.pop(candidate_id, None)
