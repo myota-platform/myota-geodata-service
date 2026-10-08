@@ -412,7 +412,10 @@ manually queue missing metadata from Entity Management; the endpoint is
 transactional outbox event consumed by the durable
 `geodata-location-enrichment-v1` worker. A queued or failed lookup leaves the
 entity persisted and visible; retry is available while required metadata is
-still missing.
+still missing. Durable entity reads reconstruct the representative point from
+the PostGIS centroid column (falling back to the geometry centroid), so the
+worker retains its lookup coordinates after reloading an entity from the
+database.
 The hierarchy editor uses `GET /v1/geodata/location-options`, which aggregates
 the stored BigDataCloud names and codes into continent → country → first
 subdivision → province options. BigDataCloud documents these values as

@@ -94,6 +94,13 @@ PROJECTIONS = {
             "name": "name",
             "status": "lifecycle_status",
             "geometry": "ST_AsGeoJSON(geom)::jsonb",
+            "centroid": (
+                "jsonb_build_object("
+                "'lon', ST_X(COALESCE(centroid, "
+                "ST_Centroid(geom)::geography)::geometry), "
+                "'lat', ST_Y(COALESCE(centroid, "
+                "ST_Centroid(geom)::geography)::geometry))"
+            ),
             "maidenheadGridSquares4": "maidenhead_grid_squares_4",
             "maidenheadLocators6": "maidenhead_locators_6",
             "sourceState": "source_state",

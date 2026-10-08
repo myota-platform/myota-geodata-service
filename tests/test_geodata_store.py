@@ -177,6 +177,41 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             self.assertEqual(store.items["entity-1"]["status"], "APPROVED")
             self.assertEqual(store.items["entity-1"]["version"], 4)
 
+    def test_relational_entity_read_restores_centroid_from_postgis(self):
+        class Result:
+            def fetchone(self):
+                return (
+                    {
+                        "id": "entity-1",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [-5.99, 37.39],
+                        },
+                        "centroid": {"lon": -5.99, "lat": 37.39},
+                    },
+                )
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+                return Result()
+
+        repository = RowRepository(None, None)
+        connection = Connection()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        repository.connection = transaction
+        entity = repository.read(connection, "entities", "entity-1")
+
+        self.assertEqual(entity["centroid"], {"lon": -5.99, "lat": 37.39})
+        self.assertIn("'centroid'", connection.sql)
+        self.assertIn("ST_X(COALESCE(centroid", connection.sql)
+        self.assertEqual(connection.params, ("entity-1",))
+
     def test_snapshot_only_persistence_does_not_flush_or_clear_dirty_imports(
         self,
     ):
