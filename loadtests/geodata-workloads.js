@@ -10,8 +10,9 @@ const MAX_VUS = 50;
 const VUS = Number(__ENV.MYOTA_LOAD_TEST_VUS || (PROFILE === 'large-upload' ? 3 : 8));
 const DURATION = __ENV.MYOTA_LOAD_TEST_DURATION || '2m';
 const PROFILE_FEATURE_CAP = PROFILE === 'large-upload' ? 5000 :
-  PROFILE === 'simultaneous-edits' ? 1 : PROFILE === 'queue-backlog' ? 50 : PROFILE === 'promotion' ? 25 : 100;
-const FEATURES = Number(__ENV.MYOTA_LOAD_TEST_FEATURES || (PROFILE === 'large-upload' ? 2500 : PROFILE_FEATURE_CAP));
+  PROFILE === 'simultaneous-edits' ? 1 : PROFILE === 'queue-backlog' ? 50 : PROFILE === 'promotion' ? 40 : 100;
+const FEATURES = Number(__ENV.MYOTA_LOAD_TEST_FEATURES ||
+  (PROFILE === 'large-upload' ? 2500 : PROFILE_FEATURE_CAP));
 const PADDING_BYTES = Number(__ENV.MYOTA_LOAD_TEST_PADDING_BYTES || 1024);
 const IMPORTS_PER_VU_CAP = PROFILE === 'queue-backlog' ? 30 : PROFILE === 'promotion' ? 2 : 5;
 const IMPORTS_PER_VU = Number(__ENV.MYOTA_LOAD_TEST_IMPORTS_PER_VU || IMPORTS_PER_VU_CAP);
@@ -45,6 +46,9 @@ if (!/^[1-9][0-9]*(s|m)$/.test(DURATION) || durationSeconds(DURATION) > 600) {
 }
 if (!Number.isInteger(FEATURES) || FEATURES < 1 || FEATURES > PROFILE_FEATURE_CAP) {
   throw new Error(`MYOTA_LOAD_TEST_FEATURES exceeds the safe cap for ${PROFILE}`);
+}
+if (PROFILE === 'promotion' && FEATURES % 40 !== 0) {
+  throw new Error('The promotion profile requires a feature count divisible by 40 for an exact 2.5%/2.5% split.');
 }
 if (!Number.isInteger(IMPORTS_PER_VU) || IMPORTS_PER_VU < 1 || IMPORTS_PER_VU > IMPORTS_PER_VU_CAP) {
   throw new Error(`MYOTA_LOAD_TEST_IMPORTS_PER_VU must be between 1 and ${IMPORTS_PER_VU_CAP} for ${PROFILE}`);
@@ -434,15 +438,41 @@ export default function (data) {
   const candidateIds = (candidatesResponse.json('items') || []).map((candidate) => candidate.id);
   check(candidatesResponse, { 'preprocessed candidates are available': () => candidateIds.length > 0 });
   if (!candidateIds.length) return;
+  if (PROFILE === 'promotion' && candidateIds.length !== FEATURES) {
+    throw new Error(`Promotion import staged ${candidateIds.length} records; expected ${FEATURES} for the exact 5% split.`);
+  }
+  const candidatePromotionIds = PROFILE === 'promotion' ? candidateIds.slice(0, FEATURES / 40) : candidateIds;
+  const approvedPromotionIds = PROFILE === 'promotion'
+    ? candidateIds.slice(FEATURES / 40, FEATURES / 20)
+    : [];
+  const rejectedIds = PROFILE === 'promotion'
+    ? candidateIds.slice(FEATURES / 20)
+    : [];
+  const validIds = [...candidatePromotionIds, ...approvedPromotionIds];
   const validation = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`, JSON.stringify({
-    candidateIds, reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic load-test promotion profile',
+    candidateIds: validIds, reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic load-test promotion profile',
   }), auth(data.token));
   check(validation, { 'candidate validation succeeded': (r) => r.status === 200 });
-  const targetStatus = PROFILE === 'promotion' ? 'APPROVED' : 'CANDIDATE';
-  const promotion = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
-    candidateIds, targetStatus, processorId: 'load-test', note: 'Synthetic load-test promotion profile',
-  }), auth(data.token));
-  check(promotion, { 'promotion queue accepted': (r) => r.status === 202 || r.status === 200 });
+  if (PROFILE === 'promotion') {
+    const rejection = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`, JSON.stringify({
+      candidateIds: rejectedIds, reviewerId: 'load-test', validationStatus: 'REJECTED', note: 'Excluded from the bounded 5% promotion sample.',
+    }), auth(data.token));
+    check(rejection, { 'unselected records were rejected': (r) => r.status === 200 });
+    for (const [selectedIds, targetStatus] of [
+      [candidatePromotionIds, 'CANDIDATE'],
+      [approvedPromotionIds, 'APPROVED'],
+    ]) {
+      const promotion = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
+        candidateIds: selectedIds, targetStatus, processorId: 'load-test', note: 'Synthetic load-test promotion profile',
+      }), auth(data.token));
+      check(promotion, { [`${targetStatus.toLowerCase()} promotion queued`]: (r) => r.status === 202 || r.status === 200 });
+    }
+  } else {
+    const promotion = http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
+      candidateIds, targetStatus: 'CANDIDATE', processorId: 'load-test', note: 'Synthetic load-test promotion profile',
+    }), auth(data.token));
+    check(promotion, { 'promotion queue accepted': (r) => r.status === 202 || r.status === 200 });
+  }
   sleep(1);
 }
 

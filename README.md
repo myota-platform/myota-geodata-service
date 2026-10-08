@@ -167,9 +167,12 @@ acknowledgement. Under current policy, `api.myota.top` is the required
 capacity-qualification target; local/non-production runs are development
 checks only. The runner caps duration at 10 minutes and VUs at 50 in both
 production and non-production, features per
-import at 100 (50 for queue backlog; 25 for promotion; 5,000 for uploads), and
+import at 100 (50 for queue backlog; 40 for promotion; 5,000 for uploads), and
 submissions at five per VU (30 for the steady backlog profile; two for
-promotion). Large uploads run once per VU
+promotion). Each 40-record promotion import promotes one record to Candidate
+and one to Approved (2.5% each); the remaining 95% are rejected from staging.
+Promotion feature overrides must remain divisible by 40 to preserve that exact
+split. Large uploads run once per VU
 and default to 2,500 features with 1 KiB
 of synthetic payload padding per feature (roughly 3–4 MiB per file); padding is
 capped at 4 KiB per feature so the largest generated file stays around 23 MiB.
