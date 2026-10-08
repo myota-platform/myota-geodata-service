@@ -54,6 +54,10 @@ ordered SQL files define the `myota_geo` database:
     Maidenhead cell arrays, backfills existing entities, and recalculates the
     arrays automatically whenever an entity geometry changes.
 
+The platform migration runner applies every numbered `geo/NNN_*.sql` file in
+lexical order. Additions to this directory are therefore included in the next
+Helm migration image without maintaining a separate hard-coded file list.
+
 `myota-platform/db/migrations/geo/` and
 `myota-deploy/db/migrations/geo/` are synchronized copies used by the
 vertical-slice bootstrap and deployment migration runner. When this schema
