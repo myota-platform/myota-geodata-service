@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture repeatable, read-only PostGIS EXPLAIN ANALYZE evidence off production."""
+"""Capture bounded, read-only PostGIS EXPLAIN ANALYZE evidence."""
 
 from __future__ import annotations
 
@@ -27,10 +27,9 @@ def main() -> int:
     args = parser.parse_args()
 
     environment = os.environ.get("MYOTA_ENV", "").lower()
-    if environment not in {"development", "test", "staging"}:
-        parser.error(
-            "set MYOTA_ENV=development, test, or staging; production is refused"
-        )
+    production = environment == "production"
+    if environment not in {"development", "test", "staging", "production"}:
+        parser.error("set MYOTA_ENV=development, test, staging, or production")
     if os.environ.get("MYOTA_ALLOW_EXPLAIN_ANALYZE") != "YES":
         parser.error(
             "set MYOTA_ALLOW_EXPLAIN_ANALYZE=YES to acknowledge read-only query execution"
@@ -39,10 +38,28 @@ def main() -> int:
     if not dsn:
         parser.error("GEO_DATABASE_URL is required")
     hostname = (urlparse(dsn).hostname or "").lower()
-    if any(
+    production_hosts = {
+        host.strip().lower()
+        for host in os.environ.get(
+            "MYOTA_PRODUCTION_GEO_DATABASE_HOSTS", ""
+        ).split(",")
+        if host.strip()
+    }
+    production_host = any(
         part in hostname
         for part in ("spainip.es", "myota.top", "production", "prod-db")
-    ):
+    )
+    if production:
+        if os.environ.get("MYOTA_ALLOW_PRODUCTION_EXPLAIN") != "YES":
+            parser.error(
+                "production EXPLAIN requires MYOTA_ALLOW_PRODUCTION_EXPLAIN=YES"
+            )
+        if not hostname or hostname not in production_hosts:
+            parser.error(
+                "production database hostname must exactly match "
+                "MYOTA_PRODUCTION_GEO_DATABASE_HOSTS"
+            )
+    elif production_host:
         parser.error("the evidence tool refuses production database hosts")
     try:
         bounds = [float(value.strip()) for value in args.bbox.split(",")]
@@ -63,8 +80,8 @@ def main() -> int:
         FROM geodata_entity
         WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
-          AND (%s IS NULL OR programme_slug = %s)
-          AND (%s IS NULL OR lifecycle_status = %s)
+          AND (%s::text IS NULL OR programme_slug = %s::text)
+          AND (%s::text IS NULL OR lifecycle_status::text = %s::text)
         ORDER BY name, id
         LIMIT %s"""
     catalogue_filter = "geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)"

@@ -74,10 +74,11 @@ Collector.
 production API. It samples up to 10 public entity records during k6 `setup`,
 then exercises health, paged catalogue, bounding-box catalogue, and entity
 detail reads. The sample IDs and bounding boxes exist only in the k6 process
-memory. The test does not create entities/imports, upload files, or write any
-application data, so successful completion leaves no fixture rows or objects
-to clean up. It does produce ordinary request telemetry in production, which
-is intentionally retained for operations.
+memory. If the catalogue is empty, it explicitly reports that map and detail
+requests are skipped and still measures health and paged catalogue reads. The
+test itself does not create entities/imports, upload files, or write any
+application data. It does produce ordinary request telemetry in production,
+which is intentionally retained for operations.
 
 Install the external runner on macOS with Homebrew (`brew install k6`), as
 documented by [Grafana k6](https://grafana.com/docs/k6/latest/set-up/install-k6/).
@@ -87,14 +88,18 @@ Run the conservative defaults (2 virtual users, 60 seconds):
 MYOTA_ALLOW_PRODUCTION=YES k6 run loadtests/geodata-baseline.js
 ```
 
-The target defaults to `https://api.myota.top`. Non-production targets can be
-selected with `MYOTA_BASE_URL`; production requires the explicit acknowledgement
-above. The script caps production runs at 50 virtual users and 5 minutes, and
+The target defaults to `https://api.myota.top`. The current project policy
+designates the live K3s deployment on `spainip.es` as provisional production
+and the required target for load/performance qualification. Non-production
+targets remain available for development checks, not capacity qualification.
+Production requires the explicit acknowledgement above. The script caps runs
+at 50 virtual users and 5 minutes, and
 paces requests to at most about 2 per second per user. Tune
 `MYOTA_LOAD_TEST_VUS` (1–50) and `MYOTA_LOAD_TEST_DURATION` (1–300 seconds or
 1–5 minutes) only in coordination with the operator. The workload is closed
 loop and read-only; it is not a large-file upload test or a benchmark of
-synthetic database cardinality.
+synthetic database cardinality. Production results and remaining evidence
+gates are documented in the [Phase 0 evidence record](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase0-production-evidence-2026-10-08.md).
 
 View service, request-size, process, PostgreSQL-pool, import, and outbox metrics
 in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
@@ -106,8 +111,10 @@ in the provisioned **MyOTA Geodata capacity baseline** Grafana dashboard.
 test-owned entity), `preprocessing` (imports left in the validation queue),
 `promotion` (validation and candidate promotion), and `queue-backlog` (steady
 accepted import submissions without waiting for workers). They can run in
-development, test, staging, or—only with separate explicit acknowledgement—in
-production. The runner caps duration at 10 minutes and VUs at 50 in both
+development, test, staging, or production with the corresponding explicit
+acknowledgement. Under current policy, `api.myota.top` is the required
+capacity-qualification target; local/non-production runs are development
+checks only. The runner caps duration at 10 minutes and VUs at 50 in both
 production and non-production, features per
 import at 100 (50 for queue backlog; 25 for promotion; 5,000 for uploads), and
 submissions at five per VU (30 for the steady backlog profile; two for

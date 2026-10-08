@@ -2,7 +2,7 @@ import http from 'k6/http';
 import crypto from 'k6/crypto';
 import { check, sleep } from 'k6';
 
-const BASE_URL = (__ENV.MYOTA_BASE_URL || 'http://localhost:8090').replace(/\/$/, '');
+const BASE_URL = (__ENV.MYOTA_BASE_URL || 'https://api.myota.top').replace(/\/$/, '');
 const PROFILE = __ENV.MYOTA_LOAD_TEST_PROFILE || 'preprocessing';
 const ENVIRONMENT = (__ENV.MYOTA_ENV || '').toLowerCase();
 const ALLOW_PRODUCTION = __ENV.MYOTA_LOAD_TEST_ALLOW_PRODUCTION === 'YES';

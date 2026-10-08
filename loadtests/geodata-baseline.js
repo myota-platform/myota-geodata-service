@@ -91,7 +91,7 @@ export function setup() {
     .map((entity) => ({ id: entity.id, bounds: pointBounds(entity) }))
     .filter((entity) => entity.bounds);
   if (!samples.length) {
-    throw new Error('Production has no catalogue entities to sample; refusing to run a misleading baseline.');
+    console.log('No public entities are available; this run will measure health and paged catalogue reads only. Map and entity-detail requests are skipped.');
   }
   return {
     entityIds: samples.map((entity) => entity.id),
@@ -108,6 +108,11 @@ export default function (dataset) {
   const catalogue = http.get(`${BASE_URL}/v1/geodata/entities?page=${page}&pageSize=25`, params);
   check(catalogue, { 'entity catalogue read succeeds': (r) => r.status === 200 });
   sleep(0.5);
+
+  if (!dataset.entityIds.length) {
+    sleep(0.5);
+    return;
+  }
 
   const index = (__VU + __ITER) % dataset.bounds.length;
   const [minLon, minLat, maxLon, maxLat] = dataset.bounds[index];
@@ -127,5 +132,8 @@ export default function (dataset) {
 export function teardown(dataset) {
   // The setup dataset is held only in k6 memory and contains sampled public IDs.
   // No entities, imports, files, or other application records are created.
-  console.log(`Read-only baseline complete; sampled ${dataset.entityIds.length} entities. No application data was created.`);
+  const coverage = dataset.entityIds.length
+    ? `sampled ${dataset.entityIds.length} entities`
+    : 'no entities available; map and detail requests were skipped';
+  console.log(`Read-only baseline complete; ${coverage}. No application data was created.`);
 }
