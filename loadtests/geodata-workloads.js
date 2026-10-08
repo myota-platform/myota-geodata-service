@@ -6,6 +6,7 @@ const BASE_URL = (__ENV.MYOTA_BASE_URL || 'http://localhost:8090').replace(/\/$/
 const PROFILE = __ENV.MYOTA_LOAD_TEST_PROFILE || 'preprocessing';
 const ENVIRONMENT = (__ENV.MYOTA_ENV || '').toLowerCase();
 const ALLOW_PRODUCTION = __ENV.MYOTA_LOAD_TEST_ALLOW_PRODUCTION === 'YES';
+const MAX_VUS = 50;
 const VUS = Number(__ENV.MYOTA_LOAD_TEST_VUS || (PROFILE === 'large-upload' ? 3 : 8));
 const DURATION = __ENV.MYOTA_LOAD_TEST_DURATION || '2m';
 const PROFILE_FEATURE_CAP = PROFILE === 'large-upload' ? 5000 :
@@ -36,8 +37,8 @@ if (!VALID_PROFILES.has(PROFILE)) throw new Error(`Unknown workload profile: ${P
 if (!(SAFE_HOST && ['development', 'test', 'staging'].includes(ENVIRONMENT) && __ENV.MYOTA_LOAD_TEST_ALLOW_NONPROD === 'YES') && !PRODUCTION_TARGET) {
   throw new Error('Set the matching explicit non-production or production acknowledgement and exact host allowlist before running write workloads.');
 }
-if (!Number.isInteger(VUS) || VUS < 1 || VUS > (PROFILE === 'large-upload' ? 8 : 20)) {
-  throw new Error(`MYOTA_LOAD_TEST_VUS exceeds the safe cap for ${PROFILE}`);
+if (!Number.isInteger(VUS) || VUS < 1 || VUS > MAX_VUS) {
+  throw new Error(`MYOTA_LOAD_TEST_VUS must be between 1 and ${MAX_VUS}`);
 }
 if (!/^[1-9][0-9]*(s|m)$/.test(DURATION) || durationSeconds(DURATION) > 600) {
   throw new Error('MYOTA_LOAD_TEST_DURATION must be 1s-10m');
@@ -106,7 +107,7 @@ export const options = {
       timeUnit: '1s',
       duration: DURATION,
       preAllocatedVUs: VUS,
-      maxVUs: 20,
+      maxVUs: MAX_VUS,
       gracefulStop: '30s',
     } : {
       executor: 'constant-vus',

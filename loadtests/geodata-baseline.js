@@ -2,20 +2,21 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 
 const BASE_URL = (__ENV.MYOTA_BASE_URL || 'https://api.myota.top').replace(/\/$/, '');
+const MAX_VUS = 50;
 const VUS = Number(__ENV.MYOTA_LOAD_TEST_VUS || 2);
 const DURATION = __ENV.MYOTA_LOAD_TEST_DURATION || '60s';
 const PRODUCTION_HOSTS = new Set(['api.myota.top']);
 const hostname = BASE_URL.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
 const isProduction = PRODUCTION_HOSTS.has(hostname);
 
-if (!Number.isInteger(VUS) || VUS < 1 || VUS > 4) {
-  throw new Error('MYOTA_LOAD_TEST_VUS must be an integer from 1 to 4');
+if (!Number.isInteger(VUS) || VUS < 1 || VUS > MAX_VUS) {
+  throw new Error(`MYOTA_LOAD_TEST_VUS must be an integer from 1 to ${MAX_VUS}`);
 }
 if (!/^[1-9][0-9]*(s|m)$/.test(DURATION) || durationSeconds(DURATION) > 300) {
   throw new Error('MYOTA_LOAD_TEST_DURATION must be 1s-300s or 1m-5m');
 }
 if (isProduction && __ENV.MYOTA_ALLOW_PRODUCTION !== 'YES') {
-  throw new Error('Production target requires MYOTA_ALLOW_PRODUCTION=YES. This script is read-only and capped at 4 VUs / 5 minutes.');
+  throw new Error(`Production target requires MYOTA_ALLOW_PRODUCTION=YES. This script is read-only and capped at ${MAX_VUS} VUs / 5 minutes.`);
 }
 
 function durationSeconds(value) {
@@ -119,7 +120,7 @@ export default function (dataset) {
   const detail = http.get(`${BASE_URL}/v1/geodata/entities/${encodeURIComponent(entityId)}`, params);
   check(detail, { 'sample entity detail read succeeds': (r) => r.status === 200 });
 
-  // Pace every request: at most about 2 requests/sec per VU, with 4 VUs max.
+  // Pace every request: at most about 2 requests/sec per VU, with MAX_VUS max.
   sleep(0.5);
 }
 

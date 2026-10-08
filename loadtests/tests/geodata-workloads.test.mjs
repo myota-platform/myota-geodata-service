@@ -205,7 +205,35 @@ test('production latency thresholds separate control requests from bulk transfer
 
 test('production still rejects unacknowledged targets and excessive upload VUs', async () => {
   await assert.rejects(harness({ MYOTA_ENV: 'production', MYOTA_BASE_URL: 'https://api.myota.top' }), /acknowledgement/);
-  await assert.rejects(harness({ MYOTA_LOAD_TEST_VUS: '9' }), /safe cap/);
+  await assert.rejects(harness({ MYOTA_LOAD_TEST_VUS: '51' }), /between 1 and 50/);
+});
+
+test('all profiles allow up to 50 VUs and queue backlog can scale to its 50-VU ceiling', async () => {
+  const upload = await harness({ MYOTA_LOAD_TEST_VUS: '50' });
+  assert.equal(upload.options.scenarios.geodata_workload.vus, 50);
+
+  const backlog = await harness({
+    MYOTA_LOAD_TEST_PROFILE: 'queue-backlog',
+    MYOTA_LOAD_TEST_VUS: '50',
+  });
+  assert.equal(backlog.options.scenarios.geodata_workload.preAllocatedVUs, 50);
+  assert.equal(backlog.options.scenarios.geodata_workload.maxVUs, 50);
+});
+
+test('production workload configuration allows 50 VUs but rejects 51', async () => {
+  const production = {
+    MYOTA_ENV: 'production',
+    MYOTA_LOAD_TEST_ALLOW_PRODUCTION: 'YES',
+    MYOTA_LOAD_TEST_PRODUCTION_HOSTS: 'api.myota.top',
+    MYOTA_BASE_URL: 'https://api.myota.top',
+    MYOTA_LOAD_TEST_VUS: '50',
+  };
+  const allowed = await harness(production);
+  assert.equal(allowed.options.scenarios.geodata_workload.vus, 50);
+  await assert.rejects(
+    harness({ ...production, MYOTA_LOAD_TEST_VUS: '51' }),
+    /between 1 and 50/,
+  );
 });
 
 test('teardown deletes only its exact tagged run with the required confirmation', async () => {
