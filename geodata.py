@@ -2943,11 +2943,17 @@ class GeoHandler(JsonHandler):
                     "DELETE FROM geodata_import_candidate WHERE import_run_id = %s",
                     (run_id,),
                 )
-                connection.execute(
+                updated_run = connection.execute(
                     "UPDATE import_run SET status='PROCESSED', processed_at=%s, processed_by=%s, "
-                    "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s",
+                    "last_error=NULL, heartbeat_at=NULL, lease_until=NULL WHERE id=%s "
+                    "RETURNING processed_at",
                     (processed_at, actor, run_id),
-                )
+                ).fetchone()
+                if updated_run:
+                    # Match PostgreSQL's timestamp spelling in the JSON
+                    # projection (+00:00 rather than the API's Z suffix) so
+                    # the subsequent optimistic merge sees the same value.
+                    processed_at = updated_run[0].isoformat()
         for candidate_id in sorted(set(candidate_ids)):
             candidates.pop(candidate_id, None)
             GeoHandler.store.mark_import_candidate_deleted(candidate_id)
