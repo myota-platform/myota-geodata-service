@@ -101,9 +101,13 @@ test('session, binary parts and completion follow the canonical contract', async
     assert.equal(part.params.headers['Content-Type'], 'application/octet-stream');
     assert.equal(part.params.headers['X-Part-SHA256'], sha256(part.body));
     assert.ok(part.body.length <= 5 * 1024 * 1024);
+    assert.equal(part.params.tags.request_class, 'bulk_transfer');
+    assert.equal(part.params.tags.operation, 'upload-part');
   }
   assert.ok(h.requests.at(-1).url.endsWith('/complete'));
   assert.equal(h.requests.at(-1).body, '{}');
+  assert.equal(h.requests.at(-1).params.tags.request_class, 'control');
+  assert.equal(h.requests.at(-1).params.tags.operation, 'upload-complete');
   assert.ok(h.checks.every(c => c.success));
   assert.ok(h.requests.every(r => !r.url.includes('/imports/upload')));
 });
@@ -185,12 +189,14 @@ test('malformed completion JSON is reconciled instead of throwing before cleanup
   assert.ok(h.checks.some(c => c.label === 'large file upload accepted' && !c.success));
 });
 
-test('production safeguards and report-only failure thresholds remain enabled', async () => {
+test('production latency thresholds separate control requests from bulk transfer', async () => {
   const h = await harness({
     MYOTA_ENV: 'production', MYOTA_BASE_URL: 'https://api.myota.top',
     MYOTA_LOAD_TEST_ALLOW_PRODUCTION: 'YES', MYOTA_LOAD_TEST_PRODUCTION_HOSTS: 'api.myota.top',
   });
   assert.equal(h.options.thresholds.http_req_failed[0], 'rate<0.05');
+  assert.equal(h.options.thresholds['http_req_duration{request_class:control}'][0], 'p(95)<2000');
+  assert.equal(h.options.thresholds['http_req_duration{request_class:bulk_transfer}'][0], 'p(95)<60000');
   assert.equal(h.options.tags.target, 'production');
   const data = h.setup();
   assert.ok(h.requests.some(r => r.method === 'del' && r.url.includes('/load-test-runs/')));
@@ -207,4 +213,5 @@ test('teardown deletes only its exact tagged run with the required confirmation'
   assert.equal(h.requests.length, 1);
   assert.ok(h.requests[0].url.endsWith('/load-test-runs/lt-upload-regression'));
   assert.equal(JSON.parse(h.requests[0].body).confirmation, 'DELETE LOAD TEST DATA lt-upload-regression');
+  assert.equal(h.requests[0].params.tags.request_class, 'cleanup');
 });

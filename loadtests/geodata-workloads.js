@@ -68,7 +68,16 @@ const thresholds = PROFILE === 'cleanup-only' ? {
   checks: ['rate>0.90'],
 };
 if (PRODUCTION_TARGET && PROFILE !== 'cleanup-only') {
-  thresholds.http_req_duration = ['p(95)<2000'];
+  // Keep API/control-plane latency distinct from bulk transfer and fixture
+  // cleanup. Upload-part time scales with bytes; the load-test file itself
+  // uses 16 MiB maximum parts, so allow up to 60 seconds per part while still
+  // surfacing its own p95 in the k6 summary.
+  thresholds['http_req_duration{request_class:control}'] = ['p(95)<2000'];
+  if (PROFILE === 'large-upload') {
+    thresholds['http_req_duration{request_class:bulk_transfer}'] = [
+      'p(95)<60000',
+    ];
+  }
 }
 const cleanupExpectedStatuses = http.expectedStatuses(200, 400, 401);
 // Import POST returns 202 before the durable run projection is visible. A
@@ -110,13 +119,23 @@ export const options = {
   tags: { test_suite: 'geodata_workloads', workload_profile: PROFILE, target: PRODUCTION_TARGET ? 'production' : 'nonproduction' },
 };
 
-function auth(token, contentType = 'application/json') {
+function auth(token, contentType = 'application/json', operation = 'api') {
+  const requestClass = operation === 'upload-part' ? 'bulk_transfer' :
+    operation === 'fixture-cleanup' ? 'cleanup' : 'control';
   const headers = {
     Accept: 'application/json', Authorization: `Bearer ${token}`,
     'User-Agent': `MyOTA-Geodata-LoadTest/1.0 (+https://myota.org; ${PRODUCTION_TARGET ? 'production' : 'non-production'}; run=${__ENV.MYOTA_LOAD_TEST_RUN_ID || 'generated'})`,
   };
   headers['Content-Type'] = contentType;
-  return { headers, tags: { service: 'geodata', workload_profile: PROFILE } };
+  return {
+    headers,
+    tags: {
+      service: 'geodata',
+      workload_profile: PROFILE,
+      operation,
+      request_class: requestClass,
+    },
+  };
 }
 
 function feature(index, runId, suffix = '', paddingBytes = 0) {
@@ -166,7 +185,7 @@ function uploadDataset(token, runId) {
     sha256: crypto.sha256(source, 'hex'),
     source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic fixture', loadTestRunId: runId },
   };
-  const params = auth(token);
+  const params = auth(token, 'application/json', 'upload-session-create');
   params.headers['Idempotency-Key'] = `${runId}-upload-${__VU}`;
   const created = http.post(`${BASE_URL}/v1/geodata/import-uploads`, JSON.stringify(metadata), params);
   const uploadId = responseField(created, 'uploadId');
@@ -185,7 +204,7 @@ function uploadDataset(token, runId) {
     const partSize = Math.min(advertisedPartSize, 16 * 1024 * 1024);
     for (let offset = 0, partNumber = 1; offset < source.length; offset += partSize, partNumber += 1) {
       const part = source.slice(offset, offset + partSize);
-      const partParams = auth(token, 'application/octet-stream');
+      const partParams = auth(token, 'application/octet-stream', 'upload-part');
       partParams.headers['X-Part-SHA256'] = crypto.sha256(part, 'hex');
       const response = http.post(`${endpoint}/parts/${partNumber}`, part, partParams);
       if (!uploadCheck(response, 'upload part stored with checksum', (r) => r.status === 200
@@ -193,20 +212,20 @@ function uploadDataset(token, runId) {
         && responseField(r, 'sha256') === partParams.headers['X-Part-SHA256'])) return;
     }
 
-    const response = http.post(`${endpoint}/complete`, '{}', auth(token));
+    const response = http.post(`${endpoint}/complete`, '{}', auth(token, 'application/json', 'upload-complete'));
     let importId = responseField(response, 'importRun.id');
     completed = response.status === 202 && Boolean(importId);
     // Completion can succeed despite a lost response. Reconcile the durable
     // session before attempting to abort an already accepted source object.
     if (!completed) {
-      const progress = http.get(endpoint, auth(token));
+      const progress = http.get(endpoint, auth(token, 'application/json', 'upload-session-status'));
       importId = responseField(progress, 'importRunId');
       completed = progress.status === 200 && responseField(progress, 'status') === 'COMPLETED' && Boolean(importId);
     }
     uploadCheck(response, 'large file upload accepted', () => completed);
   } finally {
     if (!completed) {
-      const aborted = http.del(endpoint, null, auth(token));
+      const aborted = http.del(endpoint, null, auth(token, 'application/json', 'upload-session-abort'));
       uploadCheck(aborted, 'incomplete upload aborted', (r) => r.status === 200 && responseField(r, 'status') === 'ABORTED');
     }
   }
@@ -219,7 +238,7 @@ function requestImport(token, runId, count, requestSequence) {
     source: { name: `MyOTA load test ${runId}`, license: 'CC0', attribution: 'Synthetic load-test fixture', loadTestRunId: runId },
     features: Array.from({ length: count }, (_, i) => feature(i, runId, `${suffix}:${i}`)),
   };
-  const response = http.post(`${BASE_URL}/v1/geodata/imports`, JSON.stringify(body), auth(token));
+  const response = http.post(`${BASE_URL}/v1/geodata/imports`, JSON.stringify(body), auth(token, 'application/json', 'import-submit'));
   let importId = null;
   if (response.status === 202) {
     try { importId = response.json('id'); } catch (_) { /* Log the malformed response below. */ }
@@ -234,7 +253,7 @@ function requestImport(token, runId, count, requestSequence) {
 }
 
 function waitForPreprocessing(token, runId, importId, timeoutSeconds = 120) {
-  const params = auth(token);
+  const params = auth(token, 'application/json', 'import-status-poll');
   params.responseCallback = preprocessingPollExpectedStatuses;
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastStatus = 0;
@@ -290,6 +309,7 @@ function login() {
   if (!email || !password) throw new Error('Set MYOTA_LOAD_TEST_EMAIL and MYOTA_LOAD_TEST_PASSWORD for the dedicated target-environment admin.');
   const response = http.post(`${BASE_URL}/v1/identity/auth/login`, JSON.stringify({ email, password }), {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'MyOTA-Geodata-LoadTest/1.0' },
+    tags: { service: 'identity', workload_profile: PROFILE, operation: 'login', request_class: 'control' },
   });
   if (response.status !== 200 && response.status !== 201) {
     const details = loginErrorDetails(response, email, password);
@@ -305,7 +325,7 @@ function cleanupRun(token, runId) {
   let lastStatus = 0;
   let lastDetails = 'no response body';
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const params = auth(currentToken);
+    const params = auth(currentToken, 'application/json', 'fixture-cleanup');
     params.responseCallback = cleanupExpectedStatuses;
     const response = http.del(url, body, params);
     lastStatus = response.status;
