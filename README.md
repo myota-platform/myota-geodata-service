@@ -533,9 +533,14 @@ source/run. Database-authoritative row repositories and multi-instance mutation
 safety are implemented and verified; streaming parsers, bounded batches and
 forced-failure/multi-worker qualification remain
 [horizontal-scaling roadmap work](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-horizontal-scaling-roadmap.md).
-The SeaweedFS multipart protocol also requires integration and restart
-failure testing against the exact deployed SeaweedFS version before the upload
-phase is considered verified.
+The exact deployed SeaweedFS multipart/restart gate now runs in the
+`test-upload-session-recovery` GitHub Actions job. It uses the immutable image
+digest reported by the K3s SeaweedFS pod, a disposable PostGIS database and a
+disposable SeaweedFS volume; it restarts the API and object-store container,
+then verifies resumability, checksum, durable import/outbox handoff, owner
+isolation and abort cleanup. The live production object store is never
+restarted. See the [Phase 2 evidence record](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata/evidence/phase2-upload-recovery-2026-10-09.md)
+and the [CI workflow](.github/workflows/build-and-publish.yml).
 
 Entity lifecycle, geometry, and category changes are persisted to the relational
 PostGIS tables. Migration 016 retains JSON `service_state` only as an archive;
