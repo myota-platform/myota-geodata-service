@@ -76,6 +76,7 @@ from pathlib import Path
 from geodata import GeoHandler
 run_id, marker = sys.argv[1], Path(sys.argv[2])
 GeoHandler.store.hydrate()
+GeoHandler.store.refresh_import_runs()
 def loader():
     for index in range(250):
         if index == 100 and os.environ.get("TEST_PAUSE_AFTER_CHECKPOINT") == "1":
@@ -219,6 +220,7 @@ from pathlib import Path
 from geodata import GeoHandler
 run_id, ready, start, result = sys.argv[1:]
 GeoHandler.store.hydrate()
+GeoHandler.store.refresh_import_runs()
 Path(ready).touch()
 while not Path(start).exists():
     time.sleep(0.01)
