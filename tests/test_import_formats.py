@@ -110,6 +110,40 @@ class ImportFormatTests(unittest.TestCase):
             [item["properties"]["name"] for item in features], ["A", "B"]
         )
 
+    def test_oversized_xml_feature_is_rejected_before_tree_materialization(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.kml"
+            path.write_text(
+                "<kml><Placemark><name>" + ("x" * 256) + "</name>"
+                "<Point><coordinates>-5.99,37.39</coordinates></Point>"
+                "</Placemark></kml>",
+                encoding="utf-8",
+            )
+            with (
+                patch("import_formats.MAX_STREAMED_FEATURE_BYTES", 128),
+                patch(
+                    "import_formats.ElementTree.iterparse",
+                    side_effect=AssertionError(
+                        "tree parser ran before XML size preflight"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "XML feature"):
+                    list(iter_uploaded_file("KML", path, path.name))
+
+    def test_xml_doctype_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "doctype.kml"
+            path.write_text(
+                '<!DOCTYPE kml [<!ENTITY name "Park">]>'
+                "<kml><Placemark><name>&name;</name></Placemark></kml>",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "document type"):
+                list(iter_uploaded_file("KML", path, path.name))
+
     def test_streaming_gpx_yields_waypoints_and_tracks(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "routes.gpx"
@@ -157,6 +191,67 @@ class ImportFormatTests(unittest.TestCase):
 
         self.assertEqual(features[0]["properties"]["name"], "Sevilla")
         self.assertEqual(features[0]["geometry"]["type"], "Point")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("shapefile"),
+        "RSS qualification requires the pyshp dependency",
+    )
+    def test_large_shapefile_streaming_keeps_peak_rss_bounded(self):
+        import shapefile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shape_path = root / "many-parks.shp"
+            writer = shapefile.Writer(
+                str(shape_path), shapeType=shapefile.POINT
+            )
+            writer.field("name", "C")
+            for index in range(50_000):
+                writer.point(-5.99 + (index % 100) / 100_000, 37.39)
+                writer.record(f"fixture-{index}")
+            writer.close()
+
+            archive_path = root / "many-parks.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for suffix in (".shp", ".shx", ".dbf"):
+                    archive.write(
+                        root / f"many-parks{suffix}", f"many-parks{suffix}"
+                    )
+
+            script = r"""
+import resource, sys
+from import_formats import iter_uploaded_file
+format_code, path = sys.argv[1:]
+count = sum(1 for _ in iter_uploaded_file(format_code, path, path))
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+print(f"format={format_code} features={count} peak_rss_bytes={peak_bytes} platform={sys.platform}")
+if count != 50000 or peak_bytes > 96 * 1024 * 1024:
+    raise SystemExit(1)
+"""
+            for format_code in ("SHAPEFILE", "PARKSERVE_US"):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        format_code,
+                        str(archive_path),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                )
+
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"{format_code} RSS qualification failed:\n"
+                    f"{result.stdout}{result.stderr}",
+                )
+                self.assertIn("features=50000", result.stdout)
+                print(result.stdout.strip())
 
     def test_shapefile_archive_rejects_oversized_record_before_decode(self):
         try:
@@ -225,6 +320,98 @@ class ImportFormatTests(unittest.TestCase):
         self.assertEqual(features[1]["properties"]["sourceRef"], "way/10")
 
     @unittest.skipUnless(
+        importlib.util.find_spec("osmium"),
+        "PyOsmium is installed in service CI",
+    )
+    def test_osm_area_vertex_limit_runs_before_geojson_materialization(self):
+        import osmium
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized-area.osm.pbf"
+            with osmium.SimpleWriter(path) as writer:
+                for node_id, location in enumerate(
+                    (
+                        (-5.99, 37.39),
+                        (-5.98, 37.39),
+                        (-5.98, 37.40),
+                    ),
+                    start=1,
+                ):
+                    writer.add_node(
+                        osmium.osm.mutable.Node(
+                            id=node_id, location=location, tags={}
+                        )
+                    )
+                writer.add_way(
+                    osmium.osm.mutable.Way(
+                        id=10,
+                        nodes=[1, 2, 3, 1],
+                        tags={"leisure": "park", "area": "yes"},
+                    )
+                )
+
+            with (
+                patch("import_formats.MAX_STREAMED_FEATURE_VERTICES", 3),
+                patch.object(
+                    osmium.geom.GeoJSONFactory,
+                    "create_multipolygon",
+                    side_effect=AssertionError(
+                        "area was materialized before vertex guard"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "OSM area"):
+                    list(iter_uploaded_file("OSM_PBF", path, path.name))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("osmium"),
+        "RSS qualification requires PyOsmium",
+    )
+    def test_large_osm_pbf_streaming_keeps_peak_rss_bounded(self):
+        import osmium
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "many-parks.osm.pbf"
+            with osmium.SimpleWriter(path) as writer:
+                for node_id in range(1, 50_001):
+                    writer.add_node(
+                        osmium.osm.mutable.Node(
+                            id=node_id,
+                            location=(
+                                -5.99 + (node_id % 100) / 100_000,
+                                37.39,
+                            ),
+                            tags={"leisure": "park"},
+                        )
+                    )
+
+            script = r"""
+import resource, sys
+from import_formats import iter_uploaded_file
+count = sum(1 for _ in iter_uploaded_file("OSM_PBF", sys.argv[1], sys.argv[1]))
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+print(f"features={count} peak_rss_bytes={peak_bytes} platform={sys.platform}")
+if count != 50000 or peak_bytes > 96 * 1024 * 1024:
+    raise SystemExit(1)
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"OSM PBF RSS qualification failed:\n{result.stdout}{result.stderr}",
+        )
+        self.assertIn("features=50000", result.stdout)
+        print(result.stdout.strip())
+
+    @unittest.skipUnless(
         importlib.util.find_spec("ijson"),
         "streaming parser dependency is installed in service CI",
     )
@@ -282,11 +469,64 @@ class ImportFormatTests(unittest.TestCase):
             script = r"""
 import resource, sys
 from import_formats import iter_uploaded_file
-count = sum(1 for _ in iter_uploaded_file("GEOJSON", sys.argv[1]))
+format_code, path = sys.argv[1:]
+count = sum(1 for _ in iter_uploaded_file(format_code, path))
 peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 peak_bytes = peak if sys.platform == "darwin" else peak * 1024
-print(f"features={count} peak_rss_bytes={peak_bytes} platform={sys.platform}")
+print(f"format={format_code} features={count} peak_rss_bytes={peak_bytes} platform={sys.platform}")
 if count != 300000 or peak_bytes > 96 * 1024 * 1024:
+    raise SystemExit(1)
+"""
+            for format_code in (
+                "GEOJSON",
+                "WFS",
+                "ARCGIS_FEATURESERVER",
+            ):
+                result = subprocess.run(
+                    [sys.executable, "-c", script, format_code, str(path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                )
+
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"{format_code} RSS qualification failed:\n"
+                    f"{result.stdout}{result.stderr}",
+                )
+                self.assertIn("features=300000", result.stdout)
+                print(result.stdout.strip())
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("ijson"),
+        "RSS qualification requires the streaming parser dependency",
+    )
+    def test_max_vertex_geojson_feature_keeps_peak_rss_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "max-vertices.geojson"
+            with path.open("w", encoding="utf-8") as output:
+                output.write(
+                    '{"type":"FeatureCollection","features":[{"type":"Feature",'
+                    '"properties":{"name":"max-vertices"},"geometry":'
+                    '{"type":"LineString","coordinates":['
+                )
+                for index in range(250_000):
+                    if index:
+                        output.write(",")
+                    output.write("[-5.99,37.39]")
+                output.write("]}}]}")
+
+            script = r"""
+import resource, sys
+from import_formats import iter_uploaded_file
+feature = next(iter_uploaded_file("GEOJSON", sys.argv[1]))
+count = len(feature["geometry"]["coordinates"])
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+print(f"vertices={count} peak_rss_bytes={peak_bytes}")
+if count != 250000 or peak_bytes > 96 * 1024 * 1024:
     raise SystemExit(1)
 """
             result = subprocess.run(
@@ -300,9 +540,10 @@ if count != 300000 or peak_bytes > 96 * 1024 * 1024:
         self.assertEqual(
             result.returncode,
             0,
-            f"streaming RSS qualification failed:\n{result.stdout}{result.stderr}",
+            f"maximum-vertex RSS qualification failed:\n"
+            f"{result.stdout}{result.stderr}",
         )
-        self.assertIn("features=300000", result.stdout)
+        self.assertIn("vertices=250000", result.stdout)
         print(result.stdout.strip())
 
     def test_kml_and_gpx_streaming_keep_peak_rss_bounded(self):
