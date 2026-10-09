@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -347,6 +348,48 @@ class ObjectStore:
             response = client.get_object(Bucket=bucket, Key=object_key)
             return response["Body"].read()
         except Exception:
+            return None
+
+    def download_to_path(self, bucket: str, object_key: str) -> Path | None:
+        """Copy a source object to bounded local scratch without buffering it."""
+        maximum = int(os.environ.get("MYOTA_UPLOAD_MAX_BYTES", str(1024**3)))
+        if self.local_root:
+            source = self._local_path(bucket, object_key)
+            if not source.exists():
+                return None
+            if source.stat().st_size > maximum:
+                raise ValueError(
+                    "stored import source exceeds the configured limit"
+                )
+            descriptor, name = tempfile.mkstemp(prefix="myota-import-")
+            os.close(descriptor)
+            target = Path(name)
+            shutil.copyfile(source, target)
+            return target
+        client = self._s3()
+        if not client:
+            return None
+        metadata = client.head_object(Bucket=bucket, Key=object_key)
+        if int(metadata.get("ContentLength", 0)) > maximum:
+            raise ValueError(
+                "stored import source exceeds the configured limit"
+            )
+        descriptor, name = tempfile.mkstemp(prefix="myota-import-")
+        os.close(descriptor)
+        target = Path(name)
+        try:
+            response = client.get_object(Bucket=bucket, Key=object_key)
+            body = response["Body"]
+            try:
+                with target.open("wb") as destination:
+                    shutil.copyfileobj(
+                        body, destination, length=8 * 1024 * 1024
+                    )
+            finally:
+                body.close()
+            return target
+        except Exception:
+            target.unlink(missing_ok=True)
             return None
 
     def delete(self, bucket: str, object_key: str) -> None:

@@ -1,6 +1,10 @@
 import unittest
+import json
+import importlib.util
+import tempfile
+from pathlib import Path
 
-from import_formats import parse_gpx, parse_kml, parse_text
+from import_formats import iter_uploaded_file, parse_gpx, parse_kml, parse_text
 from import_adapters import normalize
 
 
@@ -20,6 +24,49 @@ class ImportFormatTests(unittest.TestCase):
         self.assertEqual(
             features[0]["crs"]["properties"]["name"], "EPSG:25830"
         )
+
+    def test_uploaded_feature_collection_iterator_preserves_features(self):
+        document = {
+            "type": "FeatureCollection",
+            "crs": {"type": "name", "properties": {"name": "CRS84"}},
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [-5.99, 37.39],
+                    },
+                    "properties": {"name": f"Feature {index}"},
+                }
+                for index in range(3)
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "features.geojson"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            features = list(iter_uploaded_file("GEOJSON", path, path.name))
+
+        self.assertEqual(len(features), 3)
+        self.assertEqual(features[2]["properties"]["name"], "Feature 2")
+        self.assertEqual(features[0]["crs"], document["crs"])
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("ijson"),
+        "streaming parser dependency is installed in service CI",
+    )
+    def test_streaming_parser_does_not_use_whole_document_decoder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "features.geojson"
+            path.write_text(
+                '{"type":"FeatureCollection","features":['
+                '{"type":"Feature","properties":{},"geometry":'
+                '{"type":"Point","coordinates":[-5.99,37.39]}}]}',
+                encoding="utf-8",
+            )
+            features = list(iter_uploaded_file("GEOJSON", path))
+
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]["geometry"]["coordinates"][0], -5.99)
 
     def test_kml_point_and_polygon(self):
         content = '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><name>Park</name><Point><coordinates>-5.99,37.39</coordinates></Point></Placemark></Document></kml>'

@@ -635,6 +635,27 @@ class GeodataStore(CompatibilityGeodataStore):
                 if candidate.get("importRunId") == run_id
             }
 
+    def import_candidates_for_ordinals(self, run_id, start, end):
+        """Fetch the bounded replay window for one preprocessing batch."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.import_candidates_for_ordinals(
+                run_id, start, end
+            )
+        return {
+            int(candidate.get("ordinal", -1)): candidate
+            for candidate in self.data.setdefault(
+                "importCandidates", {}
+            ).values()
+            if candidate.get("importRunId") == run_id
+            and start <= int(candidate.get("ordinal", -1)) < end
+        }
+
+    def evict_import_candidates(self, run_id):
+        """Release committed candidate projections after a durable checkpoint."""
+        if self.durable and self._repository is not None:
+            self._repository.evict_import_candidates(run_id)
+
     def stage_import_candidate(self, candidate, *, is_new):
         """Stage a single import candidate in the current transaction scope."""
         if self.durable:

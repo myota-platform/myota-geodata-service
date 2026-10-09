@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+from pathlib import Path
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -199,12 +200,17 @@ class ImportQueueTests(unittest.TestCase):
             patch.object(GeoHandler.store, "persist"),
         ):
             result = GeoHandler._process_import_run(
-                run_id, {}, lambda: [], already_claimed=True
+                run_id,
+                {"adapter": "MANUAL", "source": {}},
+                lambda: [{"type": "Feature", "geometry": None}],
+                already_claimed=True,
             )
 
         self.assertTrue(result)
         self.assertEqual(
-            GeoHandler.store.data["importRuns"][run_id]["status"], "CANCELLED"
+            GeoHandler.store.data["importRuns"][run_id]["status"],
+            "CANCELLED",
+            GeoHandler.store.data["importRuns"][run_id].get("lastError"),
         )
         self.assertNotIn(
             "candidate-1", GeoHandler.store.data["importCandidates"]
@@ -512,14 +518,20 @@ class ImportQueueTests(unittest.TestCase):
                 },
             }
         }
-        with (
-            patch(
-                "storage.ObjectStore.get",
-                return_value=b'{"type":"FeatureCollection","features":[]}',
-            ),
-            patch.object(GeoHandler, "_process_import_run") as process,
-        ):
-            GeoHandler._recover_import_run(run_id)
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.geojson"
+            source_path.write_text(
+                '{"type":"FeatureCollection","features":[]}',
+                encoding="utf-8",
+            )
+            with (
+                patch(
+                    "storage.ObjectStore.download_to_path",
+                    return_value=source_path,
+                ),
+                patch.object(GeoHandler, "_process_import_run") as process,
+            ):
+                GeoHandler._recover_import_run(run_id)
         process.assert_called_once()
         self.assertEqual(process.call_args.args[1]["format"], "GEOJSON")
         self.assertEqual(process.call_args.args[1]["filename"], "pasted.kml")

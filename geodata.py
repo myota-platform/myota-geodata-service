@@ -4,6 +4,7 @@ from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import hashlib
+from itertools import islice
 import json
 import math
 import os
@@ -44,6 +45,7 @@ from import_formats import (
     TEXT_FORMATS,
     parse_text,
     parse_uploaded,
+    iter_uploaded_file,
 )
 from location_catalog import build_location_tree, derive_location_codes
 from maidenhead import apply_maidenhead_fields
@@ -1477,6 +1479,8 @@ class GeoHandler(JsonHandler):
         body: dict[str, Any],
         run_id: str,
         cancel_event: threading.Event | None = None,
+        ordinal_offset: int = 0,
+        final_batch: bool = True,
     ) -> dict[str, Any]:
         if len(body["features"]) > MAX_IMPORT_FEATURES:
             raise ValueError(
@@ -1490,10 +1494,13 @@ class GeoHandler(JsonHandler):
         source_key = GeoHandler._source_key(source)
         records = []
         preprocessed, skipped, errors = [], [], []
-        previous_candidates = GeoHandler.store.import_candidates_for_run(
-            run_id
+        previous_candidates = GeoHandler.store.import_candidates_for_ordinals(
+            run_id,
+            ordinal_offset,
+            ordinal_offset + len(body["features"]),
         )
-        for index, raw_feature in enumerate(body["features"]):
+        for local_index, raw_feature in enumerate(body["features"]):
+            index = ordinal_offset + local_index
             if cancel_event and cancel_event.is_set():
                 raise ImportCancelled("preprocessing was cancelled")
             try:
@@ -1659,7 +1666,7 @@ class GeoHandler(JsonHandler):
                 seen_refs,
                 body.get("disappearancePolicy", "REVIEW_REQUIRED"),
             )
-            if body.get("completeSnapshot")
+            if body.get("completeSnapshot") and final_batch
             else []
         )
         manifest = source_manifest(adapter, source, records, run_id)
@@ -1689,6 +1696,7 @@ class GeoHandler(JsonHandler):
             "disappeared": disappeared,
             "conflationCandidates": [],
             "manifest": manifest,
+            "_records": records,
             "_status": 202,
         }
         return result
@@ -2383,16 +2391,89 @@ class GeoHandler(JsonHandler):
             if cancel_event.is_set():
                 raise ImportCancelled("preprocessing was cancelled")
             features = loader()
-            if cancel_event.is_set():
-                raise ImportCancelled("preprocessing was cancelled")
-            prepared = GeoHandler._prepare_import_body(body, features)
-            with GeoHandler.store.lock:
-                GeoHandler.store.data["importRuns"][run_id]["featureCount"] = (
-                    len(features)
-                )
-            result = GeoHandler._import_features(
-                {**prepared, "features": features}, run_id, cancel_event
+            batch_size = max(
+                1, int(os.environ.get("MYOTA_IMPORT_BATCH_SIZE", "100"))
             )
+            if body.get("completeSnapshot"):
+                # Snapshot disappearance is defined over the full source set;
+                # until its manifest is incremental, preserve that behavior as
+                # an explicit whole-run fallback.
+                batch_size = MAX_IMPORT_FEATURES
+                features = list(features)
+                if len(features) > MAX_IMPORT_FEATURES:
+                    raise ValueError(
+                        f"an import may contain at most {MAX_IMPORT_FEATURES} features"
+                    )
+            aggregate: dict[str, Any] = {
+                "importRunId": run_id,
+                "adapter": body["adapter"],
+                "preprocessed": [],
+                "created": [],
+                "updated": [],
+                "skipped": [],
+                "errors": [],
+                "disappeared": [],
+                "conflationCandidates": [],
+                "manifest": None,
+                "_status": 202,
+            }
+            records: list[dict[str, str]] = []
+            feature_count = 0
+            iterator = iter(features)
+            while batch := list(islice(iterator, batch_size)):
+                if cancel_event.is_set():
+                    raise ImportCancelled("preprocessing was cancelled")
+                feature_count += len(batch)
+                if feature_count > MAX_IMPORT_FEATURES:
+                    raise ValueError(
+                        f"an import may contain at most {MAX_IMPORT_FEATURES} features"
+                    )
+                prepared = GeoHandler._prepare_import_body(body, batch)
+                result = GeoHandler._import_features(
+                    {**prepared, "features": batch},
+                    run_id,
+                    cancel_event,
+                    ordinal_offset=feature_count - len(batch),
+                )
+                records.extend(result.pop("_records", []))
+                for key in (
+                    "preprocessed",
+                    "created",
+                    "updated",
+                    "skipped",
+                    "errors",
+                    "disappeared",
+                ):
+                    aggregate[key].extend(result.get(key, []))
+                aggregate["manifest"] = result.get("manifest")
+                # Each checkpoint commits a bounded candidate window. The
+                # stable source ordinal makes a replay idempotent after a kill.
+                with GeoHandler.store.lock:
+                    GeoHandler.store.data["importRuns"][run_id][
+                        "featureCount"
+                    ] = feature_count
+                    GeoHandler.store.persist(include_import_state=True)
+                GeoHandler.store.evict_import_candidates(run_id)
+            source = dict(body["source"])
+            aggregate["manifest"] = source_manifest(
+                body["adapter"], source, records, run_id
+            )
+            aggregate["manifest"]["sourceKey"] = GeoHandler._source_key(source)
+            with GeoHandler.store.lock:
+                manifests = GeoHandler.store.data.setdefault(
+                    "sourceManifests", {}
+                )
+                aggregate["manifest"]["sourceChanged"] = not any(
+                    item.get("sourceHash")
+                    == aggregate["manifest"]["sourceHash"]
+                    for item in manifests.values()
+                    if item.get("sourceKey")
+                    == aggregate["manifest"]["sourceKey"]
+                    and item.get("importRunId") != run_id
+                )
+                manifests[run_id] = aggregate["manifest"]
+                GeoHandler.store.persist(include_import_state=True)
+            result = aggregate
             # Heartbeats update import_run outside this worker's repository
             # scope. Join before refreshing and writing the terminal status so
             # a final heartbeat cannot race with completion.
@@ -2402,7 +2483,7 @@ class GeoHandler(JsonHandler):
                 raise ImportCancelled("preprocessing was cancelled")
             with GeoHandler.store.lock:
                 GeoHandler.store.data["importRuns"][run_id]["featureCount"] = (
-                    len(features)
+                    feature_count
                 )
                 GeoHandler._complete_import_run(run_id, result)
                 GeoHandler.store.persist(include_import_state=True)
@@ -2473,8 +2554,8 @@ class GeoHandler(JsonHandler):
         if not GeoHandler._claim_import_run(run_id):
             return False
 
-        content = ObjectStore().get(bucket, object_key)
-        if content is None:
+        source_path = ObjectStore().download_to_path(bucket, object_key)
+        if source_path is None:
             with GeoHandler.store.lock:
                 GeoHandler._fail_import_run(
                     run_id,
@@ -2500,7 +2581,7 @@ class GeoHandler(JsonHandler):
         try:
 
             def loader() -> Any:
-                return parse_uploaded(format_code, content, filename)
+                return iter_uploaded_file(format_code, source_path, filename)
 
             return GeoHandler._process_import_run(
                 run_id, body, loader, already_claimed=True
@@ -2509,6 +2590,8 @@ class GeoHandler(JsonHandler):
             with GeoHandler.store.lock:
                 GeoHandler._fail_import_run(run_id, error)
                 GeoHandler.store.persist(include_import_state=True)
+        finally:
+            source_path.unlink(missing_ok=True)
         return True
 
     @staticmethod

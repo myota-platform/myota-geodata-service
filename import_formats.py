@@ -10,8 +10,9 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 from xml.etree import ElementTree
 
 
@@ -280,3 +281,53 @@ def parse_uploaded(
     raise ValueError(
         f"binary format {code} is accepted for queued processing but has no local decoder"
     )
+
+
+def iter_uploaded_file(
+    format_code: str, path: str | Path, filename: str = "upload"
+) -> Iterator[dict[str, Any]]:
+    """Yield large GeoJSON FeatureCollections one feature at a time.
+
+    Other accepted formats retain their existing decoder and are an explicit
+    whole-document fallback until streaming decoders are implemented for them.
+    """
+    code = format_code.upper().replace(".SHP", "SHAPEFILE")
+    source = Path(path)
+    if code not in {"GEOJSON", "WFS", "ARCGIS_FEATURESERVER"}:
+        yield from parse_uploaded(code, source.read_bytes(), filename)
+        return
+
+    try:
+        import ijson
+    except ImportError:
+        # Keep a functional fallback for lightweight/test installations. The
+        # production image installs ijson and exercises the streaming branch.
+        yield from parse_uploaded(code, source.read_bytes(), filename)
+        return
+
+    with source.open("rb") as stream:
+        first = stream.read(1)
+        while first and first.isspace():
+            first = stream.read(1)
+        stream.seek(0)
+        document_crs = next(ijson.items(stream, "crs", use_float=True), None)
+        if document_crs is None:
+            stream.seek(0)
+            document_crs = next(
+                ijson.items(stream, "spatialReference", use_float=True), None
+            )
+        stream.seek(0)
+        prefix = "item" if first == b"[" else "features.item"
+        features = ijson.items(stream, prefix, use_float=True)
+        found = False
+        for feature in features:
+            found = True
+            if document_crs and isinstance(feature, dict):
+                feature.setdefault("crs", document_crs)
+            yield feature
+        if found:
+            return
+
+    # Non-collection GeoJSON values (a Feature, geometry, or an empty array)
+    # are uncommon and small in practice; preserve compatibility explicitly.
+    yield from parse_uploaded(code, source.read_bytes(), filename)

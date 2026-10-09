@@ -335,6 +335,44 @@ class RowRepository:
             result[int(value.get("ordinal", -1))] = value
         return result
 
+    def import_candidates_for_ordinals(
+        self, run_id: str, start: int, end: int
+    ) -> dict[int, dict[str, Any]]:
+        """Load only the replay window needed by the current worker batch."""
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"SELECT {PROJECTIONS['importCandidates']} "
+                "FROM geodata_import_candidate WHERE import_run_id=%s "
+                "AND ordinal >= %s AND ordinal < %s ORDER BY ordinal",
+                (run_id, start, end),
+            ).fetchall()
+        result: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            value = canonical(row[0])
+            entity = value.get("entity") or {}
+            value["dedupeWarning"] = entity.get("dedupeWarning")
+            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            key = str(value["id"])
+            identity = ("importCandidates", key)
+            current = self.scope.loaded.get(identity)
+            if current is not None:
+                value = current
+            else:
+                self.scope.loaded[identity] = value
+                self.scope.original[identity] = copy.deepcopy(value)
+            result[int(value.get("ordinal", -1))] = value
+        return result
+
+    def evict_import_candidates(self, run_id: str) -> None:
+        """Release committed candidate projections between worker batches."""
+        for identity, value in list(self.scope.loaded.items()):
+            if identity[0] != "importCandidates":
+                continue
+            original = self.scope.original.get(identity) or value
+            if original.get("importRunId") == run_id:
+                self.scope.loaded.pop(identity, None)
+                self.scope.original.pop(identity, None)
+
     def stage_import_candidate(
         self, candidate: dict[str, Any], *, is_new: bool
     ) -> None:

@@ -32,6 +32,7 @@ separate decision.
 - GeoJSON Point, Polygon/MultiPolygon, and LineString trail/way geometry; OSM-style `type: "way"` records are normalized to LineString.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
 - A dedicated two-stage intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit durable queue events. Parsing and normalization stop at `PREPROCESSED`; no entity is created until an administrator validates selected records.
+- Uploaded GeoJSON FeatureCollections/arrays are streamed from SeaweedFS to worker-local scratch and decoded in bounded feature windows. Candidate rows checkpoint by stable import ordinal (default 100 per batch), and committed projections are evicted before the next batch. KML, GPX, Shapefile, formats without a decoder, and complete-snapshot imports still use whole-document fallbacks; these do not yet satisfy the Phase 3 memory gate. See the [Phase 3 evidence review](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata/evidence/phase3-bounded-preprocessing-2026-10-09.md).
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
 - Automatically calculated Maidenhead coverage is returned as sorted,
