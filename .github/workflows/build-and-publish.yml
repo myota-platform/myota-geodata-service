@@ -70,8 +70,71 @@ jobs:
             sleep 1
           done
           python -m unittest discover -s tests
+
+  test-upload-session-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: myota
+          POSTGRES_PASSWORD: isolated-test-only
+          POSTGRES_DB: geodata_upload_recovery_tests
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U myota -d geodata_upload_recovery_tests"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GEO_DATABASE_URL: postgresql://myota:isolated-test-only@localhost:5432/geodata_upload_recovery_tests
+      MYOTA_AUTH_SIGNING_KEY: phase2-isolated-test-key
+      MYOTA_GEODATA_IMPORT_BUCKET: myota-geodata-imports
+      SEAWEEDFS_TEST_CONTAINER: myota-seaweedfs-phase2
+      # Immutable image ID reported by the running SeaweedFS pod on spainip.es
+      # when this recovery gate was prepared. Update only after recording the
+      # newly deployed image ID in the Phase 2 evidence.
+      SEAWEEDFS_TEST_IMAGE: docker.io/chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geodata service dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Start isolated SeaweedFS with a disposable persistent volume
+        run: |
+          docker volume create myota-seaweedfs-phase2-data
+          docker run -d --name "$SEAWEEDFS_TEST_CONTAINER" --network host \
+            -e AWS_ACCESS_KEY_ID=phase2-test-access \
+            -e AWS_SECRET_ACCESS_KEY=phase2-test-secret \
+            -v myota-seaweedfs-phase2-data:/data \
+            "$SEAWEEDFS_TEST_IMAGE" \
+            mini -dir=/data -ip.bind=0.0.0.0 -metricsPort=9324
+      - name: Apply service-owned migrations
+        run: |
+          for migration_file in migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 "$GEO_DATABASE_URL" -f "$migration_file"
+          done
+      - name: Wait for isolated SeaweedFS readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8333/status >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "SeaweedFS did not become ready" >&2
+          exit 1
+      - name: Exercise API and SeaweedFS restart recovery
+        run: python tests/integration_upload_session_recovery.py
+      - name: Remove isolated SeaweedFS test data
+        if: always()
+        run: |
+          docker rm -f "$SEAWEEDFS_TEST_CONTAINER" || true
+          docker volume rm myota-seaweedfs-phase2-data || true
+
   build-and-publish:
-    needs: [test-relational-boundaries, test-load-harness]
+    needs: [test-relational-boundaries, test-load-harness, test-upload-session-recovery]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
