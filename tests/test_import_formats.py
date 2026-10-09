@@ -1,10 +1,20 @@
 import unittest
 import json
 import importlib.util
+import os
+import subprocess
+import sys
 import tempfile
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from import_formats import iter_uploaded_file, parse_gpx, parse_kml, parse_text
+from import_formats import (
+    iter_uploaded_file,
+    parse_gpx,
+    parse_kml,
+    parse_text,
+)
 from import_adapters import normalize
 
 
@@ -78,6 +88,282 @@ class ImportFormatTests(unittest.TestCase):
         content = '<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg><trkpt lat="37.39" lon="-5.99"/><trkpt lat="37.40" lon="-5.98"/></trkseg></trk></gpx>'
         features = parse_gpx(content)
         self.assertEqual(features[0]["geometry"]["type"], "LineString")
+
+    def test_streaming_kml_yields_placemarks_without_whole_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "parks.kml"
+            path.write_text(
+                "<kml><Document><Placemark><name>A</name><Point>"
+                "<coordinates>-5.99,37.39</coordinates></Point></Placemark>"
+                "<Placemark><name>B</name><Point>"
+                "<coordinates>-5.98,37.40</coordinates></Point></Placemark>"
+                "</Document></kml>",
+                encoding="utf-8",
+            )
+            with patch(
+                "import_formats.parse_uploaded",
+                side_effect=AssertionError("whole-document parser used"),
+            ):
+                features = list(iter_uploaded_file("KML", path, path.name))
+
+        self.assertEqual(
+            [item["properties"]["name"] for item in features], ["A", "B"]
+        )
+
+    def test_streaming_gpx_yields_waypoints_and_tracks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.gpx"
+            path.write_text(
+                '<gpx><wpt lat="37.39" lon="-5.99"><name>W</name></wpt>'
+                '<trk><trkseg><trkpt lat="37.39" lon="-5.99"/>'
+                '<trkpt lat="37.40" lon="-5.98"/></trkseg></trk></gpx>',
+                encoding="utf-8",
+            )
+            with patch(
+                "import_formats.parse_uploaded",
+                side_effect=AssertionError("whole-document parser used"),
+            ):
+                features = list(iter_uploaded_file("GPX", path, path.name))
+
+        self.assertEqual(
+            [item["geometry"]["type"] for item in features],
+            ["Point", "LineString"],
+        )
+
+    def test_streaming_shapefile_reads_shape_records_from_zip(self):
+        try:
+            import shapefile
+        except ImportError:
+            self.skipTest("pyshp is installed in service CI")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shape_path = root / "parks.shp"
+            writer = shapefile.Writer(
+                str(shape_path), shapeType=shapefile.POINT
+            )
+            writer.field("name", "C")
+            writer.point(-5.99, 37.39)
+            writer.record("Sevilla")
+            writer.close()
+            archive_path = root / "parks.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for suffix in (".shp", ".shx", ".dbf"):
+                    archive.write(root / f"parks{suffix}", f"parks{suffix}")
+            features = list(
+                iter_uploaded_file(
+                    "SHAPEFILE", archive_path, archive_path.name
+                )
+            )
+
+        self.assertEqual(features[0]["properties"]["name"], "Sevilla")
+        self.assertEqual(features[0]["geometry"]["type"], "Point")
+
+    def test_shapefile_archive_rejects_oversized_record_before_decode(self):
+        try:
+            import shapefile
+        except ImportError:
+            self.skipTest("pyshp is installed in service CI")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            writer = shapefile.Writer(
+                str(root / "source.shp"), shapeType=shapefile.POINT
+            )
+            writer.field("name", "C")
+            writer.point(-5.99, 37.39)
+            writer.record("fixture")
+            writer.close()
+            path = root / "oversized.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                for suffix in (".shp", ".shx", ".dbf"):
+                    archive.write(root / f"source{suffix}", f"source{suffix}")
+
+            with patch("import_formats.MAX_SHAPEFILE_RECORD_BYTES", 8):
+                with self.assertRaisesRegex(ValueError, "record exceeds"):
+                    list(iter_uploaded_file("SHAPEFILE", path, path.name))
+
+    def test_shapefile_archive_rejects_excessive_expansion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "expanded.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("source.shp", b"\0" * 100)
+            with patch("import_formats.MAX_SHAPEFILE_EXPANDED_BYTES", 50):
+                with self.assertRaisesRegex(ValueError, "expanded-size"):
+                    list(iter_uploaded_file("SHAPEFILE", path, path.name))
+
+    def test_streaming_osm_pbf_uses_node_and_way_geometry(self):
+        try:
+            import osmium
+        except ImportError:
+            self.skipTest("osmium is installed in service CI")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trails.osm.pbf"
+            with osmium.SimpleWriter(path) as writer:
+                writer.add_node(
+                    osmium.osm.mutable.Node(
+                        id=1,
+                        location=(-5.99, 37.39),
+                        tags={"leisure": "park"},
+                    )
+                )
+                writer.add_node(
+                    osmium.osm.mutable.Node(
+                        id=2, location=(-5.98, 37.40), tags={}
+                    )
+                )
+                writer.add_way(
+                    osmium.osm.mutable.Way(
+                        id=10,
+                        nodes=[1, 2],
+                        tags={"highway": "path", "name": "Trail"},
+                    )
+                )
+            features = list(iter_uploaded_file("OSM_PBF", path, path.name))
+
+        self.assertEqual(len(features), 2)
+        self.assertEqual(features[0]["geometry"]["type"], "Point")
+        self.assertEqual(features[1]["geometry"]["type"], "LineString")
+        self.assertEqual(features[1]["properties"]["sourceRef"], "way/10")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("ijson"),
+        "streaming parser dependency is installed in service CI",
+    )
+    def test_streamed_feature_size_limit_is_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.geojson"
+            path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {"description": "x" * 256},
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [-5.99, 37.39],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("import_formats.MAX_STREAMED_FEATURE_BYTES", 128):
+                with self.assertRaisesRegex(ValueError, "decoded-size limit"):
+                    list(iter_uploaded_file("GEOJSON", path, path.name))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("ijson"),
+        "RSS qualification requires the streaming parser dependency",
+    )
+    def test_large_geojson_streaming_keeps_peak_rss_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.geojson"
+            with path.open("w", encoding="utf-8") as output:
+                output.write('{"type":"FeatureCollection","features":[')
+                for index in range(300_000):
+                    if index:
+                        output.write(",")
+                    output.write(
+                        json.dumps(
+                            {
+                                "type": "Feature",
+                                "properties": {"name": f"fixture-{index}"},
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [-5.99, 37.39],
+                                },
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                output.write("]}")
+            script = r"""
+import resource, sys
+from import_formats import iter_uploaded_file
+count = sum(1 for _ in iter_uploaded_file("GEOJSON", sys.argv[1]))
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+print(f"features={count} peak_rss_bytes={peak_bytes} platform={sys.platform}")
+if count != 300000 or peak_bytes > 96 * 1024 * 1024:
+    raise SystemExit(1)
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"streaming RSS qualification failed:\n{result.stdout}{result.stderr}",
+        )
+        self.assertIn("features=300000", result.stdout)
+        print(result.stdout.strip())
+
+    def test_kml_and_gpx_streaming_keep_peak_rss_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kml_path = root / "many-placemarks.kml"
+            with kml_path.open("w", encoding="utf-8") as output:
+                output.write(
+                    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+                )
+                for index in range(50_000):
+                    output.write(
+                        f"<Placemark><name>fixture-{index}</name>"
+                        "<Point><coordinates>-5.99,37.39</coordinates>"
+                        "</Point></Placemark>"
+                    )
+                output.write("</Document></kml>")
+
+            gpx_path = root / "many-waypoints.gpx"
+            with gpx_path.open("w", encoding="utf-8") as output:
+                output.write('<gpx version="1.1" creator="MyOTA">')
+                for index in range(50_000):
+                    output.write(
+                        f'<wpt lat="37.39" lon="-5.99"><name>{index}'
+                        "</name></wpt>"
+                    )
+                output.write("</gpx>")
+
+            script = r"""
+import resource, sys
+from import_formats import iter_uploaded_file
+format_code, path, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
+count = sum(1 for _ in iter_uploaded_file(format_code, path, path))
+peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+print(f"format={format_code} features={count} peak_rss_bytes={peak_bytes}")
+if count != expected or peak_bytes > 96 * 1024 * 1024:
+    raise SystemExit(1)
+"""
+            for format_code, path in (("KML", kml_path), ("GPX", gpx_path)):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        format_code,
+                        str(path),
+                        "50000",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"{format_code} RSS qualification failed:\n"
+                    f"{result.stdout}{result.stderr}",
+                )
+                print(result.stdout.strip())
 
     def test_preprocessing_infers_site_name_alias_without_losing_source_property(
         self,

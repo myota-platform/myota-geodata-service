@@ -408,10 +408,7 @@ class ImportQueueTests(unittest.TestCase):
                 "storage.ObjectStore.put",
                 return_value={"sha256": "hash", "size": 5},
             ),
-            patch(
-                "geodata.parse_uploaded",
-                side_effect=ValueError("binary parser pending"),
-            ),
+            patch.object(GeoHandler.import_executor, "submit") as submit,
             patch.object(GeoHandler.store, "persist") as persist,
         ):
             result = GeoHandler.upload_import(
@@ -423,6 +420,7 @@ class ImportQueueTests(unittest.TestCase):
             "QUEUED",
         )
         persist.assert_called_once_with(include_import_state=True)
+        submit.assert_called_once()
 
     def test_multipart_file_bytes_keep_pending_run_durable(self):
         body = {
@@ -536,12 +534,10 @@ class ImportQueueTests(unittest.TestCase):
         self.assertEqual(process.call_args.args[1]["format"], "GEOJSON")
         self.assertEqual(process.call_args.args[1]["filename"], "pasted.kml")
 
-    def test_binary_recovery_keeps_pending_run_queued(self):
+    def test_osm_pbf_recovery_uses_streaming_parser(self):
         run_id = "run-binary-recovery"
         GeoHandler.store.data["importRuns"] = {
             run_id: {
-                # Older rows may predate the persisted binaryObjectPending flag;
-                # the format itself must still keep them queued.
                 "id": run_id,
                 "status": "QUEUED",
                 "format": "OSM_PBF",
@@ -551,20 +547,29 @@ class ImportQueueTests(unittest.TestCase):
                 },
             }
         }
-        with (
-            patch.object(GeoHandler, "_process_import_run") as process,
-            patch.object(GeoHandler.store, "persist") as persist,
-        ):
-            GeoHandler._recover_import_run(run_id)
-        process.assert_not_called()
-        self.assertEqual(
-            GeoHandler.store.data["importRuns"][run_id]["status"], "QUEUED"
-        )
-        self.assertIn(
-            "queued for an available parser",
-            GeoHandler.store.data["importRuns"][run_id]["lastError"],
-        )
-        persist.assert_called_once_with(include_import_state=True)
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.osm.pbf"
+            source_path.write_bytes(b"pbf fixture")
+            with (
+                patch(
+                    "storage.ObjectStore.download_to_path",
+                    return_value=source_path,
+                ),
+                patch(
+                    "geodata.iter_uploaded_file", return_value=iter([])
+                ) as parse,
+                patch.object(GeoHandler, "_process_import_run") as process,
+                patch.object(GeoHandler.store, "persist"),
+            ):
+                GeoHandler._recover_import_run(run_id)
+                process.assert_called_once()
+                args, kwargs = process.call_args
+                self.assertEqual(args[1]["format"], "OSM_PBF")
+                self.assertTrue(kwargs["already_claimed"])
+                self.assertEqual(list(args[2]()), [])
+                parse.assert_called_once_with(
+                    "OSM_PBF", source_path, "import.geojson"
+                )
 
     def test_startup_recovery_requeues_processing_runs_before_dispatch(self):
         run_id = "run-startup-recovery"

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import struct
+import tempfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -21,6 +24,17 @@ BINARY_FORMATS = {"SHAPEFILE", "SHP", "OSM_PBF", "PARKSERVE_US"}
 SUPPORTED_FORMATS = (
     TEXT_FORMATS | BINARY_FORMATS | {"WFS", "ARCGIS_FEATURESERVER"}
 )
+MAX_STREAMED_FEATURE_BYTES = int(
+    os.environ.get("MYOTA_IMPORT_MAX_FEATURE_BYTES", str(16 * 1024 * 1024))
+)
+MAX_STREAMED_FEATURE_VERTICES = int(
+    os.environ.get("MYOTA_IMPORT_MAX_FEATURE_VERTICES", "250000")
+)
+MAX_SHAPEFILE_EXPANDED_BYTES = int(
+    os.environ.get("MYOTA_IMPORT_MAX_SHAPEFILE_EXPANDED_BYTES", str(1024**3))
+)
+MAX_SHAPEFILE_RECORD_BYTES = MAX_STREAMED_FEATURE_BYTES
+MAX_SHAPEFILE_ARCHIVE_MEMBERS = 100
 
 
 def _feature(
@@ -88,6 +102,340 @@ def _geojson(value: Any) -> list[dict[str, Any]]:
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def _check_feature_size(feature: dict[str, Any]) -> None:
+    encoded_size = len(
+        json.dumps(feature, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    if encoded_size > MAX_STREAMED_FEATURE_BYTES:
+        raise ValueError(
+            "a source feature exceeds the configured decoded-size limit "
+            f"({MAX_STREAMED_FEATURE_BYTES} bytes)"
+        )
+
+
+def _check_vertex_count(geometry: dict[str, Any] | None) -> None:
+    if not geometry:
+        return
+    pending = [geometry.get("coordinates")]
+    vertices = 0
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, (list, tuple)):
+            continue
+        if len(value) >= 2 and all(
+            isinstance(item, (int, float)) for item in value[:2]
+        ):
+            vertices += 1
+            if vertices > MAX_STREAMED_FEATURE_VERTICES:
+                raise ValueError(
+                    "a source geometry exceeds the configured vertex limit "
+                    f"({MAX_STREAMED_FEATURE_VERTICES})"
+                )
+        else:
+            pending.extend(value)
+
+
+def _validate_shapefile_archive(archive: zipfile.ZipFile) -> None:
+    members = archive.infolist()
+    if len(members) > MAX_SHAPEFILE_ARCHIVE_MEMBERS:
+        raise ValueError(
+            "shapefile archive contains too many files "
+            f"(limit {MAX_SHAPEFILE_ARCHIVE_MEMBERS})"
+        )
+    expanded_bytes = sum(member.file_size for member in members)
+    if expanded_bytes > MAX_SHAPEFILE_EXPANDED_BYTES:
+        raise ValueError(
+            "shapefile archive exceeds the configured expanded-size limit "
+            f"({MAX_SHAPEFILE_EXPANDED_BYTES} bytes)"
+        )
+
+
+def _validate_shapefile_records(
+    stream: Any, max_record_bytes: int | None = None
+) -> None:
+    """Reject oversized or truncated records before pyshp decodes geometry."""
+    if max_record_bytes is None:
+        max_record_bytes = MAX_SHAPEFILE_RECORD_BYTES
+    if len(stream.read(100)) != 100:
+        raise ValueError("shapefile header is truncated")
+    while True:
+        header = stream.read(8)
+        if not header:
+            return
+        if len(header) != 8:
+            raise ValueError("shapefile record header is truncated")
+        _record_number, content_words = struct.unpack(">II", header)
+        record_bytes = content_words * 2
+        if record_bytes > max_record_bytes:
+            raise ValueError(
+                "a shapefile record exceeds the configured decoded-size limit "
+                f"({max_record_bytes} bytes)"
+            )
+        remaining = record_bytes
+        while remaining:
+            chunk = stream.read(min(64 * 1024, remaining))
+            if not chunk:
+                raise ValueError("shapefile record data is truncated")
+            remaining -= len(chunk)
+
+
+def _iter_kml(path: Path) -> Iterator[dict[str, Any]]:
+    stack: list[ElementTree.Element] = []
+    for event, element in ElementTree.iterparse(path, events=("start", "end")):
+        if event == "start":
+            stack.append(element)
+            continue
+        if _local_name(element.tag) == "Placemark":
+            name = next(
+                (
+                    child.text.strip()
+                    for child in element
+                    if _local_name(child.tag) == "name" and child.text
+                ),
+                None,
+            )
+            geometry = _kml_geometry(element)
+            if geometry:
+                feature = _feature(geometry, {"name": name} if name else {})
+                _check_feature_size(feature)
+                _check_vertex_count(geometry)
+                yield feature
+            element.clear()
+            if len(stack) > 1:
+                stack[-2].clear()
+        if stack:
+            stack.pop()
+
+
+def _iter_gpx(path: Path) -> Iterator[dict[str, Any]]:
+    stack: list[ElementTree.Element] = []
+    segment_points: list[list[float]] | None = None
+    segment_bytes = 0
+    segment_vertices = 0
+    for event, element in ElementTree.iterparse(path, events=("start", "end")):
+        tag = _local_name(element.tag)
+        if event == "start":
+            stack.append(element)
+            if tag == "trkseg":
+                segment_points = []
+                segment_bytes = 0
+                segment_vertices = 0
+            elif tag == "trkpt" and segment_points is not None:
+                segment_bytes += sum(
+                    len(str(key).encode()) + len(str(value).encode())
+                    for key, value in element.attrib.items()
+                )
+                segment_vertices += 1
+                if segment_bytes > MAX_STREAMED_FEATURE_BYTES:
+                    raise ValueError(
+                        "a GPX track segment exceeds the configured decoded-size limit"
+                    )
+                if segment_vertices > MAX_STREAMED_FEATURE_VERTICES:
+                    raise ValueError(
+                        "a GPX track segment exceeds the configured vertex limit"
+                    )
+            continue
+
+        if tag in {"wpt", "rtept"}:
+            properties = {}
+            for child in element:
+                if (
+                    _local_name(child.tag) in {"name", "desc", "type"}
+                    and child.text
+                ):
+                    properties[_local_name(child.tag)] = child.text.strip()
+            feature = _feature(
+                {"type": "Point", "coordinates": _gpx_point(element)},
+                properties,
+            )
+            _check_feature_size(feature)
+            yield feature
+        elif tag == "trkpt" and segment_points is not None:
+            segment_points.append(_gpx_point(element))
+        elif tag == "trkseg":
+            if segment_points and len(segment_points) >= 2:
+                feature = _feature(
+                    {"type": "LineString", "coordinates": segment_points},
+                    {},
+                )
+                _check_feature_size(feature)
+                _check_vertex_count(feature["geometry"])
+                yield feature
+            segment_points = None
+
+        if tag in {"wpt", "rtept", "trkseg"}:
+            element.clear()
+            if len(stack) > 1:
+                stack[-2].clear()
+        elif tag == "trkpt" and segment_points is not None:
+            element.clear()
+        elif not any(
+            _local_name(parent.tag) in {"wpt", "rtept", "trkseg"}
+            for parent in stack[:-1]
+        ):
+            element.clear()
+        if stack:
+            stack.pop()
+
+
+def _iter_shapefile(path: Path, filename: str) -> Iterator[dict[str, Any]]:
+    try:
+        import shapefile
+    except ImportError as exc:
+        raise ValueError(
+            "Shapefile support requires the pyshp package"
+        ) from exc
+    if not filename.lower().endswith(".zip"):
+        raise ValueError(
+            "upload a .zip containing the .shp, .shx, and .dbf sidecars"
+        )
+
+    with zipfile.ZipFile(path) as archive:
+        _validate_shapefile_archive(archive)
+        names = archive.namelist()
+        shp_name = next(
+            (name for name in names if name.lower().endswith(".shp")), None
+        )
+        if not shp_name:
+            raise ValueError(
+                "shapefile archive does not contain a .shp member"
+            )
+        stem = str(PurePosixPath(shp_name).with_suffix(""))
+        by_lower = {name.casefold(): name for name in names}
+        shx_name = by_lower.get(f"{stem}.shx".casefold())
+        dbf_name = by_lower.get(f"{stem}.dbf".casefold())
+        if not shx_name or not dbf_name:
+            raise ValueError(
+                "shapefile archive is missing its .shx or .dbf sidecar"
+            )
+        prj_name = by_lower.get(f"{stem}.prj".casefold())
+        source_crs = None
+        if prj_name:
+            if archive.getinfo(prj_name).file_size > 1024 * 1024:
+                raise ValueError("shapefile projection metadata is too large")
+            source_crs = archive.read(prj_name).decode("utf-8", "replace")
+        with archive.open(shp_name) as shp_stream:
+            _validate_shapefile_records(shp_stream)
+        with (
+            archive.open(shp_name) as shp_stream,
+            archive.open(shx_name) as shx_stream,
+            archive.open(dbf_name) as dbf_stream,
+        ):
+            reader = shapefile.Reader(
+                shp=shp_stream, shx=shx_stream, dbf=dbf_stream
+            )
+            fields = [field[0] for field in reader.fields[1:]]
+            for shape_record in reader.iterShapeRecords():
+                geometry = shape_record.shape.__geo_interface__
+                properties = dict(zip(fields, shape_record.record))
+                feature = _feature(geometry, properties)
+                if source_crs:
+                    feature["crs"] = source_crs
+                _check_feature_size(feature)
+                _check_vertex_count(geometry)
+                yield feature
+
+
+def _iter_osm_pbf(path: Path) -> Iterator[dict[str, Any]]:
+    try:
+        import osmium
+    except ImportError as exc:
+        raise ValueError(
+            "OSM PBF support requires the osmium package"
+        ) from exc
+
+    from import_adapters import OSM_REQUIRED_TAGS
+
+    required_tags = {tuple(tag.split("=", 1)) for tag in OSM_REQUIRED_TAGS}
+    line_values = {"path", "footway", "track", "bridleway"}
+    area_values = {
+        ("leisure", "park"),
+        ("leisure", "nature_reserve"),
+        ("boundary", "protected_area"),
+        ("landuse", "recreation_ground"),
+    }
+    factory = osmium.geom.GeoJSONFactory()
+
+    def make_feature(
+        osm_type: str, osm_id: int, tags: Any, geometry: dict[str, Any]
+    ) -> dict[str, Any]:
+        properties = dict(tags)
+        properties.update(
+            {
+                "id": f"{osm_type}/{osm_id}",
+                "osm_id": f"{osm_type}/{osm_id}",
+                "sourceRef": f"{osm_type}/{osm_id}",
+                "featureType": osm_type,
+            }
+        )
+        feature = _feature(geometry, properties, f"{osm_type}/{osm_id}")
+        _check_feature_size(feature)
+        _check_vertex_count(geometry)
+        return feature
+
+    with tempfile.TemporaryDirectory(prefix="myota-osm-index-") as directory:
+        location_index = Path(directory) / "node-locations.store"
+        processor = (
+            osmium.FileProcessor(path)
+            .with_locations(storage=f"sparse_file_array,{location_index}")
+            .with_areas()
+        )
+        for item in processor:
+            tags = dict(item.tags)
+            if item.is_area():
+                if not any(pair in area_values for pair in tags.items()):
+                    continue
+                geometry = json.loads(factory.create_multipolygon(item))
+                area_type = "way" if item.from_way() else "relation"
+                yield make_feature(area_type, item.orig_id(), tags, geometry)
+            elif item.is_node():
+                if not any(pair in required_tags for pair in tags.items()):
+                    continue
+                if not item.location.valid():
+                    continue
+                yield make_feature(
+                    "node",
+                    item.id,
+                    tags,
+                    {
+                        "type": "Point",
+                        "coordinates": [item.location.lon, item.location.lat],
+                    },
+                )
+            elif item.is_way():
+                if (
+                    not any(
+                        ("highway", value) in tags.items()
+                        for value in line_values
+                    )
+                    and ("route", "hiking") not in tags.items()
+                ):
+                    continue
+                if (
+                    item.nodes
+                    and len(item.nodes) > MAX_STREAMED_FEATURE_VERTICES
+                ):
+                    raise ValueError(
+                        "an OSM way exceeds the configured vertex limit "
+                        f"({MAX_STREAMED_FEATURE_VERTICES})"
+                    )
+                coordinates = [
+                    [node.lon, node.lat]
+                    for node in item.nodes
+                    if node.location.valid()
+                ]
+                if len(coordinates) < 2:
+                    continue
+                yield make_feature(
+                    "way",
+                    item.id,
+                    tags,
+                    {"type": "LineString", "coordinates": coordinates},
+                )
 
 
 def _kml_geometry(node: ElementTree.Element) -> dict[str, Any] | None:
@@ -216,7 +564,7 @@ def parse_uploaded(
     code = format_code.upper().replace(".SHP", "SHAPEFILE")
     if code in TEXT_FORMATS or code in {"WFS", "ARCGIS_FEATURESERVER"}:
         return parse_text(code, content.decode("utf-8-sig"))
-    if code in {"SHP", "SHAPEFILE"}:
+    if code in {"SHP", "SHAPEFILE", "PARKSERVE_US"}:
         try:
             import shapefile  # pyshp, optional in the lightweight service image
         except ImportError as exc:
@@ -288,17 +636,30 @@ def iter_uploaded_file(
 ) -> Iterator[dict[str, Any]]:
     """Yield large GeoJSON FeatureCollections one feature at a time.
 
-    Other accepted formats retain their existing decoder and are an explicit
-    whole-document fallback until streaming decoders are implemented for them.
+    Text and shapefile inputs are streamed one feature at a time. A feature is
+    rejected before staging if it exceeds the decoded-size or vertex limit.
     """
     code = format_code.upper().replace(".SHP", "SHAPEFILE")
     source = Path(path)
+    if code == "KML":
+        yield from _iter_kml(source)
+        return
+    if code == "GPX":
+        yield from _iter_gpx(source)
+        return
+    if code == "OSM_PBF":
+        yield from _iter_osm_pbf(source)
+        return
+    if code in {"SHP", "SHAPEFILE", "PARKSERVE_US"}:
+        yield from _iter_shapefile(source, filename)
+        return
     if code not in {"GEOJSON", "WFS", "ARCGIS_FEATURESERVER"}:
         yield from parse_uploaded(code, source.read_bytes(), filename)
         return
 
     try:
         import ijson
+        from ijson.common import ObjectBuilder
     except ImportError:
         # Keep a functional fallback for lightweight/test installations. The
         # production image installs ijson and exercises the streaming branch.
@@ -318,13 +679,37 @@ def iter_uploaded_file(
             )
         stream.seek(0)
         prefix = "item" if first == b"[" else "features.item"
-        features = ijson.items(stream, prefix, use_float=True)
+        builder = None
+        feature_size = 0
         found = False
-        for feature in features:
-            found = True
-            if document_crs and isinstance(feature, dict):
-                feature.setdefault("crs", document_crs)
-            yield feature
+        for event_prefix, event, value in ijson.parse(stream, use_float=True):
+            if event_prefix == prefix and event in {
+                "start_map",
+                "start_array",
+            }:
+                builder = ObjectBuilder()
+                feature_size = 0
+            if builder is None:
+                continue
+            feature_size += len(event_prefix.encode("utf-8")) + 8
+            if value is not None:
+                feature_size += len(
+                    json.dumps(value, ensure_ascii=False).encode("utf-8")
+                )
+            if feature_size > MAX_STREAMED_FEATURE_BYTES:
+                raise ValueError(
+                    "a source feature exceeds the configured decoded-size limit "
+                    f"({MAX_STREAMED_FEATURE_BYTES} bytes)"
+                )
+            builder.event(event, value)
+            if event_prefix == prefix and event in {"end_map", "end_array"}:
+                feature = builder.value
+                builder = None
+                found = True
+                _check_vertex_count(feature.get("geometry"))
+                if document_crs and isinstance(feature, dict):
+                    feature.setdefault("crs", document_crs)
+                yield feature
         if found:
             return
 
