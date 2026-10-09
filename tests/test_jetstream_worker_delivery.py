@@ -76,10 +76,11 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         if self.nc.is_connected:
-            try:
-                await self.js.delete_stream(self.stream)
-            finally:
-                await self.nc.drain()
+            # The stream is private to this test and the CI broker itself is
+            # disposable. Close immediately instead of waiting for the pull
+            # subscription's drain timeout; the job removes the broker after
+            # the suite, along with this in-memory test stream.
+            await self.nc.close()
         with self.store.transaction() as connection:
             connection.execute(
                 "DELETE FROM consumer_processed_event WHERE consumer=%s",
