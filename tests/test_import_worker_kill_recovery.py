@@ -25,24 +25,28 @@ class ImportWorkerKillRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         from geodata import GeoHandler
+        from geodata_store import GeodataStore
 
         import psycopg
         from psycopg.conninfo import conninfo_to_dict
 
-        cls.previous_dsn = GeoHandler.store.dsn
         cls.psycopg = psycopg
         cls.dsn = str(DATABASE_URL)
         if not conninfo_to_dict(cls.dsn).get("dbname", "").endswith("_tests"):
             raise RuntimeError(
                 "worker failure-injection requires an isolated *_tests DB"
             )
+        cls.test_store = GeodataStore()
+        cls.test_store.dsn = cls.dsn
+        cls.store_patch = patch.object(GeoHandler, "store", cls.test_store)
+        cls.store_patch.start()
 
     @classmethod
     def tearDownClass(cls) -> None:
         from geodata import GeoHandler
 
         GeoHandler.store.close()
-        GeoHandler.store.dsn = cls.previous_dsn
+        cls.store_patch.stop()
 
     def test_killed_worker_replays_committed_candidate_checkpoint(
         self,
