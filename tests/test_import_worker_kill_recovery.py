@@ -22,15 +22,25 @@ DATABASE_URL = os.environ.get("GEO_TEST_DATABASE_URL")
 class ImportWorkerKillRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        from geodata import GeoHandler
+
         import psycopg
         from psycopg.conninfo import conninfo_to_dict
 
+        cls.previous_dsn = GeoHandler.store.dsn
         cls.psycopg = psycopg
         cls.dsn = str(DATABASE_URL)
         if not conninfo_to_dict(cls.dsn).get("dbname", "").endswith("_tests"):
             raise RuntimeError(
                 "worker failure-injection requires an isolated *_tests DB"
             )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        from geodata import GeoHandler
+
+        GeoHandler.store.close()
+        GeoHandler.store.dsn = cls.previous_dsn
 
     def test_killed_worker_replays_committed_candidate_checkpoint(
         self,

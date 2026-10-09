@@ -59,6 +59,49 @@ from reverse_geocoder import (
 GEODATA_IMPORT_BUCKET = os.environ.get(
     "MYOTA_GEODATA_IMPORT_BUCKET", "myota-geodata-imports"
 )
+MAX_IMPORT_BATCH_BYTES = int(
+    os.environ.get("MYOTA_IMPORT_BATCH_BYTES", str(32 * 1024 * 1024))
+)
+MAX_IMPORT_BATCH_FEATURES = max(
+    1, int(os.environ.get("MYOTA_IMPORT_BATCH_SIZE", "100"))
+)
+
+
+def _bounded_import_batches(
+    features: Any,
+    *,
+    max_features: int = MAX_IMPORT_BATCH_FEATURES,
+    max_bytes: int = MAX_IMPORT_BATCH_BYTES,
+) -> Any:
+    """Yield feature batches bounded by both count and serialized bytes.
+
+    A single feature may exceed the batch byte budget, but decoders enforce a
+    separate per-feature ceiling. Such a feature is emitted alone so the
+    worker never combines several individually-large geometries in memory.
+    """
+    batch = []
+    batch_bytes = 0
+    for feature in features:
+        feature_bytes = len(
+            json.dumps(
+                feature, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        if batch and (
+            len(batch) >= max_features
+            or batch_bytes + feature_bytes > max_bytes
+        ):
+            yield batch
+            batch = []
+            batch_bytes = 0
+        batch.append(feature)
+        batch_bytes += feature_bytes
+        if len(batch) >= max_features or batch_bytes >= max_bytes:
+            yield batch
+            batch = []
+            batch_bytes = 0
+    if batch:
+        yield batch
 
 
 def _iter_import_content(
@@ -2421,9 +2464,6 @@ class GeoHandler(JsonHandler):
             if cancel_event.is_set():
                 raise ImportCancelled("preprocessing was cancelled")
             features = loader()
-            batch_size = max(
-                1, int(os.environ.get("MYOTA_IMPORT_BATCH_SIZE", "100"))
-            )
             snapshot_feature_count = None
             if body.get("completeSnapshot"):
                 # Preflight the bounded, replayable source so an over-limit
@@ -2443,7 +2483,6 @@ class GeoHandler(JsonHandler):
                     raise ValueError(
                         f"an import may contain at most {MAX_IMPORT_FEATURES} features"
                     )
-                batch_size = MAX_IMPORT_FEATURES
                 features = loader()
             aggregate: dict[str, Any] = {
                 "importRunId": run_id,
@@ -2462,7 +2501,27 @@ class GeoHandler(JsonHandler):
             feature_count = 0
             iterator = iter(features)
             try:
-                while batch := list(islice(iterator, batch_size)):
+                for batch in _bounded_import_batches(
+                    iterator,
+                    max_features=max(
+                        1,
+                        int(
+                            os.environ.get(
+                                "MYOTA_IMPORT_BATCH_SIZE",
+                                str(MAX_IMPORT_BATCH_FEATURES),
+                            )
+                        ),
+                    ),
+                    max_bytes=max(
+                        1,
+                        int(
+                            os.environ.get(
+                                "MYOTA_IMPORT_BATCH_BYTES",
+                                str(MAX_IMPORT_BATCH_BYTES),
+                            )
+                        ),
+                    ),
+                ):
                     if cancel_event.is_set():
                         raise ImportCancelled("preprocessing was cancelled")
                     feature_count += len(batch)
