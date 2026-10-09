@@ -25,6 +25,9 @@ ACK_WAIT_SECONDS = int(
     os.environ.get("GEODATA_WORKER_ACK_WAIT_SECONDS", "120")
 )
 MAX_ACK_PENDING = int(os.environ.get("GEODATA_WORKER_MAX_ACK_PENDING", "1"))
+RETRY_DELAY_SECONDS = int(
+    os.environ.get("GEODATA_WORKER_RETRY_DELAY_SECONDS", "5")
+)
 CANCELLATION_RECONCILE_SECONDS = int(
     os.environ.get("GEODATA_CANCELLATION_RECONCILE_SECONDS", "30")
 )
@@ -296,7 +299,11 @@ async def _consume(
                         "event processing failed; NAK for retry: %s", error
                     )
                     await message.nak(
-                        delay=min(5 * metadata.num_delivered, 60)
+                        delay=min(
+                            max(0, RETRY_DELAY_SECONDS)
+                            * metadata.num_delivered,
+                            60,
+                        )
                     )
     await subscription.unsubscribe()
 

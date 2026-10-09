@@ -52,9 +52,21 @@ jobs:
           done
       - run: python -m ruff format --check .
       - run: python -m ruff check .
+      - name: Start disposable JetStream for worker ACK/recovery tests
+        run: |
+          docker run --detach --name myota-test-nats --publish 4222:4222 nats:2.11-alpine -js
+          for attempt in $(seq 1 30); do
+            if nc -z 127.0.0.1 4222; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs myota-test-nats
+          exit 1
       - name: Test two independent API instances and all regressions
         env:
           MYOTA_AUTH_SIGNING_KEY: isolated-ci-test-key
+          MYOTA_NATS_TEST_URL: nats://127.0.0.1:4222
           GEO_TEST_API_A_URL: http://127.0.0.1:18003
           GEO_TEST_API_B_URL: http://127.0.0.1:18013
         run: |
@@ -70,6 +82,9 @@ jobs:
             sleep 1
           done
           python -m unittest discover -s tests
+      - name: Remove disposable JetStream broker
+        if: always()
+        run: docker rm --force myota-test-nats || true
 
   test-upload-session-recovery:
     runs-on: ubuntu-latest

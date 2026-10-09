@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -57,16 +58,13 @@ class ImportWorkerKillRecoveryTests(unittest.TestCase):
             "entityTypes": ["TEST_PARK"],
         }
         GeoHandler.store.hydrate()
-        with GeoHandler.store.operation(write=True):
-            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {
-                "id": run_id,
-                "adapter": "MANUAL",
-                "status": "QUEUED",
-                "source": body["source"],
-                "entityType": "TEST_PARK",
-                "entityTypes": ["TEST_PARK"],
-                "format": "GEOJSON",
-            }
+        with self.psycopg.connect(self.dsn) as connection:
+            connection.execute("SET LOCAL myota.geodata_writer = 'row-v1'")
+            connection.execute(
+                "INSERT INTO import_run(id, adapter_code, source_metadata, status) "
+                "VALUES (%s, 'MANUAL', %s::jsonb, 'QUEUED')",
+                (run_id, json.dumps({"source": body["source"]})),
+            )
 
         with tempfile.TemporaryDirectory(prefix="myota-worker-kill-") as tmp:
             marker = Path(tmp) / "checkpoint-reached"
@@ -203,16 +201,25 @@ if not GeoHandler._process_import_run(run_id, body, loader):
         GeoHandler.store.dsn = self.dsn
         GeoHandler.store.hydrate()
         run_id = str(uuid.uuid4())
-        with GeoHandler.store.operation(write=True):
-            GeoHandler.store.data.setdefault("importRuns", {})[run_id] = {
-                "id": run_id,
-                "adapter": "MANUAL",
-                "status": "QUEUED",
-                "source": {"name": "isolated concurrent-claim fixture"},
-                "entityType": "TEST_PARK",
-                "entityTypes": ["TEST_PARK"],
-                "format": "GEOJSON",
-            }
+        with self.psycopg.connect(self.dsn) as connection:
+            connection.execute("SET LOCAL myota.geodata_writer = 'row-v1'")
+            connection.execute(
+                "INSERT INTO import_run(id, adapter_code, source_metadata, status) "
+                "VALUES (%s, 'MANUAL', %s::jsonb, 'QUEUED')",
+                (
+                    run_id,
+                    json.dumps(
+                        {
+                            "source": {
+                                "name": "isolated concurrent-claim fixture"
+                            },
+                            "entityType": "TEST_PARK",
+                            "entityTypes": ["TEST_PARK"],
+                            "format": "GEOJSON",
+                        }
+                    ),
+                ),
+            )
 
         child = r"""
 import sys, time
