@@ -148,6 +148,28 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled.num_ack_pending, 0)
         self.assertEqual(settled.num_pending, 0)
 
+    async def test_shutdown_drains_active_handler_before_acknowledging(
+        self,
+    ) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(_event: dict[str, str]) -> None:
+            started.set()
+            await release.wait()
+
+        await self._start_consumer(handler)
+        await self.js.publish(self.subject, json.dumps(self._event()).encode())
+        await asyncio.wait_for(started.wait(), timeout=10)
+
+        self.stop_event.set()
+        release.set()
+        await asyncio.wait_for(self.tasks[0], timeout=10)
+
+        settled = await self.js.consumer_info(self.stream, self.consumer)
+        self.assertEqual(settled.num_ack_pending, 0)
+        self.assertEqual(settled.num_pending, 0)
+
     async def test_redelivery_after_commit_before_ack_is_idempotent(
         self,
     ) -> None:

@@ -10,12 +10,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import struct
 import tempfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Iterator
+from xml.parsers import expat
 from xml.etree import ElementTree
 
 
@@ -184,6 +186,7 @@ def _validate_shapefile_records(
 
 
 def _iter_kml(path: Path) -> Iterator[dict[str, Any]]:
+    _validate_streaming_xml(path, {"Placemark"})
     stack: list[ElementTree.Element] = []
     for event, element in ElementTree.iterparse(path, events=("start", "end")):
         if event == "start":
@@ -212,6 +215,7 @@ def _iter_kml(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def _iter_gpx(path: Path) -> Iterator[dict[str, Any]]:
+    _validate_streaming_xml(path, {"wpt", "rtept", "trkseg"})
     stack: list[ElementTree.Element] = []
     segment_points: list[list[float]] | None = None
     segment_bytes = 0
@@ -282,6 +286,64 @@ def _iter_gpx(path: Path) -> Iterator[dict[str, Any]]:
             stack.pop()
 
 
+def _validate_streaming_xml(path: Path, feature_tags: set[str]) -> None:
+    """Bound XML feature allocation before ElementTree builds feature nodes."""
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    feature_stack: list[dict[str, int]] = []
+
+    def reject_doctype(*_args: Any) -> None:
+        raise ValueError("XML imports must not contain a document type")
+
+    def start_element(name: str, attributes: dict[str, str]) -> None:
+        local_name = name.rsplit("}", 1)[-1]
+        markup_bytes = len(name.encode("utf-8")) + sum(
+            len(key.encode("utf-8")) + len(value.encode("utf-8"))
+            for key, value in attributes.items()
+        )
+        if feature_stack:
+            feature_stack[-1]["bytes"] += markup_bytes
+            feature_stack[-1]["nodes"] += 1
+        if local_name in feature_tags:
+            feature_stack.append({"bytes": markup_bytes, "nodes": 1})
+        if feature_stack:
+            _check_xml_feature_limits(feature_stack[-1])
+
+    def character_data(value: str) -> None:
+        if feature_stack:
+            feature_stack[-1]["bytes"] += len(value.encode("utf-8"))
+            _check_xml_feature_limits(feature_stack[-1])
+
+    def end_element(name: str) -> None:
+        if name.rsplit("}", 1)[-1] in feature_tags:
+            feature_stack.pop()
+
+    parser.StartDoctypeDeclHandler = reject_doctype
+    parser.StartElementHandler = start_element
+    parser.CharacterDataHandler = character_data
+    parser.EndElementHandler = end_element
+    try:
+        with path.open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                parser.Parse(chunk, False)
+            parser.Parse(b"", True)
+    except expat.ExpatError as error:
+        raise ValueError(f"invalid XML source: {error}") from error
+
+
+def _check_xml_feature_limits(feature: dict[str, int]) -> None:
+    if feature["bytes"] > MAX_STREAMED_FEATURE_BYTES:
+        raise ValueError(
+            "an XML feature exceeds the configured decoded-size limit "
+            f"({MAX_STREAMED_FEATURE_BYTES} bytes)"
+        )
+    if feature["nodes"] > MAX_STREAMED_FEATURE_VERTICES:
+        raise ValueError(
+            "an XML feature exceeds the configured element-count limit "
+            f"({MAX_STREAMED_FEATURE_VERTICES})"
+        )
+
+
 def _iter_shapefile(path: Path, filename: str) -> Iterator[dict[str, Any]]:
     try:
         import shapefile
@@ -320,13 +382,22 @@ def _iter_shapefile(path: Path, filename: str) -> Iterator[dict[str, Any]]:
             source_crs = archive.read(prj_name).decode("utf-8", "replace")
         with archive.open(shp_name) as shp_stream:
             _validate_shapefile_records(shp_stream)
-        with (
-            archive.open(shp_name) as shp_stream,
-            archive.open(shx_name) as shx_stream,
-            archive.open(dbf_name) as dbf_stream,
-        ):
+        with tempfile.TemporaryDirectory(prefix="myota-shapefile-") as tmp:
+            scratch = Path(tmp)
+            local_members = {}
+            for member in (shp_name, shx_name, dbf_name):
+                local_path = scratch / PurePosixPath(member).name
+                with (
+                    archive.open(member) as source,
+                    local_path.open("wb") as destination,
+                ):
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                local_members[member] = local_path
+
             reader = shapefile.Reader(
-                shp=shp_stream, shx=shx_stream, dbf=dbf_stream
+                str(local_members[shp_name]),
+                str(local_members[shx_name]),
+                str(local_members[dbf_name]),
             )
             fields = [field[0] for field in reader.fields[1:]]
             for shape_record in reader.iterShapeRecords():
@@ -389,6 +460,22 @@ def _iter_osm_pbf(path: Path) -> Iterator[dict[str, Any]]:
             if item.is_area():
                 if not any(pair in area_values for pair in tags.items()):
                     continue
+                vertices = 0
+                for outer_ring in item.outer_rings():
+                    vertices += len(outer_ring)
+                    if vertices > MAX_STREAMED_FEATURE_VERTICES:
+                        break
+                    vertices += sum(
+                        len(inner_ring)
+                        for inner_ring in item.inner_rings(outer_ring)
+                    )
+                    if vertices > MAX_STREAMED_FEATURE_VERTICES:
+                        break
+                if vertices > MAX_STREAMED_FEATURE_VERTICES:
+                    raise ValueError(
+                        "an OSM area exceeds the configured vertex limit "
+                        f"({MAX_STREAMED_FEATURE_VERTICES})"
+                    )
                 geometry = json.loads(factory.create_multipolygon(item))
                 area_type = "way" if item.from_way() else "relation"
                 yield make_feature(area_type, item.orig_id(), tags, geometry)
@@ -691,8 +778,16 @@ def iter_uploaded_file(
                 feature_size = 0
             if builder is None:
                 continue
-            feature_size += len(event_prefix.encode("utf-8")) + 8
-            if value is not None:
+            # Count the event's actual key/value bytes plus conservative JSON
+            # structure overhead. Repeating the full ijson prefix for every
+            # coordinate grossly over-counts large LineStrings and rejects
+            # valid features well below the configured decoded-size ceiling.
+            feature_size += 8
+            if event == "map_key":
+                feature_size += len(
+                    json.dumps(value, ensure_ascii=False).encode("utf-8")
+                )
+            elif value is not None:
                 feature_size += len(
                     json.dumps(value, ensure_ascii=False).encode("utf-8")
                 )
@@ -709,6 +804,7 @@ def iter_uploaded_file(
                 _check_vertex_count(feature.get("geometry"))
                 if document_crs and isinstance(feature, dict):
                     feature.setdefault("crs", document_crs)
+                _check_feature_size(feature)
                 yield feature
         if found:
             return
