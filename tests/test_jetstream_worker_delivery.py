@@ -10,10 +10,15 @@ import uuid
 from unittest.mock import patch
 
 from nats.aio.msg import Msg
-from nats.js.api import StorageType, StreamConfig
+from nats.js.api import AckPolicy, ConsumerConfig, StorageType, StreamConfig
 
 from geodata import GeoHandler
-from geodata_import_worker import _consume
+from geodata_import_worker import (
+    ACK_WAIT_SECONDS,
+    MAX_ACK_PENDING,
+    MAX_DELIVERIES,
+    _consume,
+)
 from geodata_store import GeodataStore
 
 
@@ -48,6 +53,17 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 subjects=[self.subject],
                 storage=StorageType.MEMORY,
             )
+        )
+        await self.js.add_consumer(
+            self.stream,
+            config=ConsumerConfig(
+                durable_name=self.consumer,
+                filter_subject=self.subject,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=ACK_WAIT_SECONDS,
+                max_deliver=MAX_DELIVERIES,
+                max_ack_pending=MAX_ACK_PENDING,
+            ),
         )
         self.stop_event = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
@@ -94,9 +110,9 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        await asyncio.wait_for(
-            self.js.consumer_info(self.stream, self.consumer), timeout=10
-        )
+        await asyncio.sleep(0)
+        if self.tasks[-1].done():
+            self.tasks[-1].result()
 
     async def test_ack_pending_clears_after_handler_success(self) -> None:
         started = asyncio.Event()
