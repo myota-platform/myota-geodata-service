@@ -3355,6 +3355,11 @@ class GeoHandler(JsonHandler):
                     # projection (+00:00 rather than the API's Z suffix) so
                     # the subsequent optimistic merge sees the same value.
                     processed_at = updated_run[0].isoformat()
+                    # The terminal status was written directly above in this
+                    # transaction. Refresh the row baseline before persisting
+                    # its audit event so a stale projection cannot conflict on
+                    # processedAt under concurrent request/worker activity.
+                    run = GeoHandler.store.refresh_import_run(run_id)
         for candidate_id in sorted(set(candidate_ids)):
             candidates.pop(candidate_id, None)
             GeoHandler.store.mark_import_candidate_deleted(candidate_id)
