@@ -18,6 +18,8 @@ from geodata_import_worker import (
     MAX_ACK_PENDING,
     MAX_DELIVERIES,
     _consume,
+    _event_key,
+    _recover_expired_work_dispatches,
 )
 from geodata_store import GeodataStore
 
@@ -95,9 +97,132 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     def _event(self) -> dict[str, str]:
         return {
-            "eventId": str(uuid.uuid4()),
-            "eventType": "geodata.test.delivery.v1",
+            "envelopeVersion": 1,
+            "workId": str(uuid.uuid4()),
+            "workType": "geodata.test.delivery.v1",
+            "createdAt": "2026-10-10T12:00:00Z",
+            "producer": "geodata",
+            "payload": {},
         }
+
+    def test_work_envelope_uses_stable_work_id_and_type(self) -> None:
+        message = self._event()
+        self.assertEqual(
+            _event_key(message), (message["workId"], message["workType"])
+        )
+
+    def test_stale_owner_rows_recreate_commands_through_outbox_once(
+        self,
+    ) -> None:
+        import_id = str(uuid.uuid4())
+        queue_id = str(uuid.uuid4())
+        deletion_id = str(uuid.uuid4())
+        entity_id = str(uuid.uuid4())
+        entity_type_id = str(uuid.uuid4())
+        programme_id = str(uuid.uuid4())
+        with self.store.transaction() as connection:
+            connection.execute(
+                "INSERT INTO import_run(id,adapter_code,source_metadata,status,"
+                "work_dispatched_at) VALUES (%s,'MANUAL','{}'::jsonb,'PROCESSING',"
+                "now()-interval '10 minutes')",
+                (import_id,),
+            )
+            connection.execute(
+                "INSERT INTO geodata_import_processing_queue(id,import_run_id,"
+                "candidate_ids,target_status,requested_by,status,lease_until,"
+                "work_dispatched_at) VALUES (%s,%s,'[]'::jsonb,'CANDIDATE',"
+                "'phase5-test','PROCESSING',NULL,now()-interval '10 minutes')",
+                (queue_id, import_id),
+            )
+            connection.execute(
+                "INSERT INTO geodata_control_record(kind,id,payload,updated_at) "
+                "VALUES ('entityDeletionJobs',%s,%s::jsonb,now()-interval '10 minutes')",
+                (
+                    deletion_id,
+                    json.dumps(
+                        {
+                            "status": "PROCESSING",
+                            "leaseUntil": "2026-10-10T00:00:00Z",
+                        }
+                    ),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO entity_type(id,programme_id,code,label,geometry_kind) "
+                "VALUES (%s,%s,'PHASE5_TEST','Phase 5 test','POINT')",
+                (entity_type_id, programme_id),
+            )
+            connection.execute(
+                "INSERT INTO geodata_entity(id,programme_id,entity_type_id,name,geom,"
+                "public_properties,location_work_dispatched_at) "
+                "VALUES (%s,%s,%s,'Phase 5 test',"
+                "ST_SetSRID(ST_MakePoint(-5.99,37.39),4326),%s::jsonb,"
+                "now()-interval '10 minutes')",
+                (
+                    entity_id,
+                    programme_id,
+                    entity_type_id,
+                    json.dumps(
+                        {
+                            "locationEnrichmentRequestId": str(uuid.uuid4()),
+                            "locationEnrichmentGeometryHash": "a" * 64,
+                            "locationEnrichmentStatus": "QUEUED",
+                            "locationEnrichmentOnlyMissing": True,
+                            "locationEnrichmentReason": "PHASE5_TEST",
+                        }
+                    ),
+                ),
+            )
+
+        recovered = _recover_expired_work_dispatches()
+        self.assertEqual(
+            recovered,
+            {"preprocessing": 1, "promotion": 1, "deletion": 1, "location": 1},
+        )
+        self.assertEqual(
+            _recover_expired_work_dispatches(),
+            {"preprocessing": 0, "promotion": 0, "deletion": 0, "location": 0},
+        )
+        with self.store.transaction() as connection:
+            rows = connection.execute(
+                "SELECT event_type,aggregate_id,payload FROM outbox_event "
+                "WHERE aggregate_id = ANY(%s)",
+                ([import_id, queue_id, deletion_id, entity_id],),
+            ).fetchall()
+            self.assertEqual(len(rows), 4)
+            by_type = {row[0]: (row[1], row[2]) for row in rows}
+            self.assertEqual(
+                by_type["geodata.import.recovered.v1"][1]["importRunId"],
+                import_id,
+            )
+            self.assertEqual(
+                by_type["geodata.import.processing.recovered.v1"][1][
+                    "queueId"
+                ],
+                queue_id,
+            )
+            location = by_type[
+                "geodata.entity.location-enrichment-requested.v1"
+            ][1]
+            self.assertEqual(location["geometryHash"], "a" * 64)
+            self.assertEqual(location["reason"], "PHASE5_TEST")
+            connection.execute(
+                "DELETE FROM outbox_event WHERE aggregate_id = ANY(%s)",
+                ([import_id, queue_id, deletion_id, entity_id],),
+            )
+            connection.execute(
+                "DELETE FROM geodata_control_record WHERE kind=%s AND id=%s",
+                ("entityDeletionJobs", deletion_id),
+            )
+            connection.execute(
+                "DELETE FROM geodata_entity WHERE id=%s", (entity_id,)
+            )
+            connection.execute(
+                "DELETE FROM entity_type WHERE id=%s", (entity_type_id,)
+            )
+            connection.execute(
+                "DELETE FROM import_run WHERE id=%s", (import_id,)
+            )
 
     async def _start_consumer(self, handler) -> None:
         self.tasks.append(

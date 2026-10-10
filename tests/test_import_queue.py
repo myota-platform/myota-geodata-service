@@ -571,7 +571,7 @@ class ImportQueueTests(unittest.TestCase):
                     "OSM_PBF", source_path, "import.geojson"
                 )
 
-    def test_startup_recovery_requeues_processing_runs_before_dispatch(self):
+    def test_startup_recovery_requeues_processing_runs_through_outbox(self):
         run_id = "run-startup-recovery"
         GeoHandler.store.data["importRuns"] = {
             run_id: {
@@ -606,6 +606,7 @@ class ImportQueueTests(unittest.TestCase):
             ),
             patch.object(GeoHandler.store, "persist") as persist,
             patch.object(GeoHandler.import_executor, "submit") as submit,
+            patch.object(GeoHandler.store, "event") as event,
         ):
             GeoHandler.recover_import_runs()
         self.assertEqual(
@@ -614,7 +615,16 @@ class ImportQueueTests(unittest.TestCase):
         self.assertIsNone(
             GeoHandler.store.data["importRuns"][run_id]["leaseUntil"]
         )
-        submit.assert_called_once_with(GeoHandler._recover_import_run, run_id)
+        submit.assert_not_called()
+        event.assert_called_once_with(
+            "geodata.import.recovered.v1",
+            "import_run",
+            run_id,
+            {
+                "importRunId": run_id,
+                "natsSubject": "myota.geodata.import.preprocess.v1",
+            },
+        )
         persist.assert_called_once_with(include_import_state=True)
 
     def test_import_history_returns_newest_runs_first(self):

@@ -610,6 +610,33 @@ class RowRepository:
                             (kind, key),
                         )
             for event in scope.events:
+                event_type = event["eventType"]
+                aggregate_id = event["aggregate"]["id"]
+                if event_type in {
+                    "geodata.import.queued.v1",
+                    "geodata.import.recovered.v1",
+                }:
+                    connection.execute(
+                        "UPDATE import_run SET work_dispatched_at=now() WHERE id=%s",
+                        (aggregate_id,),
+                    )
+                elif event_type in {
+                    "geodata.import.processing.queued.v1",
+                    "geodata.import.processing.recovered.v1",
+                }:
+                    connection.execute(
+                        "UPDATE geodata_import_processing_queue "
+                        "SET work_dispatched_at=now() WHERE id=%s",
+                        (aggregate_id,),
+                    )
+                elif event_type == (
+                    "geodata.entity.location-enrichment-requested.v1"
+                ):
+                    connection.execute(
+                        "UPDATE geodata_entity "
+                        "SET location_work_dispatched_at=now() WHERE id=%s",
+                        (aggregate_id,),
+                    )
                 if ("entities", event["aggregate"]["id"]) not in scope.deleted:
                     connection.execute(
                         "INSERT INTO geodata_audit_event(event_id,aggregate_type,"

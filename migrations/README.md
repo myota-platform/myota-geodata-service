@@ -56,6 +56,10 @@ ordered SQL files define the `myota_geo` database:
 20. `020_outbox_dead_letter_redrive.sql` adds resolution state and an audit
     trail for operator-approved redrives. Redrive keeps the original dead-letter
     evidence and republishes from the retained outbox row with its stable event ID.
+21. `021_jetstream_work_recovery.sql` records bounded redispatch timestamps for
+    import runs, promotion queues, and location-enrichment work. A repair loop
+    can restore expired work through the transactional outbox without executing
+    work outside its JetStream durable.
 
 The platform migration runner applies every numbered `geo/NNN_*.sql` file in
 lexical order. Additions to this directory are therefore included in the next
