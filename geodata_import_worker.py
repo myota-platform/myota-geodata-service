@@ -391,7 +391,7 @@ async def _with_ack_heartbeat(
 ) -> None:
     async def heartbeat() -> None:
         while True:
-            await asyncio.sleep(max(15, ACK_WAIT_SECONDS // 3))
+            await asyncio.sleep(max(1, ACK_WAIT_SECONDS // 3))
             await message.in_progress()
 
     task = asyncio.create_task(heartbeat())

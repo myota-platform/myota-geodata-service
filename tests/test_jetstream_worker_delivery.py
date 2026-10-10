@@ -10,7 +10,13 @@ import uuid
 from unittest.mock import patch
 
 from nats.aio.msg import Msg
-from nats.js.api import AckPolicy, ConsumerConfig, StorageType, StreamConfig
+from nats.js.api import (
+    AckPolicy,
+    ConsumerConfig,
+    RetentionPolicy,
+    StorageType,
+    StreamConfig,
+)
 
 from geodata import GeoHandler
 from geodata_import_worker import (
@@ -54,6 +60,7 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 name=self.stream,
                 subjects=[self.subject],
                 storage=StorageType.MEMORY,
+                retention=RetentionPolicy.WORK_QUEUE,
             )
         )
         await self.js.add_consumer(
@@ -272,6 +279,130 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         settled = await self.js.consumer_info(self.stream, self.consumer)
         self.assertEqual(settled.num_ack_pending, 0)
         self.assertEqual(settled.num_pending, 0)
+
+    async def test_database_outage_naks_and_recovers_without_false_ack(
+        self,
+    ) -> None:
+        calls = 0
+        acked = asyncio.Event()
+        original_ack = Msg.ack
+
+        async def handler(_event: dict[str, str]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("simulated transient database outage")
+
+        async def tracked_ack(message: Msg, *args, **kwargs):
+            result = await original_ack(message, *args, **kwargs)
+            acked.set()
+            return result
+
+        with patch.object(Msg, "ack", tracked_ack):
+            with patch("geodata_import_worker.RETRY_DELAY_SECONDS", 0):
+                await self._start_consumer(handler)
+                await self.js.publish(
+                    self.subject, json.dumps(self._event()).encode()
+                )
+                await asyncio.wait_for(acked.wait(), timeout=10)
+
+        self.assertEqual(calls, 2)
+        info = await self.js.consumer_info(self.stream, self.consumer)
+        self.assertEqual(info.num_ack_pending, 0)
+        self.assertEqual(info.num_pending, 0)
+
+    async def test_long_handler_heartbeats_past_ack_wait(self) -> None:
+        started = asyncio.Event()
+        acked = asyncio.Event()
+        original_ack = Msg.ack
+
+        async def handler(_event: dict[str, str]) -> None:
+            started.set()
+            await asyncio.sleep(2.2)
+
+        async def tracked_ack(message: Msg, *args, **kwargs):
+            result = await original_ack(message, *args, **kwargs)
+            acked.set()
+            return result
+
+        await self.js.delete_consumer(self.stream, self.consumer)
+        await self.js.add_consumer(
+            self.stream,
+            config=ConsumerConfig(
+                durable_name=self.consumer,
+                filter_subject=self.subject,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=1.5,
+                max_deliver=MAX_DELIVERIES,
+                max_ack_pending=MAX_ACK_PENDING,
+            ),
+        )
+        with patch("geodata_import_worker.ACK_WAIT_SECONDS", 3):
+            with patch.object(Msg, "ack", tracked_ack):
+                await self._start_consumer(handler)
+                await self.js.publish(
+                    self.subject, json.dumps(self._event()).encode()
+                )
+                await asyncio.wait_for(started.wait(), timeout=10)
+                await asyncio.sleep(1.2)
+                info = await self.js.consumer_info(self.stream, self.consumer)
+                self.assertEqual(info.num_ack_pending, 1)
+                self.assertEqual(info.num_redelivered, 0)
+                await asyncio.wait_for(acked.wait(), timeout=10)
+
+        settled = await self.js.consumer_info(self.stream, self.consumer)
+        self.assertEqual(settled.num_ack_pending, 0)
+        self.assertEqual(settled.num_redelivered, 0)
+
+    async def test_deleting_and_recreating_durable_preserves_unacked_work(
+        self,
+    ) -> None:
+        event = self._event()
+        await self.js.publish(self.subject, json.dumps(event).encode())
+        await self.js.delete_consumer(self.stream, self.consumer)
+        await self.js.add_consumer(
+            self.stream,
+            config=ConsumerConfig(
+                durable_name=self.consumer,
+                filter_subject=self.subject,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=ACK_WAIT_SECONDS,
+                max_deliver=MAX_DELIVERIES,
+                max_ack_pending=MAX_ACK_PENDING,
+            ),
+        )
+        received = asyncio.Event()
+
+        async def handler(actual: dict[str, str]) -> None:
+            self.assertEqual(actual["workId"], event["workId"])
+            received.set()
+
+        await self._start_consumer(handler)
+        await asyncio.wait_for(received.wait(), timeout=10)
+        for _ in range(40):
+            info = await self.js.consumer_info(self.stream, self.consumer)
+            if not info.num_pending and not info.num_ack_pending:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(info.num_pending, 0)
+        self.assertEqual(info.num_ack_pending, 0)
+
+    async def test_stream_age_expiry_removes_stale_unacked_command(
+        self,
+    ) -> None:
+        await self.js.update_stream(
+            config=StreamConfig(
+                name=self.stream,
+                subjects=[self.subject],
+                storage=StorageType.MEMORY,
+                retention=RetentionPolicy.WORK_QUEUE,
+                max_age=1,
+            )
+        )
+        await self.js.publish(self.subject, json.dumps(self._event()).encode())
+        await asyncio.sleep(1.3)
+        info = await self.js.stream_info(self.stream)
+        self.assertEqual(info.state.messages, 0)
 
     async def test_shutdown_drains_active_handler_before_acknowledging(
         self,
