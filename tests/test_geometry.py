@@ -528,6 +528,43 @@ class GeometryWayTests(unittest.TestCase):
             "database-deletion-job"
         )
 
+    def test_partial_cascade_failure_remains_retryable(self):
+        job = {
+            "id": "partial-cascade-job",
+            "entityId": "entity-1",
+            "requestedBy": "admin",
+            "status": "QUEUED",
+        }
+        GeoHandler.store.data["entityDeletionJobs"] = {
+            job["id"]: job,
+        }
+        with patch.object(
+            GeoHandler, "_activity_request", return_value={"qsoCount": 1}
+        ):
+            with patch.object(
+                GeoHandler,
+                "delete_entity",
+                side_effect=RuntimeError("temporary geodata database error"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "temporary geodata database error"
+                ):
+                    GeoHandler._execute_deletion_job(job["id"])
+
+        self.assertEqual(job["status"], "PROCESSING")
+        self.assertIn("leaseUntil", job)
+        self.assertIn("temporary geodata database error", job["lastError"])
+
+        job["status"] = "QUEUED"
+        with patch.object(
+            GeoHandler, "_activity_request", return_value={"qsoCount": 1}
+        ):
+            with patch.object(
+                GeoHandler, "delete_entity", return_value={"deleted": True}
+            ):
+                self.assertTrue(GeoHandler._execute_deletion_job(job["id"]))
+        self.assertEqual(job["status"], "COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()
