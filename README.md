@@ -10,6 +10,23 @@ programme-independent and first enter durable pre-processing; administrator
 promotion chooses CANDIDATE or APPROVED while programme eligibility remains a
 separate decision.
 
+## NATS JetStream Phase 5 — 10 October 2026
+
+The four Geodata work consumers now use `MYOTA_GEODATA_WORK` and their exact
+pull subjects/durables. PostgreSQL remains the authority for accepted work,
+leases, checkpoints, outbox rows and replay. Migration 021 adds dispatch
+timestamps and recovery indexes; these remain required and are not candidates
+for pruning. A partial Activity cascade followed by a Geodata failure now keeps
+an expired lease and NAKs the work, allowing retry and bounded database repair.
+
+The live cutover and its limits are documented in the
+[Phase 5 evidence](https://github.com/myota-platform/myota-docs/blob/main/docs/operations/messaging/evidence/phase5-geodata-work-2026-10-10.md)
+and [NATS migration plan](https://github.com/myota-platform/myota-docs/blob/main/docs/operations/messaging/nats-event-migration-plan.md).
+The old four Geodata durable definitions remain inactive and empty through the
+24-hour rollback observation; no production work was injected. Two-database
+cross-service failure, cancellation-race, expiry-to-completion, and final
+durable retirement evidence remain open.
+
 ## What works now
 
 - Phase 1 geodata state is database-authoritative: request-scoped row
