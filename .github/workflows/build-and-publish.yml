@@ -171,4 +171,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/myota-platform/myota-geodata-service:latest
+          tags: |
+            ghcr.io/myota-platform/myota-geodata-service:latest
+            ghcr.io/myota-platform/myota-geodata-service:sha-${{ github.sha }}
