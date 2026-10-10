@@ -77,7 +77,9 @@ def _purge_run(connection: Any, run_id: str, retention_days: int) -> bool:
     event_rows = connection.execute(
         "SELECT event_id FROM outbox_event WHERE aggregate_type = 'import_run' "
         "AND aggregate_id = %s AND published_at IS NOT NULL "
-        "AND occurred_at < now() - (%s * interval '1 day')",
+        "AND occurred_at < now() - (%s * interval '1 day') "
+        "AND NOT EXISTS (SELECT 1 FROM dead_letter_event AS d "
+        "WHERE d.event_id = outbox_event.event_id AND d.resolved_at IS NULL)",
         (run_id, retention_days),
     ).fetchall()
     event_ids = [row[0] for row in event_rows]

@@ -53,6 +53,9 @@ ordered SQL files define the `myota_geo` database:
 19. `019_maidenhead_locators.sql` adds sorted four- and six-character
     Maidenhead cell arrays, backfills existing entities, and recalculates the
     arrays automatically whenever an entity geometry changes.
+20. `020_outbox_dead_letter_redrive.sql` adds resolution state and an audit
+    trail for operator-approved redrives. Redrive keeps the original dead-letter
+    evidence and republishes from the retained outbox row with its stable event ID.
 
 The platform migration runner applies every numbered `geo/NNN_*.sql` file in
 lexical order. Additions to this directory are therefore included in the next

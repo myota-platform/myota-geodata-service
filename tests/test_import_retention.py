@@ -139,6 +139,7 @@ class ImportRetentionTests(unittest.TestCase):
                     assert "FOR UPDATE" in query
                     return Cursor([("run-1",)])
                 if query.startswith("SELECT event_id FROM outbox_event"):
+                    assert "d.resolved_at IS NULL" in query
                     return Cursor()
                 if query.startswith("DELETE FROM import_run"):
                     assert "status = 'PROCESSED'" in query
