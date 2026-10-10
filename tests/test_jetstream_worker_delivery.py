@@ -9,6 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+import psycopg
 from nats.aio.msg import Msg
 from nats.js.api import (
     AckPolicy,
@@ -280,7 +281,7 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled.num_ack_pending, 0)
         self.assertEqual(settled.num_pending, 0)
 
-    async def test_database_outage_naks_and_recovers_without_false_ack(
+    async def test_database_connection_failure_naks_and_recovers_without_false_ack(
         self,
     ) -> None:
         calls = 0
@@ -290,8 +291,16 @@ class JetStreamWorkerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         async def handler(_event: dict[str, str]) -> None:
             nonlocal calls
             calls += 1
-            if calls == 1:
-                raise RuntimeError("simulated transient database outage")
+            dsn = (
+                "postgresql://127.0.0.1:1/unavailable"
+                if calls == 1
+                else str(DATABASE_URL)
+            )
+            connection = psycopg.connect(dsn, connect_timeout=1)
+            try:
+                connection.execute("SELECT 1").fetchone()
+            finally:
+                connection.close()
 
         async def tracked_ack(message: Msg, *args, **kwargs):
             result = await original_ack(message, *args, **kwargs)
