@@ -5246,6 +5246,7 @@ class GeoHandler(JsonHandler):
         p = p or {}
         job.update({"status": "PROCESSING", "updatedAt": now()})
         GeoHandler.store.persist()
+        retry_error = None
         try:
             cascade = GeoHandler._activity_request(
                 p,
@@ -5289,22 +5290,23 @@ class GeoHandler(JsonHandler):
                     if key != "executionClaims"
                 },
             )
-        except Exception as exc:  # pragma: no cover - exercised by service integration failures
+        except Exception as exc:
             GeoHandler.store.rollback_pending()
             job.update(
-                {"status": "FAILED", "error": str(exc), "updatedAt": now()}
-            )
-            GeoHandler.store.event(
-                "geodata.entity-deletion-job.failed.v1",
-                "entity_deletion_job",
-                job_id,
                 {
-                    key: value
-                    for key, value in job.items()
-                    if key != "executionClaims"
-                },
+                    "status": "PROCESSING",
+                    "leaseUntil": now(),
+                    "lastError": str(exc),
+                    "updatedAt": now(),
+                }
             )
+            retry_error = exc
         GeoHandler.store.persist()
+        if retry_error:
+            # Leave a durable, expired lease for the bounded database repair
+            # loop and NAK this delivery. The Activity cascade is idempotent,
+            # so a retry can safely finish the Geodata half of the operation.
+            raise retry_error
         return True
 
     @staticmethod
