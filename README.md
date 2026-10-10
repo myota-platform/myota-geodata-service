@@ -22,10 +22,11 @@ an expired lease and NAKs the work, allowing retry and bounded database repair.
 The live cutover and its limits are documented in the
 [Phase 5 evidence](https://github.com/myota-platform/myota-docs/blob/main/docs/operations/messaging/evidence/phase5-geodata-work-2026-10-10.md)
 and [NATS migration plan](https://github.com/myota-platform/myota-docs/blob/main/docs/operations/messaging/nats-event-migration-plan.md).
-The old four Geodata durable definitions remain inactive and empty through the
-24-hour rollback observation; no production work was injected. Two-database
-cross-service failure, cancellation-race, expiry-to-completion, and final
-durable retirement evidence remain open.
+The four legacy Geodata durable definitions were retired after final checks of
+replacement filters, backlog, migration markers, recovery age, and Fleet
+readiness. The user waived the 24-hour elapsed-time requirement; the evidence
+record describes the shorter interval and does not claim a full-day
+observation. The durable retirement is complete within that waiver.
 
 ## What works now
 
@@ -95,8 +96,8 @@ the later streaming, memory-capacity, and rollout qualification gates.
 
 The `/metrics` endpoint exposes durable entity, geometry, category, import,
 pre-processing, PostgreSQL pool/activity, lock-wait and outbox metrics, plus
-timed PostGIS bounding-box and entity-upsert queries and broker-sourced
-JetStream consumer backlog. With
+timed PostGIS bounding-box and entity-upsert queries. NATS server and
+JetStream telemetry is collected centrally by NATS Surveyor. With
 `MYOTA_OTEL_ENABLED=1`, HTTP request rate/latency, active requests, request body
 size, and per-process CPU/memory telemetry are exported to the OpenTelemetry
 Collector.
@@ -344,7 +345,7 @@ cleanup is scoped by run ID but writes still contend on the shared database,
 object store, and worker capacity. The workload profiles are bounded diagnostic
 loads, not a production capacity guarantee.
 
-### Query-plan and JetStream evidence
+### Query-plan evidence
 
 The PostGIS bounding-box API query and relational entity-upsert path emit
 `myota_geodata_postgis_query_duration_seconds` observations labeled by the
@@ -369,13 +370,12 @@ python3 scripts/geodata-query-plan-evidence.py \
 ```
 
 The evidence file may include schema/index information and should be reviewed
-before sharing. Grafana's **MyOTA JetStream backlog and PostGIS query
-performance** dashboard separates broker consumer pending and ack-pending
-counts, redeliveries, oldest outstanding message age, poller health, PostGIS
-query percentiles, and slow-query rate. JetStream values are polled directly
-from NATS every 15 seconds; age is marked unavailable rather than guessed if a
-message was purged or does not match the consumer's configured subject filter.
-The detailed workflow and evidence handling are in the
+before sharing. Grafana's **NATS** folder contains Surveyor broker dashboards.
+Geodata continues to export its own import, outbox, worker, database, and query
+metrics; it no longer polls NATS for duplicate broker telemetry. The
+[monitoring migration record](https://github.com/myota-platform/myota-docs/blob/main/docs/observability/nats-surveyor-migration.md)
+documents the broker metric ownership and dashboard set. The detailed query
+workflow and evidence handling are in the
 [organization runbook](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-load-test-and-query-evidence.md).
 
 ## Run the vertical slice
