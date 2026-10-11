@@ -22,9 +22,18 @@ def catalogue_routes(handler: Any) -> dict[Route, Handler]:
             "POST",
             "/v1/geodata/conflation/{candidateId}/resolve",
         ): handler.resolve_conflation,
-        ("POST", "/v1/geodata/entities/{entityId}/reviews"): handler.review_resource,
-        ("PUT", "/v1/geodata/entities/{entityId}/geometry"): handler.update_geometry,
-        ("PATCH", "/v1/geodata/entities/{entityId}"): handler.patch_entity_metadata,
+        (
+            "POST",
+            "/v1/geodata/entities/{entityId}/reviews",
+        ): handler.review_resource,
+        (
+            "PUT",
+            "/v1/geodata/entities/{entityId}/geometry",
+        ): handler.update_geometry,
+        (
+            "PATCH",
+            "/v1/geodata/entities/{entityId}",
+        ): handler.patch_entity_metadata,
         (
             "PUT",
             "/v1/geodata/entities/{entityId}/categories",
@@ -39,9 +48,15 @@ def catalogue_routes(handler: Any) -> dict[Route, Handler]:
 def import_routes(handler: Any) -> dict[Route, Handler]:
     return {
         ("GET", "/v1/geodata/imports"): handler.list_imports,
-        ("GET", "/v1/geodata/import-uploads/{uploadId}"): handler.get_import_upload,
+        (
+            "GET",
+            "/v1/geodata/import-uploads/{uploadId}",
+        ): handler.get_import_upload,
         ("GET", "/v1/geodata/imports/{runId}"): handler.get_import,
-        ("PUT", "/v1/geodata/imports/{runId}/cancellation"): handler.cancel_import,
+        (
+            "PUT",
+            "/v1/geodata/imports/{runId}/cancellation",
+        ): handler.cancel_import,
         (
             "GET",
             "/v1/geodata/imports/{runId}/candidates",
@@ -87,8 +102,14 @@ def job_routes(handler: Any) -> dict[Route, Handler]:
             "POST",
             "/v1/geodata/refresh-schedules/{scheduleId}/run",
         ): handler.refresh_import,
-        ("POST", "/v1/geodata/entity-deletion-jobs"): handler.create_deletion_job,
-        ("GET", "/v1/geodata/entity-deletion-jobs/{jobId}"): handler.get_deletion_job,
+        (
+            "POST",
+            "/v1/geodata/entity-deletion-jobs",
+        ): handler.create_deletion_job,
+        (
+            "GET",
+            "/v1/geodata/entity-deletion-jobs/{jobId}",
+        ): handler.get_deletion_job,
         (
             "POST",
             "/v1/geodata/entity-deletion-jobs/{jobId}/confirm",

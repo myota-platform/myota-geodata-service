@@ -30,12 +30,16 @@ from myota_logging import log_http_completed, start_http_span
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
 # sizeable pasted FeatureCollection. Deployments may lower this explicitly,
 # but the service default must not reject ordinary large dataset intake.
-MAX_BODY_BYTES = int(os.environ.get("MYOTA_MAX_BODY_BYTES", str(1024 * 1024 * 1024)))
+MAX_BODY_BYTES = int(
+    os.environ.get("MYOTA_MAX_BODY_BYTES", str(1024 * 1024 * 1024))
+)
 
 
 def require_durable_database(dsn_env: str | None, dsn: str) -> None:
     """Fail fast instead of silently dropping writes into process memory."""
-    required = os.environ.get("MYOTA_REQUIRE_DURABILITY", "").strip().lower() in {
+    required = os.environ.get(
+        "MYOTA_REQUIRE_DURABILITY", ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -80,7 +84,9 @@ def json_default(value: Any) -> str:
         return value.isoformat().replace("+00:00", "Z")
     if isinstance(value, Path):
         return str(value)
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable"
+    )
 
 
 def new_id() -> str:
@@ -96,12 +102,16 @@ def _unb64(value: str) -> bytes:
 
 
 def auth_signing_key() -> bytes:
-    value = os.environ.get("MYOTA_AUTH_SIGNING_KEY", "myota-development-key-change-me")
+    value = os.environ.get(
+        "MYOTA_AUTH_SIGNING_KEY", "myota-development-key-change-me"
+    )
     if (
         os.environ.get("MYOTA_ENV", "development").lower() == "production"
         and value == "myota-development-key-change-me"
     ):
-        raise RuntimeError("MYOTA_AUTH_SIGNING_KEY must be set outside development")
+        raise RuntimeError(
+            "MYOTA_AUTH_SIGNING_KEY must be set outside development"
+        )
     return value.encode("utf-8")
 
 
@@ -110,15 +120,21 @@ def sign_token(claims: dict[str, Any], token_type: str = "access") -> str:
     encoded_header = _b64(json.dumps(header, separators=(",", ":")).encode())
     encoded_claims = _b64(json.dumps(claims, separators=(",", ":")).encode())
     signing_input = f"{encoded_header}.{encoded_claims}".encode()
-    signature = hmac.new(auth_signing_key(), signing_input, hashlib.sha256).digest()
+    signature = hmac.new(
+        auth_signing_key(), signing_input, hashlib.sha256
+    ).digest()
     return f"{encoded_header}.{encoded_claims}.{_b64(signature)}"
 
 
-def verify_token(token: str, expected_type: str | None = None) -> dict[str, Any]:
+def verify_token(
+    token: str, expected_type: str | None = None
+) -> dict[str, Any]:
     try:
         encoded_header, encoded_claims, encoded_signature = token.split(".", 2)
         signing_input = f"{encoded_header}.{encoded_claims}".encode()
-        expected = hmac.new(auth_signing_key(), signing_input, hashlib.sha256).digest()
+        expected = hmac.new(
+            auth_signing_key(), signing_input, hashlib.sha256
+        ).digest()
         if not hmac.compare_digest(expected, _unb64(encoded_signature)):
             raise ValueError("invalid token signature")
         header, claims = (
@@ -129,7 +145,9 @@ def verify_token(token: str, expected_type: str | None = None) -> dict[str, Any]
             expected_type and header.get("tokenType") != expected_type
         ):
             raise ValueError("invalid token type")
-        if int(claims.get("exp", 0)) <= int(datetime.now(timezone.utc).timestamp()):
+        if int(claims.get("exp", 0)) <= int(
+            datetime.now(timezone.utc).timestamp()
+        ):
             raise ValueError("token expired")
         return claims
     except (
@@ -153,7 +171,9 @@ def verify_secret(value: str, encoded: str) -> bool:
         scheme, salt, expected = encoded.split("$", 2)
         if scheme != "scrypt":
             return False
-        actual = hashlib.scrypt(value.encode(), salt=_unb64(salt), n=2**14, r=8, p=1)
+        actual = hashlib.scrypt(
+            value.encode(), salt=_unb64(salt), n=2**14, r=8, p=1
+        )
         return hmac.compare_digest(actual, _unb64(expected))
     except (ValueError, TypeError):
         return False
@@ -219,7 +239,9 @@ class Store:
                 self._pool = ConnectionPool(
                     self.dsn,
                     min_size=1,
-                    max_size=max(1, int(os.environ.get("MYOTA_DB_POOL_MAX", "10"))),
+                    max_size=max(
+                        1, int(os.environ.get("MYOTA_DB_POOL_MAX", "10"))
+                    ),
                     open=True,
                     kwargs={"connect_timeout": 5},
                 )
@@ -227,7 +249,9 @@ class Store:
             except Exception as exc:  # pragma: no cover
                 last = exc
                 time.sleep(min(2 ** (attempt - 1), 8))
-        raise RuntimeError(f"unable to connect to PostgreSQL after retries: {last}")
+        raise RuntimeError(
+            f"unable to connect to PostgreSQL after retries: {last}"
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[Any]:
@@ -438,7 +462,9 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         if not field_name:
             raise ValueError("multipart part is missing its field name")
         if filename or field_name == "file":
-            spool_dir = os.environ.get("MYOTA_UPLOAD_SPOOL_DIR", "").strip() or None
+            spool_dir = (
+                os.environ.get("MYOTA_UPLOAD_SPOOL_DIR", "").strip() or None
+            )
             if spool_dir:
                 Path(spool_dir).mkdir(parents=True, exist_ok=True)
             temporary = tempfile.NamedTemporaryFile(
@@ -464,7 +490,9 @@ def read_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
                 try:
                     metadata = json.loads(value.getvalue().decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("metadata must contain valid JSON") from exc
+                    raise ValueError(
+                        "metadata must contain valid JSON"
+                    ) from exc
                 if not isinstance(metadata, dict):
                     raise ValueError("metadata must be a JSON object")
                 result.update(metadata)
@@ -484,7 +512,9 @@ def read_bounded_raw_upload(
     """Stream one bounded binary upload part to reconstructible temp storage."""
     length = _request_length(handler)
     if length <= 0 or length > max_bytes:
-        raise ValueError(f"upload part must be between 1 and {max_bytes} bytes")
+        raise ValueError(
+            f"upload part must be between 1 and {max_bytes} bytes"
+        )
     temporary = tempfile.NamedTemporaryFile(
         prefix="myota-geodata-part-", suffix=".part", delete=False
     )
@@ -505,7 +535,9 @@ def read_bounded_raw_upload(
 
 class JsonHandler(BaseHTTPRequestHandler):
     service = "myota-service"
-    routes: dict[tuple[str, str], Callable[["JsonHandler", dict[str, str]], Any]] = {}
+    routes: dict[
+        tuple[str, str], Callable[["JsonHandler", dict[str, str]], Any]
+    ] = {}
     store = Store()
 
     @classmethod
@@ -554,7 +586,9 @@ class JsonHandler(BaseHTTPRequestHandler):
         self._log_http_completed(status)
         route = getattr(self, "current_route", None)
         route_name = (
-            route[1] if route else getattr(self, "path", "unknown").split("?", 1)[0]
+            route[1]
+            if route
+            else getattr(self, "path", "unknown").split("?", 1)[0]
         )
         METRICS.inc(
             "myota_http_requests_total",
@@ -597,7 +631,9 @@ class JsonHandler(BaseHTTPRequestHandler):
                 "GET, POST, PUT, PATCH, DELETE, OPTIONS",
             )
             self.send_header("API-Version", "v1")
-            if isinstance(payload, dict) and isinstance(payload.get("version"), int):
+            if isinstance(payload, dict) and isinstance(
+                payload.get("version"), int
+            ):
                 self.send_header("ETag", f'"{payload["version"]}"')
             self.end_headers()
             if data:
@@ -634,7 +670,9 @@ class JsonHandler(BaseHTTPRequestHandler):
         if request_telemetry:
             request_telemetry.finish(200, "/metrics")
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header(
+            "Content-Type", "text/plain; version=0.0.4; charset=utf-8"
+        )
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -689,7 +727,9 @@ class JsonHandler(BaseHTTPRequestHandler):
         )
         self.command = method
         try:
-            request_body_size = max(0, int(self.headers.get("Content-Length", "0")))
+            request_body_size = max(
+                0, int(self.headers.get("Content-Length", "0"))
+            )
         except ValueError:
             request_body_size = 0
         self._otel_request = telemetry_for(self.service).start_request(
@@ -735,7 +775,9 @@ class JsonHandler(BaseHTTPRequestHandler):
                     self.current_route = (method, pattern)
                     if method in {"POST", "PUT", "PATCH", "DELETE"}:
                         content_type = self.headers.get("Content-Type", "")
-                        if content_type.lower().startswith("multipart/form-data"):
+                        if content_type.lower().startswith(
+                            "multipart/form-data"
+                        ):
                             body = read_multipart(self)
                         elif self.current_route == (
                             "POST",
@@ -758,17 +800,25 @@ class JsonHandler(BaseHTTPRequestHandler):
                             **params,
                             "_body": body,
                             "_path": self.path,
-                            "Idempotency-Key": self.headers.get("Idempotency-Key"),
-                            "Authorization": self.headers.get("Authorization", ""),
+                            "Idempotency-Key": self.headers.get(
+                                "Idempotency-Key"
+                            ),
+                            "Authorization": self.headers.get(
+                                "Authorization", ""
+                            ),
                             "If-Match": self.headers.get("If-Match", ""),
-                            "X-Part-SHA256": self.headers.get("X-Part-SHA256", ""),
+                            "X-Part-SHA256": self.headers.get(
+                                "X-Part-SHA256", ""
+                            ),
                             "User-Agent": self.headers.get("User-Agent", ""),
                             "Remote-Addr": self.client_address[0],
                             "_http": "1",
                         },
                     )
                     status = (
-                        result.pop("_status", 200) if isinstance(result, dict) else 200
+                        result.pop("_status", 200)
+                        if isinstance(result, dict)
+                        else 200
                     )
                     if method in {"POST", "PUT", "PATCH", "DELETE"}:
                         self.store.persist()
