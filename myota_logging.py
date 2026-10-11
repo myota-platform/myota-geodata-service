@@ -434,7 +434,12 @@ def messaging_span(
             span.set_attribute("myota.correlation_id", str(correlation_id))
         if delivery is not None:
             span.set_attribute("messaging.nats.delivery_count", int(delivery))
-        yield span
+        if correlation_id:
+            # Keep the workflow join key on every structured consumer log.
+            with bind_log_context(correlation_id=str(correlation_id)):
+                yield span
+        else:
+            yield span
 
 
 def inject_messaging_headers(
