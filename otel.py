@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import logging
 import resource
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 class _NoopInstrument:
@@ -127,13 +130,14 @@ def _process_memory_bytes() -> int:
 
 
 _lock = threading.Lock()
-_instances: dict[str, Telemetry] = {}
+_process_telemetry: Telemetry | None = None
 
 
 def telemetry_for(service_name: str) -> Telemetry:
+    global _process_telemetry
     with _lock:
-        if service_name in _instances:
-            return _instances[service_name]
+        if _process_telemetry is not None:
+            return _process_telemetry
         if os.environ.get("MYOTA_OTEL_ENABLED", "0").strip().lower() in {
             "",
             "0",
@@ -148,17 +152,12 @@ def telemetry_for(service_name: str) -> Telemetry:
                 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
                     OTLPMetricExporter,
                 )
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter,
-                )
                 from opentelemetry.metrics import Observation
                 from opentelemetry.sdk.metrics import MeterProvider
                 from opentelemetry.sdk.metrics.export import (
                     PeriodicExportingMetricReader,
                 )
                 from opentelemetry.sdk.resources import Resource
-                from opentelemetry.sdk.trace import TracerProvider
-                from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
                 endpoint = os.environ.get(
                     "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
@@ -175,16 +174,6 @@ def telemetry_for(service_name: str) -> Telemetry:
                     "service.instance.id": os.environ.get("HOSTNAME", "local"),
                 }
                 otel_resource = Resource.create(resource_attributes)
-                provider = TracerProvider(resource=otel_resource)
-                provider.add_span_processor(
-                    BatchSpanProcessor(
-                        OTLPSpanExporter(
-                            endpoint=endpoint,
-                            insecure=not endpoint.startswith("https://"),
-                        )
-                    )
-                )
-                trace.set_tracer_provider(provider)
                 reader = PeriodicExportingMetricReader(
                     OTLPMetricExporter(
                         endpoint=endpoint,
@@ -232,7 +221,12 @@ def telemetry_for(service_name: str) -> Telemetry:
                     trace.get_tracer("myota.http"),
                     meter,
                 )
-            except Exception:
+            except Exception as exc:
+                _logger.warning(
+                    "OpenTelemetry metrics setup failed (%s); continuing "
+                    "with no-op metrics",
+                    type(exc).__name__,
+                )
                 value = Telemetry(service_name)
-        _instances[service_name] = value
-        return value
+        _process_telemetry = value
+        return _process_telemetry

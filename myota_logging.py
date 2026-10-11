@@ -226,14 +226,17 @@ def configure_tracing(service_name: str) -> None:
         "on",
     }:
         return
+    # Mark the process attempt before initializing providers. A partial setup
+    # failure must not make a later request try to register a second provider.
+    _TRACE_CONFIGURED = True
     try:
         from opentelemetry import trace
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
             OTLPSpanExporter,
         )
         from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.trace import ProxyTracerProvider
 
         endpoint = os.environ.get(
             "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
@@ -250,23 +253,40 @@ def configure_tracing(service_name: str) -> None:
                 "service.instance.id": os.environ.get("HOSTNAME", "local"),
             }
         )
-        provider = TracerProvider(resource=resource)
-        provider.add_span_processor(
-            BatchSpanProcessor(
-                OTLPSpanExporter(
-                    endpoint=endpoint,
-                    insecure=not endpoint.startswith("https://"),
+        if isinstance(trace.get_tracer_provider(), ProxyTracerProvider):
+            from opentelemetry.sdk.trace import TracerProvider
+
+            provider = TracerProvider(resource=resource)
+            provider.add_span_processor(
+                BatchSpanProcessor(
+                    OTLPSpanExporter(
+                        endpoint=endpoint,
+                        insecure=not endpoint.startswith("https://"),
+                    )
                 )
             )
-        )
-        trace.set_tracer_provider(provider)
-        from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
+            trace.set_tracer_provider(provider)
 
-        PsycopgInstrumentor().instrument(
-            capture_parameters=False, enable_commenter=False
+        try:
+            from opentelemetry.instrumentation.psycopg import (
+                PsycopgInstrumentor,
+            )
+
+            PsycopgInstrumentor().instrument(
+                capture_parameters=False, enable_commenter=False
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "OpenTelemetry PostgreSQL instrumentation setup failed "
+                "(%s); HTTP tracing remains enabled",
+                type(exc).__name__,
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "OpenTelemetry tracing setup failed (%s); continuing without "
+            "exported traces",
+            type(exc).__name__,
         )
-        _TRACE_CONFIGURED = True
-    except Exception:
         return
 
 
