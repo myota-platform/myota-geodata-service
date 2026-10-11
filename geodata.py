@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from myota_logging import configure_logging, inject_trace_context
+from geodata_routes import build_routes
 
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
@@ -5376,102 +5377,7 @@ class GeoHandler(JsonHandler):
     delete_rejected_entity = delete_entity
 
 
-GeoHandler.routes = {
-    ("GET", "/v1/geodata/adapters"): GeoHandler.adapters,
-    ("GET", "/v1/geodata/location-options"): GeoHandler.location_options,
-    ("GET", "/v1/geodata/entities"): GeoHandler.list_entities,
-    ("GET", "/v1/geodata/entities/{entityId}"): GeoHandler.get_entity,
-    ("GET", "/v1/geodata/entities/{entityId}/audit"): GeoHandler.audit_entity,
-    ("GET", "/v1/geodata/tiles/{z}/{x}/{y}"): GeoHandler.tile,
-    ("GET", "/v1/geodata/imports"): GeoHandler.list_imports,
-    (
-        "GET",
-        "/v1/geodata/import-uploads/{uploadId}",
-    ): GeoHandler.get_import_upload,
-    ("GET", "/v1/geodata/imports/{runId}"): GeoHandler.get_import,
-    (
-        "PUT",
-        "/v1/geodata/imports/{runId}/cancellation",
-    ): GeoHandler.cancel_import,
-    (
-        "GET",
-        "/v1/geodata/imports/{runId}/candidates",
-    ): GeoHandler.list_import_candidates,
-    ("GET", "/v1/geodata/refresh-schedules"): GeoHandler.list_schedules,
-    ("GET", "/v1/geodata/conflation"): GeoHandler.list_conflation,
-    ("POST", "/v1/geodata/imports"): GeoHandler.enqueue_import,
-    ("POST", "/v1/geodata/import-uploads"): GeoHandler.create_import_upload,
-    (
-        "POST",
-        "/v1/geodata/import-uploads/{uploadId}/parts/{partNumber}",
-    ): GeoHandler.upload_import_part,
-    (
-        "POST",
-        "/v1/geodata/import-uploads/{uploadId}/complete",
-    ): GeoHandler.complete_import_upload,
-    (
-        "DELETE",
-        "/v1/geodata/import-uploads/{uploadId}",
-    ): GeoHandler.abort_import_upload,
-    (
-        "POST",
-        "/v1/geodata/imports/{runId}/candidates/validate",
-    ): GeoHandler.validate_import_candidates,
-    (
-        "POST",
-        "/v1/geodata/imports/{runId}/process",
-    ): GeoHandler.process_import_candidates,
-    (
-        "POST",
-        "/v1/geodata/imports/{runId}/processed",
-    ): GeoHandler.mark_import_processed,
-    (
-        "DELETE",
-        "/v1/geodata/load-test-runs/{testRunId}",
-    ): GeoHandler.cleanup_load_test_run,
-    ("POST", "/v1/geodata/refresh-schedules"): GeoHandler.create_schedule,
-    (
-        "POST",
-        "/v1/geodata/refresh-schedules/{scheduleId}/run",
-    ): GeoHandler.refresh_import,
-    ("POST", "/v1/geodata/proposals"): GeoHandler.draw_proposal,
-    (
-        "POST",
-        "/v1/geodata/conflation/{candidateId}/resolve",
-    ): GeoHandler.resolve_conflation,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/reviews",
-    ): GeoHandler.review_resource,
-    (
-        "PUT",
-        "/v1/geodata/entities/{entityId}/geometry",
-    ): GeoHandler.update_geometry,
-    (
-        "PATCH",
-        "/v1/geodata/entities/{entityId}",
-    ): GeoHandler.patch_entity_metadata,
-    (
-        "PUT",
-        "/v1/geodata/entities/{entityId}/categories",
-    ): GeoHandler.put_entity_categories,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/location-enrichment-requests",
-    ): GeoHandler.request_location_enrichment,
-    (
-        "POST",
-        "/v1/geodata/entity-deletion-jobs",
-    ): GeoHandler.create_deletion_job,
-    (
-        "GET",
-        "/v1/geodata/entity-deletion-jobs/{jobId}",
-    ): GeoHandler.get_deletion_job,
-    (
-        "POST",
-        "/v1/geodata/entity-deletion-jobs/{jobId}/confirm",
-    ): GeoHandler.confirm_deletion_job,
-}
+GeoHandler.routes = build_routes(GeoHandler)
 
 GeoHandler.deprecated_routes = set()
 
