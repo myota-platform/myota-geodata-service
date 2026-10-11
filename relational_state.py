@@ -654,8 +654,8 @@ class RowRepository:
                     )
                 connection.execute(
                     "INSERT INTO outbox_event(event_id,event_type,producer,"
-                    "aggregate_type,aggregate_id,payload,occurred_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s) ON CONFLICT DO NOTHING",
+                    "aggregate_type,aggregate_id,payload,occurred_at,correlation_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s) ON CONFLICT DO NOTHING",
                     (
                         event["eventId"],
                         event["eventType"],
@@ -664,6 +664,7 @@ class RowRepository:
                         event["aggregate"]["id"],
                         json.dumps(event["payload"], default=json_default),
                         event["occurredAt"],
+                        event.get("correlationId"),
                     ),
                 )
         for kind, key, result in committed:
