@@ -229,7 +229,11 @@ def test_nats_trace_and_correlation_context_propagates():
             header=lambda _name: "message-1",
         )
         with messaging_span("myota-test", message):
-            pass
+            record = logging.LogRecord(
+                "myota.nats-test", logging.INFO, __file__, 1, "worker event", (), None
+            )
+            _SafeFilter("myota-test", "worker").filter(record)
+            assert record.correlation_id == "workflow-1"
 
     assert headers["traceparent"] == traceparent
     assert headers["Myota-Correlation-Id"] == "workflow-1"
