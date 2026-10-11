@@ -297,6 +297,7 @@ def inject_trace_context(headers: dict[str, str]) -> dict[str, str]:
         pass
     return headers
 
+
 def log_http_completed(
     logger: logging.Logger,
     *,
