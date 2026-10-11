@@ -1,4 +1,9 @@
 import os
+
+from myota_logging import configure_logging
+
+configure_logging("myota-geodata", component="api")
+
 from common import BoundedThreadingHTTPServer
 from geodata import GeoHandler
 
