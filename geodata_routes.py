@@ -102,4 +102,3 @@ def build_routes(handler: Any) -> dict[Route, Handler]:
     for route_group in (catalogue_routes, import_routes, job_routes):
         routes.update(route_group(handler))
     return routes
-

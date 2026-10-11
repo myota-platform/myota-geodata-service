@@ -791,4 +791,3 @@ def require(body: dict[str, Any], *names: str) -> None:
     missing = [name for name in names if not body.get(name)]
     if missing:
         raise ValueError("missing required fields: " + ", ".join(missing))
-
