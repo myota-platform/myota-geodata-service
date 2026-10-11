@@ -453,7 +453,7 @@ async def _consume(
                         attempt=message.metadata.num_delivered,
                     )
                     with messaging_span("myota-geodata", message):
-                        await process_with_span()
+                        await _with_ack_heartbeat(message, handler(event))
                 if _already_processed(consumer, message_id):
                     if await asyncio.to_thread(
                         _work_still_pending, consumer, event
