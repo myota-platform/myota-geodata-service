@@ -550,10 +550,14 @@ class JsonHandler(BaseHTTPRequestHandler):
             return
         self._http_logged = True
         route = getattr(self, "current_route", None)
-        route_name = route[1] if route else (
-            self.path.split("?", 1)[0]
-            if self.path.split("?", 1)[0] in {"/healthz", "/metrics"}
-            else "/_unmatched"
+        route_name = (
+            route[1]
+            if route
+            else (
+                self.path.split("?", 1)[0]
+                if self.path.split("?", 1)[0] in {"/healthz", "/metrics"}
+                else "/_unmatched"
+            )
         )
         started = getattr(self, "_request_started_at", time.perf_counter())
         log_http_completed(
