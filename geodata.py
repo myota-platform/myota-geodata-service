@@ -4245,7 +4245,7 @@ class GeoHandler(JsonHandler):
             return math.degrees(radians)
 
         max_lat, min_lat = latitude(tile_y), latitude(tile_y + 1)
-        query = f"/v1/geodata/bbox?minLon={min_lon}&minLat={min_lat}&maxLon={max_lon}&maxLat={max_lat}&limit=500"
+        query = f"/v1/geodata/entities?bbox={min_lon},{min_lat},{max_lon},{max_lat}&limit=500"
         return GeoHandler.bbox(None, {"_path": query}) | {
             "tile": {"z": zoom, "x": tile_x, "y": tile_y},
             "format": "geojson-vector",
@@ -5382,7 +5382,6 @@ GeoHandler.routes = {
     ("GET", "/v1/geodata/entities"): GeoHandler.list_entities,
     ("GET", "/v1/geodata/entities/{entityId}"): GeoHandler.get_entity,
     ("GET", "/v1/geodata/entities/{entityId}/audit"): GeoHandler.audit_entity,
-    ("GET", "/v1/geodata/bbox"): GeoHandler.bbox,
     ("GET", "/v1/geodata/tiles/{z}/{x}/{y}"): GeoHandler.tile,
     ("GET", "/v1/geodata/imports"): GeoHandler.list_imports,
     (
@@ -5400,9 +5399,7 @@ GeoHandler.routes = {
     ): GeoHandler.list_import_candidates,
     ("GET", "/v1/geodata/refresh-schedules"): GeoHandler.list_schedules,
     ("GET", "/v1/geodata/conflation"): GeoHandler.list_conflation,
-    ("POST", "/v1/geodata/imports/manual"): GeoHandler.import_manual,
     ("POST", "/v1/geodata/imports"): GeoHandler.enqueue_import,
-    ("POST", "/v1/geodata/imports/upload"): GeoHandler.upload_import,
     ("POST", "/v1/geodata/import-uploads"): GeoHandler.create_import_upload,
     (
         "POST",
@@ -5437,22 +5434,15 @@ GeoHandler.routes = {
         "POST",
         "/v1/geodata/refresh-schedules/{scheduleId}/run",
     ): GeoHandler.refresh_import,
-    ("POST", "/v1/geodata/proposals/draw"): GeoHandler.draw_proposal,
     ("POST", "/v1/geodata/proposals"): GeoHandler.draw_proposal,
     (
         "POST",
         "/v1/geodata/conflation/{candidateId}/resolve",
     ): GeoHandler.resolve_conflation,
-    ("POST", "/v1/geodata/entities/{entityId}/review"): GeoHandler.review,
     (
         "POST",
         "/v1/geodata/entities/{entityId}/reviews",
     ): GeoHandler.review_resource,
-    ("POST", "/v1/geodata/entities/{entityId}/status"): GeoHandler.set_status,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/geometry",
-    ): GeoHandler.update_geometry,
     (
         "PUT",
         "/v1/geodata/entities/{entityId}/geometry",
@@ -5467,28 +5457,8 @@ GeoHandler.routes = {
     ): GeoHandler.put_entity_categories,
     (
         "POST",
-        "/v1/geodata/entities/{entityId}/location",
-    ): GeoHandler.update_location,
-    (
-        "POST",
         "/v1/geodata/entities/{entityId}/location-enrichment-requests",
     ): GeoHandler.request_location_enrichment,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/entity-type",
-    ): GeoHandler.change_entity_type,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/name",
-    ): GeoHandler.change_entity_name,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/geometry-type",
-    ): GeoHandler.change_geometry_type,
-    (
-        "POST",
-        "/v1/geodata/entities/{entityId}/delete",
-    ): GeoHandler.delete_entity,
     (
         "POST",
         "/v1/geodata/entity-deletion-jobs",
@@ -5503,19 +5473,7 @@ GeoHandler.routes = {
     ): GeoHandler.confirm_deletion_job,
 }
 
-GeoHandler.deprecated_routes = {
-    ("POST", "/v1/geodata/imports/manual"),
-    ("POST", "/v1/geodata/imports/upload"),
-    ("POST", "/v1/geodata/proposals/draw"),
-    ("GET", "/v1/geodata/bbox"),
-    ("POST", "/v1/geodata/entities/{entityId}/review"),
-    ("POST", "/v1/geodata/entities/{entityId}/status"),
-    ("POST", "/v1/geodata/entities/{entityId}/geometry"),
-    ("POST", "/v1/geodata/entities/{entityId}/location"),
-    ("POST", "/v1/geodata/entities/{entityId}/entity-type"),
-    ("POST", "/v1/geodata/entities/{entityId}/name"),
-    ("POST", "/v1/geodata/entities/{entityId}/delete"),
-}
+GeoHandler.deprecated_routes = set()
 
 
 install_operations(GeoHandler)
