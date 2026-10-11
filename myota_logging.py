@@ -260,6 +260,11 @@ def configure_tracing(service_name: str) -> None:
             )
         )
         trace.set_tracer_provider(provider)
+        from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
+
+        PsycopgInstrumentor().instrument(
+            capture_parameters=False, enable_commenter=False
+        )
         _TRACE_CONFIGURED = True
     except Exception:
         return
