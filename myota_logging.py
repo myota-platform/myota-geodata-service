@@ -440,3 +440,33 @@ def inject_messaging_headers(
     if correlation_id:
         headers["Myota-Correlation-Id"] = redact_text(correlation_id, 128)
     return headers
+
+
+@contextmanager
+def producer_span(
+    service_name: str,
+    destination: str,
+    message_id: str,
+    *,
+    correlation_id: str | None = None,
+) -> Iterator[Any | None]:
+    """Create a bounded NATS producer span before injecting message headers."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace import SpanKind
+
+        tracer = trace.get_tracer(service_name)
+    except Exception:
+        yield None
+        return
+
+    with tracer.start_as_current_span(
+        f"publish {destination}", kind=SpanKind.PRODUCER
+    ) as span:
+        span.set_attribute("messaging.system", "nats")
+        span.set_attribute("messaging.destination.name", destination)
+        span.set_attribute("messaging.operation.type", "publish")
+        span.set_attribute("messaging.message.id", message_id)
+        if correlation_id:
+            span.set_attribute("myota.correlation_id", correlation_id)
+        yield span
