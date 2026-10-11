@@ -74,20 +74,99 @@ def test_json_formatter_does_not_emit_unbounded_payload_fields():
 
 def test_http_completion_is_sanitized_and_classified(caplog):
     logger = logging.getLogger("myota.http-test")
-    with caplog.at_level(logging.WARNING, logger="myota.http-test"):
-        log_http_completed(
-            logger,
-            method="POST",
-            route="/v1/imports/{importId}",
-            status=400,
-            duration_ms=12.34567,
-            request_id="request-1",
-            correlation_id="flow-1",
+    cases = [(200, logging.INFO, None), (403, logging.WARNING, "client_error"), (500, logging.ERROR, "server_error")]
+    with caplog.at_level(logging.DEBUG, logger="myota.http-test"):
+        for status, _level, _classification in cases:
+            log_http_completed(
+                logger,
+                method="POST",
+                route="/v1/imports/{importId}",
+                status=status,
+                duration_ms=12.34567,
+                request_id="request-1",
+                correlation_id="flow-1",
+            )
+    records = caplog.records[-3:]
+    assert [record.levelno for record in records] == [case[1] for case in cases]
+    assert [record.__dict__.get("error.classification") for record in records] == [
+        case[2] for case in cases
+    ]
+    assert all(record.getMessage() == "http.request.completed" for record in records)
+    assert records[-1].__dict__["http.route"] == "/v1/imports/{importId}"
+    assert records[-1].request_id == "request-1"
+    assert records[-1].correlation_id == "flow-1"
+
+
+def test_http_trace_context_is_extracted_and_injected():
+    parent = object()
+    captured = {}
+    trace_id = 0x1234567890ABCDEF1234567890ABCDEF
+
+    class FakeSpan:
+        def get_span_context(self):
+            return SimpleNamespace(is_valid=True, trace_id=trace_id)
+
+        def update_name(self, name):
+            captured["name"] = name
+
+        def set_attribute(self, key, value):
+            captured[key] = value
+
+        def end(self):
+            captured["ended"] = True
+
+    class FakeScope:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            captured["scope_closed"] = True
+
+    class FakeTracer:
+        def start_span(self, name, *, context, kind):
+            captured.update(start_name=name, parent=context, kind=kind)
+            return FakeSpan()
+
+    fake_span_kind = SimpleNamespace(SERVER=object())
+    fake_trace = ModuleType("opentelemetry.trace")
+    fake_trace.SpanKind = fake_span_kind
+    fake_trace.get_tracer = lambda _name: FakeTracer()
+    fake_trace.use_span = lambda _span, end_on_exit: FakeScope()
+
+    def extract(carrier):
+        captured["carrier"] = carrier
+        return parent
+
+    def inject(carrier):
+        carrier["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+    fake_propagate = SimpleNamespace(extract=extract, inject=inject)
+    fake_otel = ModuleType("opentelemetry")
+    fake_otel.trace = fake_trace
+    fake_otel.propagate = fake_propagate
+    with patch.dict(
+        sys.modules,
+        {
+            "opentelemetry": fake_otel,
+            "opentelemetry.trace": fake_trace,
+        },
+    ):
+        request_span = start_http_span(
+            "myota-identity",
+            "GET",
+            {
+                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                "tracestate": "vendor=value",
+            },
         )
-    record = caplog.records[-1]
-    assert record.getMessage() == "http.request.completed"
-    assert record.__dict__["http.route"] == "/v1/imports/{importId}"
-    assert record.__dict__["http.response.status_code"] == 400
-    assert record.__dict__["error.classification"] == "client_error"
-    assert record.request_id == "request-1"
-    assert record.correlation_id == "flow-1"
+        request_span.set_result(200, "/v1/identity/me")
+        headers = inject_trace_context({})
+        request_span.end()
+
+    assert captured["parent"] is parent
+    assert captured["carrier"]["tracestate"] == "vendor=value"
+    assert captured["name"] == "GET /v1/identity/me"
+    assert request_span.trace_id == f"{trace_id:032x}"
+    assert headers["traceparent"].startswith("00-")
+    assert captured["scope_closed"] is True
+    assert captured["ended"] is True
