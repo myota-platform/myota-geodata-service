@@ -195,7 +195,13 @@ def log_http_completed(
     correlation_id: str,
 ) -> None:
     """Emit one sanitized completion record for an HTTP request."""
-    level = logging.ERROR if status >= 500 else logging.WARNING if status >= 400 else logging.INFO
+    level = (
+        logging.ERROR
+        if status >= 500
+        else logging.WARNING
+        if status >= 400
+        else logging.INFO
+    )
     fields: dict[str, Any] = {
         "http.request.method": method,
         "http.route": route,
