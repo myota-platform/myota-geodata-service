@@ -71,6 +71,7 @@ def test_json_formatter_does_not_emit_unbounded_payload_fields():
     assert "payload" not in output
     assert "secret_key" not in output
 
+
 def test_http_completion_is_sanitized_and_classified(caplog):
     logger = logging.getLogger("myota.http-test")
     with caplog.at_level(logging.WARNING, logger="myota.http-test"):
