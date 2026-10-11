@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from myota_logging import configure_logging
+from myota_logging import configure_logging, inject_trace_context
 
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
@@ -5124,6 +5124,7 @@ class GeoHandler(JsonHandler):
             headers["Authorization"] = p["Authorization"]
         if p.get("Idempotency-Key"):
             headers["Idempotency-Key"] = p["Idempotency-Key"]
+        inject_trace_context(headers)
         data = None
         if payload is not None:
             headers["Content-Type"] = "application/json"
