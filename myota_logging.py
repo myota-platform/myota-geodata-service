@@ -240,7 +240,9 @@ def configure_tracing(service_name: str) -> None:
         )
         resource = Resource.create(
             {
-                "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
+                "service.name": os.environ.get(
+                    "OTEL_SERVICE_NAME", service_name
+                ),
                 "service.namespace": "myota",
                 "deployment.environment": os.environ.get(
                     "MYOTA_ENV", "development"
