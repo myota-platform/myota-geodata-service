@@ -1,36 +1,47 @@
 import json
 import logging
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 from myota_logging import (
     _JsonFormatter,
+    _SafeFilter,
     bind_log_context,
-    log_event,
     redact_text,
     safe_fields,
 )
 
 
 def test_structured_record_contains_resource_and_correlation_fields():
-    logger = logging.getLogger("logging-test")
+    fake_trace = SimpleNamespace(
+        get_current_span=lambda: SimpleNamespace(
+            get_span_context=lambda: SimpleNamespace(
+                is_valid=True,
+                trace_id=0x1234567890ABCDEF1234567890ABCDEF,
+                span_id=0x1234567890ABCDEF,
+            )
+        )
+    )
+    fake_otel = ModuleType("opentelemetry")
+    fake_otel.trace = fake_trace
     with bind_log_context(request_id="req-1", correlation_id="flow-1"):
-        log_event(logger, logging.INFO, "work.started", component="worker",
-                  job_id="job-1")
         record = logging.LogRecord(
-            "logging-test", logging.INFO, __file__, 1,
-            "work.started", (), None,
+            "logging-test", logging.INFO, __file__, 1, "work.started", (), None
         )
         record.event = "work.started"
         record.component = "worker"
-        record.request_id = "req-1"
-        record.correlation_id = "flow-1"
-        record.job_id = "job-1"
+        with patch.dict(sys.modules, {"opentelemetry": fake_otel}):
+            assert _SafeFilter("myota-test", "service").filter(record)
         output = json.loads(_JsonFormatter().format(record))
     assert output["severity"] == "INFO"
     assert output["event"] == "work.started"
     assert output["component"] == "worker"
     assert output["request_id"] == "req-1"
     assert output["correlation_id"] == "flow-1"
-    assert output["job_id"] == "job-1"
+    assert output["trace_id"] == "1234567890abcdef1234567890abcdef"
+    assert output["span_id"] == "1234567890abcdef"
+    assert output["service.name"] == "myota-test"
     assert output["service.namespace"] == "myota"
     assert output["timestamp"].endswith("Z")
 
@@ -49,8 +60,7 @@ def test_sensitive_fields_and_credential_text_are_redacted():
 
 def test_json_formatter_does_not_emit_unbounded_payload_fields():
     record = logging.LogRecord(
-        "logging-test", logging.INFO, __file__, 1,
-        "event", (), None,
+        "logging-test", logging.INFO, __file__, 1, "event", (), None
     )
     record.payload = "complete uploaded content"
     record.secret_key = "secret"
