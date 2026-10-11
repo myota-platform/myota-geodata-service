@@ -214,7 +214,9 @@ def log_http_completed(
         fields["error.classification"] = "server_error"
     elif status >= 400:
         fields["error.classification"] = "client_error"
-    log_event(logger, level, "http.request.completed", component="api", **fields)
+    log_event(
+        logger, level, "http.request.completed", component="api", **fields
+    )
 
 
 def configure_logging(service_name: str, component: str = "service") -> None:
