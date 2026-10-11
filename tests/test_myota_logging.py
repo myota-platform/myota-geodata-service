@@ -85,8 +85,8 @@ def test_http_completion_is_sanitized_and_classified(caplog):
         )
     record = caplog.records[-1]
     assert record.getMessage() == "http.request.completed"
-    assert record.http_route == "/v1/imports/{importId}"
-    assert record.http_response_status_code == 400
-    assert record.error_classification == "client_error"
+    assert record.__dict__["http.route"] == "/v1/imports/{importId}"
+    assert record.__dict__["http.response.status_code"] == 400
+    assert record.__dict__["error.classification"] == "client_error"
     assert record.request_id == "request-1"
     assert record.correlation_id == "flow-1"
