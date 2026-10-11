@@ -76,7 +76,11 @@ def test_json_formatter_does_not_emit_unbounded_payload_fields():
 
 def test_http_completion_is_sanitized_and_classified(caplog):
     logger = logging.getLogger("myota.http-test")
-    cases = [(200, logging.INFO, None), (403, logging.WARNING, "client_error"), (500, logging.ERROR, "server_error")]
+    cases = [
+        (200, logging.INFO, None),
+        (403, logging.WARNING, "client_error"),
+        (500, logging.ERROR, "server_error"),
+    ]
     with caplog.at_level(logging.DEBUG, logger="myota.http-test"):
         for status, _level, _classification in cases:
             log_http_completed(
@@ -89,11 +93,15 @@ def test_http_completion_is_sanitized_and_classified(caplog):
                 correlation_id="flow-1",
             )
     records = caplog.records[-3:]
-    assert [record.levelno for record in records] == [case[1] for case in cases]
-    assert [record.__dict__.get("error.classification") for record in records] == [
-        case[2] for case in cases
+    assert [record.levelno for record in records] == [
+        case[1] for case in cases
     ]
-    assert all(record.getMessage() == "http.request.completed" for record in records)
+    assert [
+        record.__dict__.get("error.classification") for record in records
+    ] == [case[2] for case in cases]
+    assert all(
+        record.getMessage() == "http.request.completed" for record in records
+    )
     assert records[-1].__dict__["http.route"] == "/v1/imports/{importId}"
     assert records[-1].request_id == "request-1"
     assert records[-1].correlation_id == "flow-1"
@@ -140,7 +148,9 @@ def test_http_trace_context_is_extracted_and_injected():
         return parent
 
     def inject(carrier):
-        carrier["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        carrier["traceparent"] = (
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        )
 
     fake_propagate = SimpleNamespace(extract=extract, inject=inject)
     fake_otel = ModuleType("opentelemetry")
@@ -176,10 +186,7 @@ def test_http_trace_context_is_extracted_and_injected():
 
 def test_nats_trace_and_correlation_context_propagates():
     captured = {}
-    traceparent = (
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-"
-        "00f067aa0ba902b7-01"
-    )
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
     class FakeSpan:
         def set_attribute(self, key, value):
@@ -212,9 +219,7 @@ def test_nats_trace_and_correlation_context_propagates():
         sys.modules,
         {"opentelemetry": fake_otel, "opentelemetry.trace": fake_trace},
     ):
-        headers = inject_messaging_headers(
-            {}, correlation_id="workflow-1"
-        )
+        headers = inject_messaging_headers({}, correlation_id="workflow-1")
         message = SimpleNamespace(
             headers=headers,
             subject="myota.work.example.v1",
