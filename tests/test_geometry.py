@@ -565,6 +565,102 @@ class GeometryWayTests(unittest.TestCase):
                 self.assertTrue(GeoHandler._execute_deletion_job(job["id"]))
         self.assertEqual(job["status"], "COMPLETED")
 
+    def test_entity_website_and_description_patch_validate_audit_and_clear(
+        self,
+    ):
+        entity = GeoHandler.store.items["entity-1"]
+        entity["website"] = "https://old.example"
+        entity["description"] = "Old description"
+        changed = GeoHandler.patch_entity_metadata(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "editorId": "admin",
+                    "website": " https://new.example/path ",
+                    "description": "  Plain text <b>kept as text</b>  ",
+                },
+            },
+        )
+        self.assertEqual(changed["website"], "https://new.example/path")
+        self.assertEqual(
+            changed["description"], "Plain text <b>kept as text</b>"
+        )
+        self.assertEqual(
+            changed["reviewHistory"][-1]["action"], "ENTITY_METADATA_UPDATED"
+        )
+        self.assertEqual(
+            GeoHandler.store.events[-1]["eventType"],
+            "geodata.entity.metadata-updated.v1",
+        )
+        cleared = GeoHandler.patch_entity_metadata(
+            None,
+            {
+                "entityId": "entity-1",
+                "_body": {
+                    "editorId": "admin",
+                    "website": None,
+                    "description": "",
+                },
+            },
+        )
+        self.assertIsNone(cleared["website"])
+        self.assertIsNone(cleared["description"])
+
+    def test_entity_website_patch_rejects_non_http_or_invalid_values(self):
+        for website in (
+            "javascript:alert(1)",
+            "mailto:test@example.org",
+            "https://",
+            "https://user:secret@example.org",
+        ):
+            with self.subTest(website=website), self.assertRaises(ValueError):
+                GeoHandler.patch_entity_metadata(
+                    None,
+                    {
+                        "entityId": "entity-1",
+                        "_body": {"editorId": "admin", "website": website},
+                    },
+                )
+        with self.assertRaises(ValueError):
+            GeoHandler.patch_entity_metadata(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {"editorId": "admin", "description": "x" * 2001},
+                },
+            )
+        with self.assertRaises(PermissionError):
+            GeoHandler.patch_entity_metadata(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_http": True,
+                    "_body": {"editorId": "admin", "description": "no auth"},
+                },
+            )
+
+    def test_import_materialization_preserves_admin_curated_metadata(self):
+        existing = GeoHandler.store.items["entity-1"]
+        existing["website"] = "https://curated.example"
+        existing["description"] = "Curated description"
+        candidate = {
+            "entity": {
+                "id": "entity-1",
+                "website": "https://stale.example",
+                "description": "Stale",
+                "geometry": existing["geometry"],
+                "status": "CANDIDATE",
+            },
+            "importRunId": "run-1",
+        }
+        with patch.object(GeoHandler, "_create_conflation_candidates"):
+            materialized = GeoHandler._materialize_import_candidate(
+                candidate, "CANDIDATE", "admin", None
+            )
+        self.assertEqual(materialized["website"], "https://curated.example")
+        self.assertEqual(materialized["description"], "Curated description")
+
 
 if __name__ == "__main__":
     unittest.main()

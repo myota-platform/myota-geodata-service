@@ -61,6 +61,11 @@ ordered SQL files define the `myota_geo` database:
     can restore expired work through the transactional outbox without executing
     work outside its JetStream durable.
 
+22. `022_entity_website_description.sql` adds nullable, dedicated Website and
+    Description columns for curated Geodata entity metadata. Legacy rows remain
+    valid with both fields absent; external import refreshes preserve the
+    administrator-curated values on existing entities.
+
 The platform migration runner applies every numbered `geo/NNN_*.sql` file in
 lexical order. Additions to this directory are therefore included in the next
 Helm migration image without maintaining a separate hard-coded file list.

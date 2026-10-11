@@ -92,6 +92,8 @@ PROJECTIONS = {
             "programmeSlug": "programme_slug",
             "entityType": "entity_type_code",
             "name": "name",
+            "website": "website",
+            "description": "description",
             "status": "lifecycle_status",
             "geometry": "ST_AsGeoJSON(geom)::jsonb",
             "centroid": (

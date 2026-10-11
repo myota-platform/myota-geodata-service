@@ -51,6 +51,10 @@ observation. The durable retirement is complete within that waiver.
 - Provenance-aware imports with adapter metadata for ParkServe, OSM, government GIS and manual proposals.
 - A dedicated two-stage intake supports pasted GeoJSON/KML/GPX/WFS/ArcGIS JSON and uploaded Shapefile, OSM PBF and ParkServe payloads. Uploads are scanned, stored in SeaweedFS through its S3-compatible API, and emit durable queue events. Parsing and normalization stop at `PREPROCESSED`; no entity is created until an administrator validates selected records.
 - Uploaded GeoJSON, KML, GPX, Shapefile ZIP, ParkServe Shapefile, and OSM PBF files are decoded by streaming iterators from worker-local scratch. Candidate rows checkpoint by stable import ordinal (default 100 per batch), and committed projections are evicted before the next batch. Default decoder guards cap an individual feature at 16 MiB and 250,000 vertices; Shapefile archives also cap expanded bytes, archive members, and record size. OSM PBF uses a disk-backed node-location index. Complete-snapshot imports preflight and reopen the immutable source, with the existing 5,000-feature import maximum. These implementations improve bounds, but XML single-element allocation, large PBF areas, all-format RSS, and worker-stage failure qualification remain Phase 3 gates. See the [Phase 3 evidence review](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata/evidence/phase3-bounded-preprocessing-2026-10-09.md).
+- Optional entity Website and plain-text Description are available from detail,
+  catalogue, and map responses. Versioned metadata updates are reviewed,
+  audited, and preserved across source refreshes; manual proposals may provide
+  initial values. See the API contract and migration guide.
 - Reverse-geocoded entity location fields: continent/country, ISO codes, first
   country subdivision, optional province/county, and city/municipality.
 - Automatically calculated Maidenhead coverage is returned as sorted,

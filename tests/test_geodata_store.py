@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from unittest.mock import Mock
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -154,6 +156,8 @@ class GeodataStoreHydrationTests(unittest.TestCase):
                         "id": "entity-1",
                         "status": "APPROVED",
                         "name": "Actual park",
+                        "website": "https://park.example",
+                        "description": "Curated park description",
                         "version": 4,
                     },
                 )
@@ -162,6 +166,8 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             def execute(self, sql, params):
                 self.sql = sql
                 assert "service_state" not in sql
+                assert "'website', website" in sql
+                assert "'description', description" in sql
                 return Result()
 
         connection = Connection()
@@ -176,6 +182,49 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             store.hydrate()
             self.assertEqual(store.items["entity-1"]["status"], "APPROVED")
             self.assertEqual(store.items["entity-1"]["version"], 4)
+            self.assertEqual(
+                store.items["entity-1"]["website"], "https://park.example"
+            )
+            self.assertEqual(
+                store.items["entity-1"]["description"],
+                "Curated park description",
+            )
+
+    def test_entity_upsert_persists_dedicated_metadata_and_migration_is_additive(
+        self,
+    ):
+        store = GeodataStore()
+        connection = Mock()
+        entity = {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Test park",
+            "website": "https://park.example",
+            "description": "Curated park description",
+            "geometry": {"type": "Point", "coordinates": [-5.99, 37.39]},
+            "status": "CANDIDATE",
+        }
+        with patch.object(
+            store,
+            "_category_id",
+            return_value="22222222-2222-4222-8222-222222222222",
+        ):
+            store._upsert_entity(connection, entity)
+        insert_sql, params = connection.execute.call_args_list[0].args
+        self.assertIn("website, description", insert_sql)
+        self.assertIn("website=EXCLUDED.website", insert_sql)
+        self.assertIn("description=EXCLUDED.description", insert_sql)
+        self.assertEqual(
+            params[5:7], ("https://park.example", "Curated park description")
+        )
+        self.assertNotIn("website", store._public_properties(entity))
+        self.assertNotIn("description", store._public_properties(entity))
+        migration = (
+            Path(__file__).parents[1]
+            / "migrations"
+            / "022_entity_website_description.sql"
+        ).read_text()
+        self.assertIn("ADD COLUMN IF NOT EXISTS website text", migration)
+        self.assertIn("ADD COLUMN IF NOT EXISTS description text", migration)
 
     def test_relational_entity_read_restores_centroid_from_postgis(self):
         class Result:

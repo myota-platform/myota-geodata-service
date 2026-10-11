@@ -156,6 +156,8 @@ class CompatibilityGeodataStore(Store):
         properties = dict(entity)
         properties.pop("geometry", None)
         properties.pop("centroid", None)
+        properties.pop("website", None)
+        properties.pop("description", None)
         properties.pop("maidenheadGridSquares4", None)
         properties.pop("maidenheadLocators6", None)
         return properties
@@ -176,15 +178,17 @@ class CompatibilityGeodataStore(Store):
         provenance = entity.get("provenance") or {}
         source = provenance.get("source") or {}
         connection.execute(
-            "INSERT INTO geodata_entity(id, programme_id, programme_slug, entity_type_id, entity_type_code, name, lifecycle_status, geom, centroid, public_properties, source_state, source_key, source_hash, jurisdiction, attachments) "
-            "VALUES (%s, NULL, %s, %s, %s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))::geography, %s::jsonb, %s, %s, %s, %s, %s::jsonb) "
-            "ON CONFLICT (id) DO UPDATE SET programme_slug=EXCLUDED.programme_slug, entity_type_id=EXCLUDED.entity_type_id, entity_type_code=EXCLUDED.entity_type_code, name=EXCLUDED.name, lifecycle_status=EXCLUDED.lifecycle_status, geom=EXCLUDED.geom, centroid=EXCLUDED.centroid, public_properties=EXCLUDED.public_properties, source_state=EXCLUDED.source_state, source_key=EXCLUDED.source_key, source_hash=EXCLUDED.source_hash, jurisdiction=EXCLUDED.jurisdiction, attachments=EXCLUDED.attachments, updated_at=now()",
+            "INSERT INTO geodata_entity(id, programme_id, programme_slug, entity_type_id, entity_type_code, name, website, description, lifecycle_status, geom, centroid, public_properties, source_state, source_key, source_hash, jurisdiction, attachments) "
+            "VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))::geography, %s::jsonb, %s, %s, %s, %s, %s::jsonb) "
+            "ON CONFLICT (id) DO UPDATE SET programme_slug=EXCLUDED.programme_slug, entity_type_id=EXCLUDED.entity_type_id, entity_type_code=EXCLUDED.entity_type_code, name=EXCLUDED.name, website=EXCLUDED.website, description=EXCLUDED.description, lifecycle_status=EXCLUDED.lifecycle_status, geom=EXCLUDED.geom, centroid=EXCLUDED.centroid, public_properties=EXCLUDED.public_properties, source_state=EXCLUDED.source_state, source_key=EXCLUDED.source_key, source_hash=EXCLUDED.source_hash, jurisdiction=EXCLUDED.jurisdiction, attachments=EXCLUDED.attachments, updated_at=now()",
             (
                 entity_id,
                 entity.get("programmeSlug"),
                 category_id,
                 entity_type,
                 entity.get("name") or "Unnamed entity",
+                entity.get("website"),
+                entity.get("description"),
                 entity.get("status") or "CANDIDATE",
                 geometry_json,
                 geometry_json,
@@ -460,7 +464,7 @@ class CompatibilityGeodataStore(Store):
             with self.transaction() as connection:
                 rows = connection.execute(
                     "SELECT id::text, programme_slug, entity_type_code, name, lifecycle_status, "
-                    "ST_AsGeoJSON(geom)::jsonb, public_properties "
+                    "ST_AsGeoJSON(geom)::jsonb, public_properties, website, description "
                     "FROM geodata_entity "
                     "WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326) "
                     "AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326)) "
@@ -488,6 +492,8 @@ class CompatibilityGeodataStore(Store):
                     "publicProperties": row[6]
                     if isinstance(row[6], dict)
                     else json.loads(row[6] or "{}"),
+                    "website": row[7],
+                    "description": row[8],
                 }
                 for row in rows
             ]

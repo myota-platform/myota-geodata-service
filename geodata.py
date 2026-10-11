@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -1636,6 +1636,22 @@ class GeoHandler(JsonHandler):
                     "entityTypes": categories,
                     "entityTypeCodes": categories,
                     "name": props.get("name", "Unnamed candidate"),
+                    # External refreshes may seed these fields for new rows,
+                    # but never overwrite administrator-curated values.
+                    "website": (
+                        existing.get("website")
+                        if existing
+                        else GeoHandler._normalize_website(
+                            props.get("website")
+                        )
+                    ),
+                    "description": (
+                        existing.get("description")
+                        if existing
+                        else GeoHandler._normalize_description(
+                            props.get("description")
+                        )
+                    ),
                     "status": existing["status"] if existing else "CANDIDATE",
                     "sourceState": "CURRENT",
                     "geometry": geometry,
@@ -1807,6 +1823,11 @@ class GeoHandler(JsonHandler):
         entity = {**(candidate.get("entity") or {})}
         entity_id = entity["id"]
         existing = GeoHandler.store.items.get(entity_id)
+        if existing:
+            # A later import must never replace administrator-curated public
+            # metadata, even if a staged source candidate carries stale values.
+            entity["website"] = existing.get("website")
+            entity["description"] = existing.get("description")
         previous_geometry_hash = (
             digest(existing.get("geometry")) if existing else None
         )
@@ -4150,6 +4171,8 @@ class GeoHandler(JsonHandler):
                         "geometry": entity["geometry"],
                         "properties": {
                             "name": entity["name"],
+                            "website": entity.get("website"),
+                            "description": entity.get("description"),
                             "programmeSlug": entity["programmeSlug"],
                             "status": entity["status"],
                             "entityType": entity.get("entityType"),
@@ -4189,6 +4212,8 @@ class GeoHandler(JsonHandler):
                         "geometry": entity["geometry"],
                         "properties": {
                             "name": entity["name"],
+                            "website": entity.get("website"),
+                            "description": entity.get("description"),
                             "programmeSlug": entity["programmeSlug"],
                             "status": entity["status"],
                             "entityType": entity.get("entityType"),
@@ -5015,19 +5040,64 @@ class GeoHandler(JsonHandler):
         }
 
     @staticmethod
+    def _normalize_website(value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("website must be a string or null")
+        website = value.strip()
+        if not website:
+            return None
+        if len(website) > 2048:
+            raise ValueError("website must be 2048 characters or fewer")
+        parsed = urlsplit(website)
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("website must be an absolute HTTP or HTTPS URL")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("website must contain a valid port") from exc
+        return website
+
+    @staticmethod
+    def _normalize_description(value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("description must be a string or null")
+        description = value.strip()
+        if len(description) > 2000:
+            raise ValueError("description must be 2000 characters or fewer")
+        return description or None
+
+    @staticmethod
     def patch_entity_metadata(
         _: JsonHandler, p: dict[str, str]
     ) -> dict[str, Any]:
         body = dict(p.get("_body") or {})
         editor_id = body.get("editorId")
         require(body, "editorId")
-        supported = {"editorId", "name", "location", "manualFields", "note"}
+        supported = {
+            "editorId",
+            "name",
+            "location",
+            "manualFields",
+            "note",
+            "website",
+            "description",
+        }
         unknown = set(body) - supported
         if unknown:
             raise ValueError(
                 f"unsupported entity metadata fields: {', '.join(sorted(unknown))}"
             )
         entity = GeoHandler.store.items[p["entityId"]]
+        GeoHandler._authorize_review(p, entity)
         result = entity
         if "name" in body:
             result = GeoHandler.change_entity_name(
@@ -5052,9 +5122,45 @@ class GeoHandler(JsonHandler):
             result = GeoHandler.update_location(
                 None, {**p, "_body": location_body}
             )
-        if "name" not in body and "location" not in body:
+        metadata_fields = {"website", "description"}.intersection(body)
+        if metadata_fields:
+            changed = {}
+            for field in metadata_fields:
+                value = (
+                    GeoHandler._normalize_website(body[field])
+                    if field == "website"
+                    else GeoHandler._normalize_description(body[field])
+                )
+                previous = entity.get(field)
+                if value != previous:
+                    entity[field] = value
+                    changed[field] = {"previous": previous, "value": value}
+            if changed:
+                changed_at = now()
+                entity.setdefault("reviewHistory", []).append(
+                    {
+                        "action": "ENTITY_METADATA_UPDATED",
+                        "editorId": editor_id,
+                        "fields": sorted(changed),
+                        "note": body.get("note"),
+                        "occurredAt": changed_at,
+                    }
+                )
+                entity["updatedAt"] = changed_at
+                GeoHandler.store.event(
+                    "geodata.entity.metadata-updated.v1",
+                    "entity",
+                    entity["id"],
+                    {
+                        "entityId": entity["id"],
+                        "editorId": editor_id,
+                        "changes": changed,
+                        "note": body.get("note"),
+                    },
+                )
+        if not ({"name", "location", "website", "description"} & set(body)):
             raise ValueError(
-                "at least one editable metadata field is required: name or location"
+                "at least one editable metadata field is required: name, location, website, or description"
             )
         return result
 
