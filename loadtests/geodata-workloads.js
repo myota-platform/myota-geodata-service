@@ -10,13 +10,16 @@ const MAX_VUS = 50;
 const VUS = Number(__ENV.MYOTA_LOAD_TEST_VUS || (PROFILE === 'large-upload' ? 3 : 8));
 const DURATION = __ENV.MYOTA_LOAD_TEST_DURATION || '2m';
 const PROFILE_FEATURE_CAP = PROFILE === 'large-upload' ? 5000 :
-  PROFILE === 'simultaneous-edits' ? 1 : PROFILE === 'queue-backlog' ? 50 : PROFILE === 'promotion' ? 40 : 100;
-const FEATURES = Number(__ENV.MYOTA_LOAD_TEST_FEATURES ||
-  (PROFILE === 'large-upload' ? 2500 : PROFILE_FEATURE_CAP));
+  PROFILE === 'simultaneous-edits' ? 1 :
+    PROFILE === 'independent-edits' ? 50 :
+      PROFILE === 'queue-backlog' ? 50 : PROFILE === 'promotion' ? 40 : 100;
+const DEFAULT_FEATURES = PROFILE === 'large-upload' ? 2500 :
+  PROFILE === 'independent-edits' ? VUS : PROFILE_FEATURE_CAP;
+const FEATURES = Number(__ENV.MYOTA_LOAD_TEST_FEATURES || DEFAULT_FEATURES);
 const PADDING_BYTES = Number(__ENV.MYOTA_LOAD_TEST_PADDING_BYTES || 1024);
 const IMPORTS_PER_VU_CAP = PROFILE === 'queue-backlog' ? 30 : PROFILE === 'promotion' ? 2 : 5;
 const IMPORTS_PER_VU = Number(__ENV.MYOTA_LOAD_TEST_IMPORTS_PER_VU || IMPORTS_PER_VU_CAP);
-const VALID_PROFILES = new Set(['large-upload', 'simultaneous-edits', 'preprocessing', 'promotion', 'queue-backlog', 'cleanup-only']);
+const VALID_PROFILES = new Set(['large-upload', 'simultaneous-edits', 'independent-edits', 'preprocessing', 'promotion', 'queue-backlog', 'cleanup-only']);
 const hostname = BASE_URL.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', 'gateway', 'myota-gateway', 'host.docker.internal']);
 const ALLOWED_NONPROD_HOSTS = new Set((__ENV.MYOTA_LOAD_TEST_ALLOWED_HOSTS || '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
@@ -46,6 +49,9 @@ if (!/^[1-9][0-9]*(s|m)$/.test(DURATION) || durationSeconds(DURATION) > 600) {
 }
 if (!Number.isInteger(FEATURES) || FEATURES < 1 || FEATURES > PROFILE_FEATURE_CAP) {
   throw new Error(`MYOTA_LOAD_TEST_FEATURES exceeds the safe cap for ${PROFILE}`);
+}
+if (PROFILE === 'independent-edits' && FEATURES !== VUS) {
+  throw new Error('independent-edits requires exactly one fixture feature per VU');
 }
 if (PROFILE === 'promotion' && FEATURES % 40 !== 0) {
   throw new Error('The promotion profile requires a feature count divisible by 40 for an exact 2.5%/2.5% split.');
@@ -374,32 +380,81 @@ export function setup() {
   if (PROFILE === 'cleanup-only') return { token, runId, cleanupOnly: true };
   try {
     let seedEntityId = null;
-    if (PROFILE === 'simultaneous-edits') {
-      const importId = requestImport(token, runId, 1, 'setup-seed');
-      if (!importId || waitForPreprocessing(token, runId, importId) === 'FAILED') throw new Error('Could not create the shared edit fixture.');
-      const page = http.get(`${BASE_URL}/v1/geodata/imports/${importId}/candidates?page=1&pageSize=10`, auth(token));
-      const pageItems = page.json('items') || [];
-      const candidateId = pageItems.length ? pageItems[0].id : null;
-      if (!candidateId) throw new Error('Edit fixture candidate was not staged.');
-      http.post(`${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`, JSON.stringify({
-        candidateIds: [candidateId], reviewerId: 'load-test', validationStatus: 'VALID', note: 'Synthetic load-test fixture',
-      }), auth(token));
-      http.post(`${BASE_URL}/v1/geodata/imports/${importId}/process`, JSON.stringify({
-        candidateIds: [candidateId], targetStatus: 'CANDIDATE', processorId: 'load-test', note: 'Synthetic load-test fixture',
-      }), auth(token));
+    let seedEntityIds = [];
+    if (PROFILE === 'simultaneous-edits' || PROFILE === 'independent-edits') {
+      const fixtureCount = PROFILE === 'independent-edits' ? VUS : 1;
+      const importId = requestImport(token, runId, fixtureCount, 'setup-seed');
+      if (!importId || waitForPreprocessing(token, runId, importId) === 'FAILED') {
+        throw new Error('Could not create the edit-profile fixtures.');
+      }
+      const page = http.get(
+        `${BASE_URL}/v1/geodata/imports/${importId}/candidates?page=1&pageSize=${fixtureCount}`,
+        auth(token),
+      );
+      const candidateIds = (page.json('items') || []).map((item) => item.id);
+      if (candidateIds.length !== fixtureCount || candidateIds.some((id) => !id)) {
+        throw new Error(`Edit profile staged ${candidateIds.length} fixtures; expected ${fixtureCount}.`);
+      }
+      const validation = http.post(
+        `${BASE_URL}/v1/geodata/imports/${importId}/candidates/validate`,
+        JSON.stringify({
+          candidateIds, reviewerId: 'load-test', validationStatus: 'VALID',
+          note: 'Synthetic load-test fixture',
+        }),
+        auth(token),
+      );
+      if (validation.status !== 200) throw new Error('Could not validate the edit-profile fixtures.');
+      const promotion = http.post(
+        `${BASE_URL}/v1/geodata/imports/${importId}/process`,
+        JSON.stringify({
+          candidateIds, targetStatus: 'CANDIDATE', processorId: 'load-test',
+          note: 'Synthetic load-test fixture',
+        }),
+        auth(token),
+      );
+      if (promotion.status !== 200 && promotion.status !== 202) {
+        throw new Error('Could not queue the edit-profile fixtures.');
+      }
       const deadline = Date.now() + 120000;
+      let promoted = false;
       while (Date.now() < deadline) {
         const detail = http.get(`${BASE_URL}/v1/geodata/imports/${importId}`, auth(token));
         const stats = detail.json('stats') || {};
-        if (Number(stats.created || 0) + Number(stats.updated || 0) > 0) break;
+        promoted = Number(stats.created || 0) + Number(stats.updated || 0) >= fixtureCount;
+        if (promoted) break;
         sleep(2);
       }
-      const listed = http.get(`${BASE_URL}/v1/geodata/entities?page=1&pageSize=100`, auth(token));
-      const fixture = (listed.json('items') || []).find((entity) => entity.name && entity.name.includes(runId));
-      seedEntityId = fixture && fixture.id;
-      if (!seedEntityId) throw new Error('Promotion did not produce the shared edit fixture.');
+      if (!promoted) throw new Error('Edit-profile fixture promotion did not reach its expected count.');
+      const pageSize = 100;
+      const firstPage = http.get(
+        `${BASE_URL}/v1/geodata/entities?page=1&pageSize=${pageSize}`,
+        auth(token),
+      );
+      const total = Number(firstPage.json('total') || 0);
+      const pageCount = Math.min(100, Math.max(1, Math.ceil(total / pageSize)));
+      const fixtureEntities = [];
+      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+        const listed = pageNumber === 1 ? firstPage : http.get(
+          `${BASE_URL}/v1/geodata/entities?page=${pageNumber}&pageSize=${pageSize}`,
+          auth(token),
+        );
+        fixtureEntities.push(...(listed.json('items') || []).filter(
+          (entity) => entity.name && entity.name.includes(runId),
+        ));
+        if (fixtureEntities.length >= fixtureCount) break;
+      }
+      seedEntityIds = fixtureEntities
+        .sort((left, right) => String(left.name).localeCompare(String(right.name)))
+        .map((entity) => entity.id);
+      if (seedEntityIds.length !== fixtureCount ||
+          new Set(seedEntityIds).size !== fixtureCount) {
+        throw new Error(
+          `Edit profile found ${seedEntityIds.length} unique entities; expected ${fixtureCount}.`,
+        );
+      }
+      seedEntityId = seedEntityIds[0];
     }
-    return { token, runId, seedEntityId };
+    return { token, runId, seedEntityId, seedEntityIds };
   } catch (error) {
     cleanupRun(token, runId);
     throw error;
@@ -414,12 +469,17 @@ export default function (data) {
     return;
   }
 
-  if (PROFILE === 'simultaneous-edits') {
-    const response = http.patch(`${BASE_URL}/v1/geodata/entities/${encodeURIComponent(data.seedEntityId)}`, JSON.stringify({
+  if (PROFILE === 'simultaneous-edits' || PROFILE === 'independent-edits') {
+    const entityId = PROFILE === 'independent-edits'
+      ? data.seedEntityIds[(__VU - 1) % data.seedEntityIds.length]
+      : data.seedEntityId;
+    const operation = PROFILE === 'independent-edits'
+      ? 'independent-entity-edit' : 'same-row-entity-edit';
+    const response = http.patch(`${BASE_URL}/v1/geodata/entities/${encodeURIComponent(entityId)}`, JSON.stringify({
       editorId: 'load-test', name: `Load test ${data.runId} edit ${__VU}-${__ITER}`,
       note: 'Concurrent edit workload against a test-owned fixture',
-    }), auth(data.token));
-    check(response, { 'concurrent entity edit succeeded': (r) => r.status === 200 });
+    }), auth(data.token, 'application/json', operation));
+    check(response, { [`${operation} succeeded`]: (r) => r.status === 200 });
     sleep(1);
     return;
   }

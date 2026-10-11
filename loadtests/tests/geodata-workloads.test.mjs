@@ -17,6 +17,8 @@ const response = (status, payload) => ({
 
 async function harness(overrides = {}, behavior = {}) {
   const requests = [], checks = [], logs = [];
+  const fixtureCount = Number(overrides.MYOTA_LOAD_TEST_VUS || 8);
+  let fixturesPromoted = false;
   const environment = {
     MYOTA_ENV: 'development', MYOTA_LOAD_TEST_ALLOW_NONPROD: 'YES',
     MYOTA_BASE_URL: 'http://localhost:8090', MYOTA_LOAD_TEST_PROFILE: 'large-upload',
@@ -42,6 +44,36 @@ async function harness(overrides = {}, behavior = {}) {
       }
       if (method === 'post' && url.endsWith('/complete')) {
         return behavior.complete || response(202, { importRun: { id: 'test-import' } });
+      }
+      if (method === 'post' && url.endsWith('/v1/geodata/imports')) {
+        return response(202, { id: 'test-import' });
+      }
+      if (method === 'post' && url.endsWith('/candidates/validate')) {
+        return response(200, { validated: true });
+      }
+      if (method === 'post' && url.endsWith('/process')) {
+        fixturesPromoted = true;
+        return response(202, { queued: true });
+      }
+      if (method === 'patch') return response(200, { updated: true });
+      if (method === 'get' && url.includes('/candidates?')) {
+        return response(200, {
+          items: Array.from({ length: fixtureCount }, (_, index) => ({ id: `candidate-${index + 1}` })),
+        });
+      }
+      if (method === 'get' && url.includes('/v1/geodata/imports/test-import')) {
+        return response(200, fixturesPromoted
+          ? { status: 'COMPLETED', stats: { created: fixtureCount, updated: 0 } }
+          : { status: 'PREPROCESSED' });
+      }
+      if (method === 'get' && url.includes('/v1/geodata/entities?page=')) {
+        return response(200, {
+          total: fixtureCount,
+          items: Array.from({ length: fixtureCount }, (_, index) => ({
+            id: `entity-${index + 1}`,
+            name: `Load test lt-upload-regression feature ${index}`,
+          })),
+        });
       }
       if (method === 'get') return behavior.progress || response(200, { status: 'UPLOADING' });
       if (method === 'del') return response(200, { status: 'ABORTED' });
@@ -73,7 +105,10 @@ async function harness(overrides = {}, behavior = {}) {
   await module.evaluate();
   return {
     requests, checks, logs, options: module.namespace.options,
-    run: () => module.namespace.default({ token: 'test-token', runId: 'lt-upload-regression' }),
+    run: (data, vu = 1) => {
+      context.__VU = vu;
+      return module.namespace.default(data || { token: 'test-token', runId: 'lt-upload-regression' });
+    },
     setup: () => module.namespace.setup(),
     teardown: () => module.namespace.teardown({ token: 'test-token', runId: 'lt-upload-regression' }),
   };
@@ -218,6 +253,40 @@ test('all profiles allow up to 50 VUs and queue backlog can scale to its 50-VU c
   });
   assert.equal(backlog.options.scenarios.geodata_workload.preAllocatedVUs, 50);
   assert.equal(backlog.options.scenarios.geodata_workload.maxVUs, 50);
+});
+
+test('independent-edits assigns one exact run-owned row to each VU', async () => {
+  const h = await harness({
+    MYOTA_LOAD_TEST_PROFILE: 'independent-edits',
+    MYOTA_LOAD_TEST_VUS: '3',
+    MYOTA_LOAD_TEST_FEATURES: '3',
+    MYOTA_LOAD_TEST_RUN_ID: 'lt-upload-regression',
+  });
+  const data = h.setup();
+  assert.equal(data.seedEntityIds.length, 3);
+  assert.equal(new Set(data.seedEntityIds).size, 3);
+  const importRequest = h.requests.find(r => r.url.endsWith('/v1/geodata/imports'));
+  assert.equal(JSON.parse(importRequest.body).features.length, 3);
+  const promotion = h.requests.find(r => r.url.endsWith('/process'));
+  assert.equal(JSON.parse(promotion.body).candidateIds.length, 3);
+
+  h.run(data, 1);
+  h.run(data, 2);
+  h.run(data, 3);
+  const edits = h.requests.filter(r => r.method === 'patch');
+  const entityIds = edits.map(r => decodeURIComponent(r.url.split('/').at(-1)));
+  assert.equal(edits.length, 3);
+  assert.equal(new Set(entityIds).size, 3);
+  assert.ok(edits.every(r => r.params.tags.operation === 'independent-entity-edit'));
+  assert.ok(h.checks.filter(c => c.label === 'independent-entity-edit succeeded').every(c => c.success));
+});
+
+test('independent-edits rejects fixture counts that do not match the VU count', async () => {
+  await assert.rejects(harness({
+    MYOTA_LOAD_TEST_PROFILE: 'independent-edits',
+    MYOTA_LOAD_TEST_VUS: '3',
+    MYOTA_LOAD_TEST_FEATURES: '2',
+  }), /exactly one fixture feature per VU/);
 });
 
 test('production workload configuration allows 50 VUs but rejects 51', async () => {
