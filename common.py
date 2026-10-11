@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from metrics import METRICS
 from otel import telemetry_for
+from myota_logging import log_http_completed, start_http_span
 
 # Geodata imports are sent as JSON envelopes and can legitimately contain a
 # sizeable pasted FeatureCollection. Deployments may lower this explicitly,
@@ -566,11 +567,11 @@ class JsonHandler(BaseHTTPRequestHandler):
         try:
             log_http_completed(
                 logging.getLogger(f"{self.service}.http"),
-            method=getattr(self, "command", "UNKNOWN"),
-            route=route_name,
-            status=status,
-            duration_ms=(time.perf_counter() - started) * 1000,
-            request_id=getattr(self, "request_id", ""),
+                method=getattr(self, "command", "UNKNOWN"),
+                route=route_name,
+                status=status,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                request_id=getattr(self, "request_id", ""),
                 correlation_id=getattr(self, "correlation_id", ""),
             )
         finally:
@@ -619,12 +620,12 @@ class JsonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("X-Request-ID", self.request_id)
             self.send_header("X-Correlation-ID", self.correlation_id)
-        if self._http_span and self._http_span.trace_id:
-            self.send_header("X-Trace-ID", self._http_span.trace_id)
-        self.send_header(
-            "Access-Control-Expose-Headers",
-            "X-Request-ID, X-Correlation-ID, X-Trace-ID",
-        )
+            if self._http_span and self._http_span.trace_id:
+                self.send_header("X-Trace-ID", self._http_span.trace_id)
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "X-Request-ID, X-Correlation-ID, X-Trace-ID",
+            )
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header(
                 "Access-Control-Allow-Headers",
