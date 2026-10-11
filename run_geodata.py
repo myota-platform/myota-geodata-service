@@ -1,11 +1,10 @@
 import os
 
+from common import BoundedThreadingHTTPServer
+from geodata import GeoHandler
 from myota_logging import configure_logging
 
 configure_logging("myota-geodata", component="api")
-
-from common import BoundedThreadingHTTPServer
-from geodata import GeoHandler
 
 # API replicas hydrate read state only. Durable import work is dispatched and
 # recovered by the separately scalable JetStream worker Deployment.
