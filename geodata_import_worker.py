@@ -433,7 +433,9 @@ async def _consume(
                         f"durable {consumer} received unexpected work type"
                     )
                 message_id = str(
-                    getattr(message, "header", lambda _name: None)("Nats-Msg-Id")
+                    getattr(message, "header", lambda _name: None)(
+                        "Nats-Msg-Id"
+                    )
                     or event.get("causationId")
                     or event.get("workId")
                     or event_id
@@ -462,9 +464,9 @@ async def _consume(
                         logging.INFO,
                         "job.started",
                         component="geodata-import-processing",
-                    messaging_system="nats",
-                    messaging_destination=subject,
-                    messaging_message_id=message_id,
+                        messaging_system="nats",
+                        messaging_destination=subject,
+                        messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=message_id,
                         event_id=event_id,
@@ -503,7 +505,8 @@ async def _consume(
                     correlation_id=correlation_id,
                     attempt=message.metadata.num_delivered,
                     duration_ms=round(
-                        (asyncio.get_running_loop().time() - job_started_at) * 1000,
+                        (asyncio.get_running_loop().time() - job_started_at)
+                        * 1000,
                         3,
                     ),
                 )
@@ -576,9 +579,9 @@ async def _consume(
                         logging.ERROR,
                         "job.failed",
                         component="geodata-import-processing",
-                    messaging_system="nats",
-                    messaging_destination=subject,
-                    messaging_message_id=message_id,
+                        messaging_system="nats",
+                        messaging_destination=subject,
+                        messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=event_id,
                         event_id=event_id,
@@ -597,9 +600,9 @@ async def _consume(
                         logging.WARNING,
                         "job.retry",
                         component="geodata-import-processing",
-                    messaging_system="nats",
-                    messaging_destination=subject,
-                    messaging_message_id=message_id,
+                        messaging_system="nats",
+                        messaging_destination=subject,
+                        messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=event_id,
                         event_id=event_id,
