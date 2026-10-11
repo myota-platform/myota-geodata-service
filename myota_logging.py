@@ -22,7 +22,7 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+_JWT = re.compile(\n    r"\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b"\n)
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|"
     r"access[_-]?key|signing[_-]?key)\b(\s*[:=]\s*)([^\s,;]+)"
@@ -128,7 +128,7 @@ class _SafeFilter(logging.Filter):
             pass
         record.service_name = self.service_name
         record.service_namespace = "myota"
-        record.deployment_environment = os.environ.get("MYOTA_ENV", "development")
+        record.deployment_environment = os.environ.get(\n            "MYOTA_ENV", "development"\n        )
         record.service_instance_id = os.environ.get("HOSTNAME", "local")
         return True
 
@@ -151,7 +151,7 @@ class _JsonFormatter(logging.Formatter):
             "deployment.environment": getattr(
                 record, "deployment_environment", "development"
             ),
-            "service.instance.id": getattr(record, "service_instance_id", "local"),
+            "service.instance.id": getattr(\n                record, "service_instance_id", "local"\n            ),
         }
         for key in (
             "trace_id",
@@ -171,7 +171,7 @@ class _JsonFormatter(logging.Formatter):
                 continue
             if isinstance(value, bool | int | float | str):
                 document[key] = (
-                    redact_text(value, 256) if isinstance(value, str) else value
+                    redact_text(value, 256)\n                    if isinstance(value, str)\n                    else value
                 )
         return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
 
@@ -207,7 +207,7 @@ def configure_logging(service_name: str, component: str = "service") -> None:
             )
             resource = Resource.create(
                 {
-                    "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
+                    "service.name": os.environ.get(\n                        "OTEL_SERVICE_NAME", service_name\n                    ),
                     "service.namespace": "myota",
                     "deployment.environment": os.environ.get(
                         "MYOTA_ENV", "development"
@@ -225,7 +225,7 @@ def configure_logging(service_name: str, component: str = "service") -> None:
                 )
             )
             set_logger_provider(provider)
-            otlp = LoggingHandler(level=logging.NOTSET, logger_provider=provider)
+            otlp = LoggingHandler(\n                level=logging.NOTSET, logger_provider=provider\n            )
             otlp.addFilter(safe_filter)
             root.addHandler(otlp)
         except Exception:
