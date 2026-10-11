@@ -13,6 +13,8 @@ from myota_logging import (
     log_http_completed,
     inject_messaging_headers,
     messaging_span,
+    start_http_span,
+    inject_trace_context,
 )
 
 
