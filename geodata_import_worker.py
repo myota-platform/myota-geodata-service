@@ -17,6 +17,7 @@ from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.errors import FetchTimeoutError
 
 from geodata import GeoHandler
+from myota_logging import configure_logging, log_event, messaging_span
 
 LOG = logging.getLogger("geodata.import.worker")
 MAX_DELIVERIES = int(os.environ.get("GEODATA_WORKER_MAX_DELIVERIES", "100"))
@@ -432,6 +433,27 @@ async def _consume(
                 message_id = str(
                     event.get("causationId") or event.get("workId") or event_id
                 )
+                correlation_id = event.get("correlationId") or getattr(
+                    message, "headers", {}
+                ).get("Myota-Correlation-Id")
+                log_event(
+                    LOG, logging.INFO, "job.received",
+                    component="geodata-import-processing",
+                    job_type=event_type, job_id=message_id, event_id=event_id,
+                    correlation_id=correlation_id,
+                    attempt=message.metadata.num_delivered,
+                )
+
+                async def process_with_span() -> None:
+                    log_event(
+                        LOG, logging.INFO, "job.started",
+                        component="geodata-import-processing",
+                        job_type=event_type, job_id=message_id,
+                        event_id=event_id, correlation_id=correlation_id,
+                        attempt=message.metadata.num_delivered,
+                    )
+                    with messaging_span("myota-geodata", message):
+                        await process_with_span()
                 if _already_processed(consumer, message_id):
                     if await asyncio.to_thread(
                         _work_still_pending, consumer, event
@@ -440,13 +462,20 @@ async def _consume(
                             "replaying work %s because its owning row remains active",
                             event_id,
                         )
-                        await _with_ack_heartbeat(message, handler(event))
+                        await process_with_span()
                     else:
                         await message.ack()
                         continue
                 else:
-                    await _with_ack_heartbeat(message, handler(event))
+                    await process_with_span()
                 _record_processed(consumer, event)
+                log_event(
+                    LOG, logging.INFO, "job.completed",
+                    component="geodata-import-processing",
+                    job_type=event_type, job_id=message_id, event_id=event_id,
+                    correlation_id=correlation_id,
+                    attempt=message.metadata.num_delivered,
+                )
                 await message.ack()
             except Exception as error:
                 metadata = message.metadata
@@ -511,25 +540,33 @@ async def _consume(
                                 "WHERE id=%s AND status IN ('QUEUED','PROCESSING')",
                                 (str(error), aggregate_id),
                             )
-                    LOG.exception(
-                        "event %s exhausted delivery attempts", event_id
+                    log_event(
+                        LOG, logging.ERROR, "job.failed",
+                        component="geodata-import-processing",
+                        job_type=event_type, job_id=event_id, event_id=event_id,
+                        attempt=metadata.num_delivered,
+                        error_type=type(error).__name__, outcome="dead_lettered",
                     )
                     await message.term()
                 else:
-                    LOG.warning(
-                        "event processing failed; NAK for retry: %s", error
+                    retry_delay = min(
+                        max(0, RETRY_DELAY_SECONDS) * metadata.num_delivered,
+                        60,
                     )
-                    await message.nak(
-                        delay=min(
-                            max(0, RETRY_DELAY_SECONDS)
-                            * metadata.num_delivered,
-                            60,
-                        )
+                    log_event(
+                        LOG, logging.WARNING, "job.retry",
+                        component="geodata-import-processing",
+                        job_type=event_type, job_id=event_id, event_id=event_id,
+                        attempt=metadata.num_delivered,
+                        retry_delay_seconds=retry_delay,
+                        error_type=type(error).__name__,
                     )
+                    await message.nak(delay=retry_delay)
     await subscription.unsubscribe()
 
 
 async def run() -> None:
+    configure_logging("myota-geodata", "geodata-import-processing")
     if not GeoHandler.store.durable:
         raise RuntimeError("GEO_DATABASE_URL is required for import workers")
     await asyncio.to_thread(GeoHandler.store.wait_for_authority_schema)
