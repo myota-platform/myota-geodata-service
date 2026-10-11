@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from myota_logging import configure_logging
+
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -5519,5 +5521,6 @@ install_operations(GeoHandler)
 
 
 if __name__ == "__main__":
+    configure_logging("myota-geodata", component="api")
     GeoHandler.store.hydrate()
     ThreadingHTTPServer(("0.0.0.0", 8003), GeoHandler).serve_forever()
