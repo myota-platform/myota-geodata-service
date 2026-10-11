@@ -746,7 +746,9 @@ class JsonHandler(BaseHTTPRequestHandler):
         except ValueError:
             request_body_size = 0
         self._otel_request = telemetry_for(self.service).start_request(
-            method, self.path.split("?", 1)[0], request_body_size,
+            method,
+            self.path.split("?", 1)[0],
+            request_body_size,
             create_span=False,
         )
         if self.path.split("?", 1)[0] == "/metrics":
