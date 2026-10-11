@@ -388,3 +388,55 @@ def configure_logging(service_name: str, component: str = "service") -> None:
         except Exception:
             pass
     _CONFIGURED = True
+
+
+@contextmanager
+def messaging_span(
+    service_name: str,
+    message: Any,
+    *,
+    operation: str = "process",
+) -> Iterator[Any | None]:
+    """Extract NATS W3C context and scope one message operation span."""
+    try:
+        from opentelemetry import propagate, trace
+        from opentelemetry.trace import SpanKind
+
+        carrier = getattr(message, "headers", None) or {}
+        parent = propagate.extract(carrier)
+        subject = str(getattr(message, "subject", "unknown"))
+        message_id = getattr(message, "header", lambda _name: None)(
+            "Nats-Msg-Id"
+        )
+        correlation_id = carrier.get("Myota-Correlation-Id")
+        delivery = getattr(
+            getattr(message, "metadata", None), "num_delivered", None
+        )
+        tracer = trace.get_tracer(service_name)
+    except Exception:
+        yield None
+        return
+
+    with tracer.start_as_current_span(
+        f"{operation} {subject}", context=parent, kind=SpanKind.CONSUMER
+    ) as span:
+        span.set_attribute("messaging.system", "nats")
+        span.set_attribute("messaging.destination.name", subject)
+        span.set_attribute("messaging.operation.type", operation)
+        if message_id:
+            span.set_attribute("messaging.message.id", str(message_id))
+        if correlation_id:
+            span.set_attribute("myota.correlation_id", str(correlation_id))
+        if delivery is not None:
+            span.set_attribute("messaging.nats.delivery_count", int(delivery))
+        yield span
+
+
+def inject_messaging_headers(
+    headers: dict[str, str], *, correlation_id: str | None = None
+) -> dict[str, str]:
+    """Inject W3C trace context and stable, non-sensitive workflow context."""
+    inject_trace_context(headers)
+    if correlation_id:
+        headers["Myota-Correlation-Id"] = redact_text(correlation_id, 128)
+    return headers
