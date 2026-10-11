@@ -184,6 +184,33 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
 
 
+def log_http_completed(
+    logger: logging.Logger,
+    *,
+    method: str,
+    route: str,
+    status: int,
+    duration_ms: float,
+    request_id: str,
+    correlation_id: str,
+) -> None:
+    """Emit one sanitized completion record for an HTTP request."""
+    level = logging.ERROR if status >= 500 else logging.WARNING if status >= 400 else logging.INFO
+    fields: dict[str, Any] = {
+        "http.request.method": method,
+        "http.route": route,
+        "http.response.status_code": status,
+        "duration_ms": round(max(0.0, duration_ms), 3),
+        "request_id": request_id,
+        "correlation_id": correlation_id,
+    }
+    if status >= 500:
+        fields["error.classification"] = "server_error"
+    elif status >= 400:
+        fields["error.classification"] = "client_error"
+    log_event(logger, level, "http.request.completed", component="api", **fields)
+
+
 def configure_logging(service_name: str, component: str = "service") -> None:
     global _CONFIGURED
     if _CONFIGURED:
