@@ -217,7 +217,9 @@ class HttpRequestSpan:
 
 def configure_tracing(service_name: str) -> None:
     global _TRACE_CONFIGURED
-    if _TRACE_CONFIGURED or os.environ.get("MYOTA_OTEL_ENABLED", "0").strip().lower() not in {
+    if _TRACE_CONFIGURED or os.environ.get(
+        "MYOTA_OTEL_ENABLED", "0"
+    ).strip().lower() not in {
         "1",
         "true",
         "yes",
