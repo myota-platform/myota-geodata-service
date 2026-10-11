@@ -422,6 +422,8 @@ async def _consume(
             continue
         for message in messages:
             event: dict[str, Any] = {}
+            message_id = "unknown"
+            job_started_at = asyncio.get_running_loop().time()
             try:
                 event = json.loads(message.data)
                 event_id, event_type = _event_key(event)
@@ -431,7 +433,10 @@ async def _consume(
                         f"durable {consumer} received unexpected work type"
                     )
                 message_id = str(
-                    event.get("causationId") or event.get("workId") or event_id
+                    getattr(message, "header", lambda _name: None)("Nats-Msg-Id")
+                    or event.get("causationId")
+                    or event.get("workId")
+                    or event_id
                 )
                 correlation_id = event.get("correlationId") or getattr(
                     message, "headers", {}
@@ -441,6 +446,9 @@ async def _consume(
                     logging.INFO,
                     "job.received",
                     component="geodata-import-processing",
+                    messaging_system="nats",
+                    messaging_destination=subject,
+                    messaging_message_id=message_id,
                     job_type=event_type,
                     job_id=message_id,
                     event_id=event_id,
@@ -454,6 +462,9 @@ async def _consume(
                         logging.INFO,
                         "job.started",
                         component="geodata-import-processing",
+                    messaging_system="nats",
+                    messaging_destination=subject,
+                    messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=message_id,
                         event_id=event_id,
@@ -483,11 +494,18 @@ async def _consume(
                     logging.INFO,
                     "job.completed",
                     component="geodata-import-processing",
+                    messaging_system="nats",
+                    messaging_destination=subject,
+                    messaging_message_id=message_id,
                     job_type=event_type,
                     job_id=message_id,
                     event_id=event_id,
                     correlation_id=correlation_id,
                     attempt=message.metadata.num_delivered,
+                    duration_ms=round(
+                        (asyncio.get_running_loop().time() - job_started_at) * 1000,
+                        3,
+                    ),
                 )
                 await message.ack()
             except Exception as error:
@@ -558,6 +576,9 @@ async def _consume(
                         logging.ERROR,
                         "job.failed",
                         component="geodata-import-processing",
+                    messaging_system="nats",
+                    messaging_destination=subject,
+                    messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=event_id,
                         event_id=event_id,
@@ -576,6 +597,9 @@ async def _consume(
                         logging.WARNING,
                         "job.retry",
                         component="geodata-import-processing",
+                    messaging_system="nats",
+                    messaging_destination=subject,
+                    messaging_message_id=message_id,
                         job_type=event_type,
                         job_id=event_id,
                         event_id=event_id,
