@@ -433,9 +433,7 @@ async def _consume(
                         f"durable {consumer} received unexpected work type"
                     )
                 message_id = str(
-                    getattr(message, "header", lambda _name: None)(
-                        "Nats-Msg-Id"
-                    )
+                    (getattr(message, "headers", None) or {}).get("Nats-Msg-Id")
                     or event.get("causationId")
                     or event.get("workId")
                     or event_id
