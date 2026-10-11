@@ -15,6 +15,7 @@ _context: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "myota_log_context", default={}
 )
 _CONFIGURED = False
+_TRACE_CONFIGURED = False
 _SENSITIVE_KEY = re.compile(
     r"(authorization|password|passwd|secret|token|credential|api.?key|"
     r"signing.?key|dsn|connection.?string|email|profile|request.?body|"
@@ -184,6 +185,110 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(document, separators=(",", ":"), ensure_ascii=False)
 
 
+class HttpRequestSpan:
+    def __init__(self, span: Any, scope: Any, method: str) -> None:
+        self.span = span
+        self.scope = scope
+        self.method = method
+        self.finished = False
+
+    @property
+    def trace_id(self) -> str | None:
+        context = self.span.get_span_context()
+        return f"{context.trace_id:032x}" if context.is_valid else None
+
+    def set_result(self, status: int, route: str) -> None:
+        self.span.update_name(f"{self.method} {route}")
+        self.span.set_attribute("http.request.method", self.method)
+        self.span.set_attribute("http.route", route)
+        self.span.set_attribute("http.response.status_code", status)
+        if status >= 500:
+            from opentelemetry.trace import Status, StatusCode
+
+            self.span.set_status(Status(StatusCode.ERROR))
+
+    def end(self) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        self.scope.__exit__(None, None, None)
+        self.span.end()
+
+
+def configure_tracing(service_name: str) -> None:
+    global _TRACE_CONFIGURED
+    if _TRACE_CONFIGURED or os.environ.get("MYOTA_OTEL_ENABLED", "0").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        endpoint = os.environ.get(
+            "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317"
+        )
+        resource = Resource.create(
+            {
+                "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
+                "service.namespace": "myota",
+                "deployment.environment": os.environ.get(
+                    "MYOTA_ENV", "development"
+                ),
+                "service.instance.id": os.environ.get("HOSTNAME", "local"),
+            }
+        )
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(
+            BatchSpanProcessor(
+                OTLPSpanExporter(
+                    endpoint=endpoint,
+                    insecure=not endpoint.startswith("https://"),
+                )
+            )
+        )
+        trace.set_tracer_provider(provider)
+        _TRACE_CONFIGURED = True
+    except Exception:
+        return
+
+
+def start_http_span(
+    service_name: str, method: str, carrier: dict[str, str]
+) -> HttpRequestSpan | None:
+    try:
+        from opentelemetry import propagate, trace
+        from opentelemetry.trace import SpanKind
+
+        parent = propagate.extract(carrier)
+        span = trace.get_tracer(service_name).start_span(
+            f"{method} request", context=parent, kind=SpanKind.SERVER
+        )
+        scope = trace.use_span(span, end_on_exit=False)
+        scope.__enter__()
+        return HttpRequestSpan(span, scope, method)
+    except Exception:
+        return None
+
+
+def inject_trace_context(headers: dict[str, str]) -> dict[str, str]:
+    try:
+        from opentelemetry import propagate
+
+        propagate.inject(headers)
+    except Exception:
+        pass
+    return headers
+
+
 def log_http_completed(
     logger: logging.Logger,
     *,
@@ -221,6 +326,7 @@ def log_http_completed(
 
 def configure_logging(service_name: str, component: str = "service") -> None:
     global _CONFIGURED
+    configure_tracing(service_name)
     if _CONFIGURED:
         return
     root = logging.getLogger()
