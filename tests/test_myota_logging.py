@@ -10,6 +10,7 @@ from myota_logging import (
     bind_log_context,
     redact_text,
     safe_fields,
+    log_http_completed,
 )
 
 
@@ -69,3 +70,23 @@ def test_json_formatter_does_not_emit_unbounded_payload_fields():
     output = json.loads(_JsonFormatter().format(record))
     assert "payload" not in output
     assert "secret_key" not in output
+
+def test_http_completion_is_sanitized_and_classified(caplog):
+    logger = logging.getLogger("myota.http-test")
+    with caplog.at_level(logging.WARNING, logger="myota.http-test"):
+        log_http_completed(
+            logger,
+            method="POST",
+            route="/v1/imports/{importId}",
+            status=400,
+            duration_ms=12.34567,
+            request_id="request-1",
+            correlation_id="flow-1",
+        )
+    record = caplog.records[-1]
+    assert record.getMessage() == "http.request.completed"
+    assert record.http_route == "/v1/imports/{importId}"
+    assert record.http_response_status_code == 400
+    assert record.error_classification == "client_error"
+    assert record.request_id == "request-1"
+    assert record.correlation_id == "flow-1"
