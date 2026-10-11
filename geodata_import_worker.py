@@ -437,23 +437,32 @@ async def _consume(
                     message, "headers", {}
                 ).get("Myota-Correlation-Id")
                 log_event(
-                    LOG, logging.INFO, "job.received",
+                    LOG,
+                    logging.INFO,
+                    "job.received",
                     component="geodata-import-processing",
-                    job_type=event_type, job_id=message_id, event_id=event_id,
+                    job_type=event_type,
+                    job_id=message_id,
+                    event_id=event_id,
                     correlation_id=correlation_id,
                     attempt=message.metadata.num_delivered,
                 )
 
                 async def process_with_span() -> None:
                     log_event(
-                        LOG, logging.INFO, "job.started",
+                        LOG,
+                        logging.INFO,
+                        "job.started",
                         component="geodata-import-processing",
-                        job_type=event_type, job_id=message_id,
-                        event_id=event_id, correlation_id=correlation_id,
+                        job_type=event_type,
+                        job_id=message_id,
+                        event_id=event_id,
+                        correlation_id=correlation_id,
                         attempt=message.metadata.num_delivered,
                     )
                     with messaging_span("myota-geodata", message):
                         await _with_ack_heartbeat(message, handler(event))
+
                 if _already_processed(consumer, message_id):
                     if await asyncio.to_thread(
                         _work_still_pending, consumer, event
@@ -470,9 +479,13 @@ async def _consume(
                     await process_with_span()
                 _record_processed(consumer, event)
                 log_event(
-                    LOG, logging.INFO, "job.completed",
+                    LOG,
+                    logging.INFO,
+                    "job.completed",
                     component="geodata-import-processing",
-                    job_type=event_type, job_id=message_id, event_id=event_id,
+                    job_type=event_type,
+                    job_id=message_id,
+                    event_id=event_id,
                     correlation_id=correlation_id,
                     attempt=message.metadata.num_delivered,
                 )
@@ -541,11 +554,16 @@ async def _consume(
                                 (str(error), aggregate_id),
                             )
                     log_event(
-                        LOG, logging.ERROR, "job.failed",
+                        LOG,
+                        logging.ERROR,
+                        "job.failed",
                         component="geodata-import-processing",
-                        job_type=event_type, job_id=event_id, event_id=event_id,
+                        job_type=event_type,
+                        job_id=event_id,
+                        event_id=event_id,
                         attempt=metadata.num_delivered,
-                        error_type=type(error).__name__, outcome="dead_lettered",
+                        error_type=type(error).__name__,
+                        outcome="dead_lettered",
                     )
                     await message.term()
                 else:
@@ -554,9 +572,13 @@ async def _consume(
                         60,
                     )
                     log_event(
-                        LOG, logging.WARNING, "job.retry",
+                        LOG,
+                        logging.WARNING,
+                        "job.retry",
                         component="geodata-import-processing",
-                        job_type=event_type, job_id=event_id, event_id=event_id,
+                        job_type=event_type,
+                        job_id=event_id,
+                        event_id=event_id,
                         attempt=metadata.num_delivered,
                         retry_delay_seconds=retry_delay,
                         error_type=type(error).__name__,
