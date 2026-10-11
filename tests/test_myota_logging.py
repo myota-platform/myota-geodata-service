@@ -47,12 +47,14 @@ def test_structured_record_contains_resource_and_correlation_fields():
 
 
 def test_sensitive_fields_and_credential_text_are_redacted():
-    fields = safe_fields({
-        "request_id": "req-1",
-        "authorization": "Bearer abc.def",
-        "payload": {"private": "value"},
-        "safe": "password=hunter2",
-    })
+    fields = safe_fields(
+        {
+            "request_id": "req-1",
+            "authorization": "Bearer abc.def",
+            "payload": {"private": "value"},
+            "safe": "password=hunter2",
+        }
+    )
     assert fields == {"request_id": "req-1", "safe": "password=[REDACTED]"}
     assert "abc.def" not in redact_text("Authorization: Bearer abc.def")
     assert "[REDACTED]" in redact_text("password=hunter2")

@@ -22,9 +22,7 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_JWT = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
-)
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|"
     r"access[_-]?key|signing[_-]?key)\b(\s*[:=]\s*)([^\s,;]+)"
@@ -33,7 +31,6 @@ _URL_CREDENTIALS = re.compile(r"(://)[^:/\s]+:[^@/\s]+@")
 
 
 def redact_text(value: str, limit: int = 1024) -> str:
-    """Redact common credential forms and bound arbitrary log text."""
     text = _BEARER.sub("Bearer [REDACTED]", value)
     text = _JWT.sub("[REDACTED_JWT]", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
@@ -42,7 +39,6 @@ def redact_text(value: str, limit: int = 1024) -> str:
 
 
 def safe_fields(fields: dict[str, Any]) -> dict[str, str | int | float | bool]:
-    """Keep bounded scalar context and drop sensitive or payload-shaped fields."""
     safe: dict[str, str | int | float | bool] = {}
     for key, value in fields.items():
         if not isinstance(key, str) or _SENSITIVE_KEY.search(key):
@@ -58,7 +54,6 @@ def safe_fields(fields: dict[str, Any]) -> dict[str, str | int | float | bool]:
 
 @contextmanager
 def bind_log_context(**fields: str) -> Iterator[None]:
-    """Bind request/workflow identifiers for nested logs in this execution."""
     prior = _context.get()
     safe = safe_fields(fields)
     token = _context.set({**prior, **{k: str(v) for k, v in safe.items()}})
@@ -76,7 +71,6 @@ def log_event(
     component: str,
     **fields: Any,
 ) -> None:
-    """Write an event with bounded structured fields; never pass payloads."""
     logger.log(
         level,
         redact_text(event),
@@ -93,16 +87,15 @@ class _SafeFilter(logging.Filter):
         super().__init__()
         self.service_name = service_name
         self.component = component
+        self._standard = logging.LogRecord("", 0, "", 0, "", (), None).__dict__
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
         except Exception:
             message = "log message formatting failed"
-        record.msg = redact_text(message)
-        record.args = ()
-        record.exc_info = None
-        record.exc_text = None
+        record.msg, record.args = redact_text(message), ()
+        record.exc_info, record.exc_text = None, None
         if not getattr(record, "event", None):
             record.event = record.msg
         else:
@@ -110,9 +103,7 @@ class _SafeFilter(logging.Filter):
         if not getattr(record, "component", None):
             record.component = self.component
         for key in list(record.__dict__):
-            if key.startswith("_") or key in logging.LogRecord(
-                "", 0, "", 0, "", (), None
-            ).__dict__:
+            if key.startswith("_") or key in self._standard:
                 continue
             if _SENSITIVE_KEY.search(key):
                 delattr(record, key)
@@ -137,19 +128,21 @@ class _SafeFilter(logging.Filter):
             pass
         record.service_name = self.service_name
         record.service_namespace = "myota"
-        record.deployment_environment = os.environ.get(
-            "MYOTA_ENV", "development"
-        )
+        record.deployment_environment = os.environ.get("MYOTA_ENV", "development")
         record.service_instance_id = os.environ.get("HOSTNAME", "local")
         return True
 
 
 class _JsonFormatter(logging.Formatter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._standard = logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+
     def format(self, record: logging.LogRecord) -> str:
         document: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, timezone.utc
-            ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "severity": record.levelname,
             "event": getattr(record, "event", record.getMessage()),
             "component": getattr(record, "component", "service"),
@@ -158,9 +151,7 @@ class _JsonFormatter(logging.Formatter):
             "deployment.environment": getattr(
                 record, "deployment_environment", "development"
             ),
-            "service.instance.id": getattr(
-                record, "service_instance_id", "local"
-            ),
+            "service.instance.id": getattr(record, "service_instance_id", "local"),
         }
         for key in (
             "trace_id",
@@ -173,11 +164,10 @@ class _JsonFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value:
                 document[key] = value
-        standard = logging.LogRecord("", 0, "", 0, "", (), None).__dict__
         for key, value in record.__dict__.items():
-            if key in standard or key.startswith("_") or _SENSITIVE_KEY.search(key):
+            if key in self._standard or key.startswith("_"):
                 continue
-            if key in document or value is None:
+            if _SENSITIVE_KEY.search(key) or key in document or value is None:
                 continue
             if isinstance(value, bool | int | float | str):
                 document[key] = (
@@ -187,7 +177,6 @@ class _JsonFormatter(logging.Formatter):
 
 
 def configure_logging(service_name: str, component: str = "service") -> None:
-    """Install JSON stdout logging and optional non-blocking OTLP log export."""
     global _CONFIGURED
     if _CONFIGURED:
         return
@@ -198,7 +187,6 @@ def configure_logging(service_name: str, component: str = "service") -> None:
     stream.setFormatter(_JsonFormatter())
     stream.addFilter(safe_filter)
     root.addHandler(stream)
-
     if os.environ.get("MYOTA_OTEL_ENABLED", "0").strip().lower() in {
         "1",
         "true",
@@ -219,9 +207,7 @@ def configure_logging(service_name: str, component: str = "service") -> None:
             )
             resource = Resource.create(
                 {
-                    "service.name": os.environ.get(
-                        "OTEL_SERVICE_NAME", service_name
-                    ),
+                    "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
                     "service.namespace": "myota",
                     "deployment.environment": os.environ.get(
                         "MYOTA_ENV", "development"
@@ -243,6 +229,5 @@ def configure_logging(service_name: str, component: str = "service") -> None:
             otlp.addFilter(safe_filter)
             root.addHandler(otlp)
         except Exception:
-            # The application remains available and continues to log to stdout.
             pass
     _CONFIGURED = True
