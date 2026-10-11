@@ -440,8 +440,8 @@ async def _consume(
                     or event.get("workId")
                     or event_id
                 )
-                correlation_id = event.get("correlationId") or getattr(
-                    message, "headers", {}
+                correlation_id = event.get("correlationId") or (
+                    getattr(message, "headers", None) or {}
                 ).get("Myota-Correlation-Id")
                 log_event(
                     LOG,
