@@ -11,6 +11,8 @@ from myota_logging import (
     redact_text,
     safe_fields,
     log_http_completed,
+    inject_messaging_headers,
+    messaging_span,
 )
 
 
@@ -170,3 +172,64 @@ def test_http_trace_context_is_extracted_and_injected():
     assert headers["traceparent"].startswith("00-")
     assert captured["scope_closed"] is True
     assert captured["ended"] is True
+
+
+def test_nats_trace_and_correlation_context_propagates():
+    captured = {}
+    traceparent = (
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-"
+        "00f067aa0ba902b7-01"
+    )
+
+    class FakeSpan:
+        def set_attribute(self, key, value):
+            captured[key] = value
+
+    class FakeTracer:
+        def start_as_current_span(self, name, *, context, kind):
+            captured.update(name=name, parent=context, kind=kind)
+            return FakeScope()
+
+    class FakeScope:
+        def __enter__(self):
+            return FakeSpan()
+
+        def __exit__(self, *_args):
+            captured["closed"] = True
+
+    parent = object()
+    fake_trace = ModuleType("opentelemetry.trace")
+    fake_trace.get_tracer = lambda _name: FakeTracer()
+    fake_trace.SpanKind = SimpleNamespace(CONSUMER=object(), PRODUCER=object())
+    fake_propagate = SimpleNamespace(
+        extract=lambda carrier: captured.update(carrier=carrier) or parent,
+        inject=lambda carrier: carrier.update(traceparent=traceparent),
+    )
+    fake_otel = ModuleType("opentelemetry")
+    fake_otel.trace = fake_trace
+    fake_otel.propagate = fake_propagate
+    with patch.dict(
+        sys.modules,
+        {"opentelemetry": fake_otel, "opentelemetry.trace": fake_trace},
+    ):
+        headers = inject_messaging_headers(
+            {}, correlation_id="workflow-1"
+        )
+        message = SimpleNamespace(
+            headers=headers,
+            subject="myota.work.example.v1",
+            metadata=SimpleNamespace(num_delivered=2),
+            header=lambda _name: "message-1",
+        )
+        with messaging_span("myota-test", message):
+            pass
+
+    assert headers["traceparent"] == traceparent
+    assert headers["Myota-Correlation-Id"] == "workflow-1"
+    assert captured["carrier"] is headers
+    assert captured["parent"] is parent
+    assert captured["messaging.system"] == "nats"
+    assert captured["messaging.destination.name"] == "myota.work.example.v1"
+    assert captured["messaging.message.id"] == "message-1"
+    assert captured["messaging.nats.delivery_count"] == 2
+    assert captured["closed"] is True
