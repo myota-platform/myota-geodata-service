@@ -79,11 +79,19 @@ def test_json_formatter_does_not_emit_unbounded_payload_fields():
 def test_http_completion_is_sanitized_and_classified(caplog):
     logger = logging.getLogger("myota.http-test")
     cases = [
-        (200, logging.INFO, None),
         (403, logging.WARNING, "client_error"),
         (500, logging.ERROR, "server_error"),
     ]
     with caplog.at_level(logging.DEBUG, logger="myota.http-test"):
+        log_http_completed(
+            logger,
+            method="POST",
+            route="/v1/imports/{importId}",
+            status=200,
+            duration_ms=12.34567,
+            request_id="request-1",
+            correlation_id="flow-1",
+        )
         for status, _level, _classification in cases:
             log_http_completed(
                 logger,
@@ -94,7 +102,8 @@ def test_http_completion_is_sanitized_and_classified(caplog):
                 request_id="request-1",
                 correlation_id="flow-1",
             )
-    records = caplog.records[-3:]
+    records = caplog.records
+    assert len(records) == len(cases)
     assert [record.levelno for record in records] == [
         case[1] for case in cases
     ]

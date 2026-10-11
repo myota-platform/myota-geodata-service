@@ -297,7 +297,6 @@ def inject_trace_context(headers: dict[str, str]) -> dict[str, str]:
         pass
     return headers
 
-
 def log_http_completed(
     logger: logging.Logger,
     *,
@@ -308,14 +307,10 @@ def log_http_completed(
     request_id: str,
     correlation_id: str,
 ) -> None:
-    """Emit one sanitized completion record for an HTTP request."""
-    level = (
-        logging.ERROR
-        if status >= 500
-        else logging.WARNING
-        if status >= 400
-        else logging.INFO
-    )
+    """Log failed HTTP requests; successful requests stay in metrics/traces."""
+    if status < 400:
+        return
+    level = logging.ERROR if status >= 500 else logging.WARNING
     fields: dict[str, Any] = {
         "http.request.method": method,
         "http.route": route,
