@@ -1762,6 +1762,11 @@ CREATE TABLE public.myota_schema_migration (
 INSERT INTO public.myota_schema_migration (migration_id, application_mode)
 VALUES ('baseline-v1', 'applied');
 
+-- Enable startup after installing the relational-authority schema.
+INSERT INTO public.geodata_schema_feature (name)
+VALUES ('row_authority_v1')
+ON CONFLICT (name) DO NOTHING;
+
 -- Create the least-privilege roles and QGIS grants from the authoritative
 -- Geodata migration source. Roles are cluster-level; grants are database-local.
 DO $$
