@@ -218,13 +218,14 @@ class GeodataStoreHydrationTests(unittest.TestCase):
         )
         self.assertNotIn("website", store._public_properties(entity))
         self.assertNotIn("description", store._public_properties(entity))
-        migration = (
+        baseline = (
             Path(__file__).parents[1]
             / "migrations"
-            / "022_entity_website_description.sql"
+            / "001_geodata_baseline.sql"
         ).read_text()
-        self.assertIn("ADD COLUMN IF NOT EXISTS website text", migration)
-        self.assertIn("ADD COLUMN IF NOT EXISTS description text", migration)
+        self.assertRegex(baseline, r"website text[\s,]")
+        self.assertRegex(baseline, r"description text[\s,]")
+        self.assertNotIn("INSERT INTO public.geodata_entity", baseline)
 
     def test_relational_entity_read_restores_centroid_from_postgis(self):
         class Result:
