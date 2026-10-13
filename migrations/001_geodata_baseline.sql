@@ -1775,7 +1775,7 @@ BEGIN
 END
 $$;
 GRANT USAGE ON SCHEMA public TO myota_geo_qgis_readonly, myota_geo_qgis_editor;
-GRANT SELECT ON qgis_entity_review_queue, qgis_approved_entities TO myota_geo_qgis_readonly;
-GRANT SELECT ON qgis_entity_review_queue, qgis_approved_entities TO myota_geo_qgis_editor;
-GRANT SELECT, INSERT, UPDATE ON geodata_edit_staging TO myota_geo_qgis_editor;
-REVOKE DELETE ON geodata_entity FROM myota_geo_qgis_editor;
+GRANT SELECT ON public.qgis_entity_review_queue, public.qgis_approved_entities TO myota_geo_qgis_readonly;
+GRANT SELECT ON public.qgis_entity_review_queue, public.qgis_approved_entities TO myota_geo_qgis_editor;
+GRANT SELECT, INSERT, UPDATE ON public.geodata_edit_staging TO myota_geo_qgis_editor;
+REVOKE DELETE ON public.geodata_entity FROM myota_geo_qgis_editor;
