@@ -1,87 +1,31 @@
 # Geodata migration source
 
-This directory is the canonical source for the geodata service schema. The
-ordered SQL files define the `myota_geo` database:
+This directory is the canonical source for the current `myota_geo` PostGIS
+schema. A new database is provisioned from
+[`001_geodata_baseline.sql`](001_geodata_baseline.sql), which captures the
+verified deployed catalog: extensions, relational tables, indexes, constraints,
+functions, triggers, views, QGIS roles/grants, relational authority, writer
+fencing, import recovery, retention, outbox correlation, and current entity
+fields. It contains schema only; it does not restore application rows or legacy
+JSON state.
 
-1. `001_geodata.sql` creates the core PostGIS entity, provenance, review and
-   conflation tables.
-2. `002_qgis_views.sql` creates the read-only QGIS review views.
-3. `003_production_pipeline.sql` adds refresh manifests, schedules,
-   disappearance policy, attachments, conflation history and QGIS staging.
-4. `004_location_enrichment.sql` adds normalized continent, country,
-   subdivision, province, county and city fields plus reverse-geocoding
-   provenance and indexes.
-5. `005_location_manual_precedence.sql` adds the municipality alias and
-   durable manual-location override fields, index, and QGIS view projections.
-6. `006_unscoped_imports.sql` makes programme assignment optional for
-   imported candidates and adds the category field used by global refresh
-   schedules.
-7. `007_relational_entity_persistence.sql` adds the nullable cross-service
-   programme slug and shared category code columns used by the service's
-   relational entity persistence adapter.
-8. `008_entity_category_assignments.sql` adds relational entity-to-category
-   assignments, enforces one primary category per entity, and backfills the
-   legacy primary category.
-9. `009_candidate_lifecycle.sql` removes the legacy `PROPOSED` lifecycle state,
-   normalizes old rows to `CANDIDATE`, and records that adapter/import runs and
-   community proposals are candidate sources rather than statuses.
-10. `010_import_preprocessing.sql` adds the normalized pre-processing records
-   and durable projection of the administrator-controlled NATS promotion queue.
-11. `011_import_recovery.sql` adds execution attempts, heartbeat/lease
-   timestamps, and the last recovery error used to resume abandoned imports
-   safely after a service restart.
-12. `012_import_finalization.sql` records who finalized an import and when,
-   while allowing staged candidate and queue data to be removed after review.
-13. `013_import_retention.sql` indexes finalized and inactive import runs
-    eligible for age-based retention cleanup.
-14. `014_resumable_uploads.sql` adds user-owned resumable S3 multipart upload
-    sessions, per-part checksums, idempotency, and expiry metadata.
-15. `015_jetstream_worker_dispatch.sql` adds recoverable promotion leases and
-    re-dispatches in-flight imports through JetStream during the migration.
-16. `016_relational_authority.sql` adds entity revisions, indexed audit and
-    auxiliary control records, promotion-job links, and a one-time legacy
-    metadata migration. A writer fence prevents obsolete snapshot writers
-    from corrupting authoritative rows. New API/consumer processes wait for
-    its feature marker before accepting work. Replaying migrations does not
-    re-create deleted legacy resources.
-17. `017_import_cancellation.sql` adds durable cancellation-request metadata
-    for queued uploads and active preprocessing runs. Active workers observe
-    `CANCELLING` at bounded checkpoints and finish as `CANCELLED`; queued work
-    is cancelled immediately and staged rows/source artifacts are removed.
-18. `018_import_lookup_indexes.sql` adds a source-reference lookup index;
-    candidate replay uses the existing `(import_run_id, ordinal)` index.
-19. `019_maidenhead_locators.sql` adds sorted four- and six-character
-    Maidenhead cell arrays, backfills existing entities, and recalculates the
-    arrays automatically whenever an entity geometry changes.
-20. `020_outbox_dead_letter_redrive.sql` adds resolution state and an audit
-    trail for operator-approved redrives. Redrive keeps the original dead-letter
-    evidence and republishes from the retained outbox row with its stable event ID.
-21. `021_jetstream_work_recovery.sql` records bounded redispatch timestamps for
-    import runs, promotion queues, and location-enrichment work. A repair loop
-    can restore expired work through the transactional outbox without executing
-    work outside its JetStream durable.
+The baseline consolidates the prior numbered history (001–022), including
+PostGIS/QGIS setup, import and review workflows, relational entity/category
+ownership, spatial indexes, cancellation/recovery, outbox redrive, website and
+description fields, and event correlation. Exact source files and exclusions
+are recorded in the MyOTA
+[database baseline inventory](https://github.com/myota-platform/myota-docs/blob/main/docs/operations/databases/baseline-migration-inventory.md).
 
-22. `022_entity_website_description.sql` adds nullable, dedicated Website and
-    Description columns for curated Geodata entity metadata. Legacy rows remain
-    valid with both fields absent; external import refreshes preserve the
-    administrator-curated values on existing entities.
+`myota-deploy/db/migrations/geo/` and `myota-platform/db/migrations/geo/` are
+synchronized deployment/bootstrap mirrors. This service repository is
+authoritative. CI checks the mirrors byte-for-byte. Future schema changes use
+numbered, checksummed migrations after the baseline; never edit an applied
+baseline. The runner adopts an already-ready schema and refuses a checksum
+mismatch or an unready non-empty database.
 
-The platform migration runner applies every numbered `geo/NNN_*.sql` file in
-lexical order. Additions to this directory are therefore included in the next
-Helm migration image without maintaining a separate hard-coded file list.
-
-`myota-platform/db/migrations/geo/` and
-`myota-deploy/db/migrations/geo/` are synchronized copies used by the
-vertical-slice bootstrap and deployment migration runner. When this schema
-changes, update this directory first, then copy the complete ordered set to
-both repositories and verify the files are byte-for-byte identical.
-
-Shared platform tables such as service state, idempotency, outbox and event
-consumer bookkeeping are supplied by the shared platform migration runner
-in each owning database, not created by this service's schema. Geodata's
-legacy `service_state` row is retained only as an archive; the live service
+The legacy `service_state` row is retained only as an archive; the live service
 does not hydrate or persist it. See the
-[coordinated upgrade procedure](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).
+[coordinated relational-authority procedure](https://github.com/myota-platform/myota-docs/blob/main/docs/geodata-phase1-relational-authority.md).
 
 Import recovery
 
