@@ -1,0 +1,24 @@
+name: Main PR source policy
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    name: Main PR source policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the repository testing branch as source
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$HEAD_BRANCH" != "testing" || "$HEAD_REPOSITORY" != "$BASE_REPOSITORY" ]]; then
+            echo "::error::Pull requests into main must come from this repository's testing branch."
+            exit 1
+          fi
