@@ -544,22 +544,60 @@ class RelationalConcurrencyTests(unittest.TestCase):
                 "processorId": "test-admin",
             },
         }
-        with patch.object(GeoHandler, "store", first_store):
-            first = GeoHandler.process_import_candidates(
-                None,
-                {**common, "Idempotency-Key": f"active-review-{candidate_id}"},
+        transaction_ready = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        local_store = threading.local()
+
+        class StoreRouter:
+            def __getattr__(self, name):
+                return getattr(local_store.value, name)
+
+        original_persist = first_store.persist
+
+        def hold_first_transaction(include_import_state=False):
+            original_persist(include_import_state=include_import_state)
+            transaction_ready.set()
+            if not release_first.wait(timeout=10):
+                raise TimeoutError("test did not release the first promotion")
+
+        first_store.persist = hold_first_transaction
+
+        def submit(store, key, started=None):
+            local_store.value = store
+            if started:
+                started.set()
+            return GeoHandler.process_import_candidates(
+                None, {**common, "Idempotency-Key": key}
             )
-        with patch.object(GeoHandler, "store", second_store):
-            with self.assertRaisesRegex(
-                ValueError, "already promoted or queued"
-            ):
-                GeoHandler.process_import_candidates(
-                    None,
-                    {
-                        **common,
-                        "Idempotency-Key": f"competing-review-{candidate_id}",
-                    },
-                )
+
+        try:
+            with patch.object(GeoHandler, "store", StoreRouter()):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first_future = pool.submit(
+                        submit,
+                        first_store,
+                        f"active-review-{candidate_id}",
+                    )
+                    self.assertTrue(transaction_ready.wait(timeout=5))
+                    second_future = pool.submit(
+                        submit,
+                        second_store,
+                        f"competing-review-{candidate_id}",
+                        second_started,
+                    )
+                    self.assertTrue(second_started.wait(timeout=5))
+                    time.sleep(0.05)
+                    release_first.set()
+                    first = first_future.result(timeout=5)
+                    with self.assertRaisesRegex(
+                        ValueError, "already promoted or queued"
+                    ):
+                        second_future.result(timeout=5)
+        finally:
+            release_first.set()
+            first_store.persist = original_persist
+
         with second_store.operation():
             current = second_store.data["importCandidates"][candidate_id]
             self.assertEqual(current["processingQueueId"], first["id"])
