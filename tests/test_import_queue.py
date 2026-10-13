@@ -752,6 +752,318 @@ class ImportQueueTests(unittest.TestCase):
         )
         self.assertEqual(entity["status"], "CANDIDATE")
 
+    def test_processing_queue_status_is_scoped_to_its_import_run(self):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "TRAIL",
+                    "source": {"name": "queue status import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Queue status trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [
+                                    [-5.99, 37.39],
+                                    [-5.98, 37.40],
+                                ],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        candidate_id = result["preprocessed"][0]
+        queue = GeoHandler.process_import_candidates(
+            None,
+            {
+                "runId": result["importRunId"],
+                "_body": {
+                    "candidateIds": [candidate_id],
+                    "targetStatus": "CANDIDATE",
+                    "processorId": "admin-1",
+                },
+            },
+        )
+
+        status = GeoHandler.get_import_processing_queue(
+            None,
+            {
+                "runId": result["importRunId"],
+                "queueId": queue["id"],
+            },
+        )
+
+        self.assertEqual(status["id"], queue["id"])
+        self.assertEqual(status["status"], "COMPLETED")
+        self.assertEqual(status["result"]["errors"], [])
+        with self.assertRaisesRegex(KeyError, "queue not found"):
+            GeoHandler.get_import_processing_queue(
+                None,
+                {"runId": "another-import", "queueId": queue["id"]},
+            )
+
+    def test_processing_queue_status_reports_queued_and_processing_states(
+        self,
+    ):
+        run_id = "run-visible-queue-state"
+        queue_id = "queue-visible-state"
+        GeoHandler.store.data["importRuns"] = {
+            run_id: {"id": run_id, "status": "PREPROCESSED"}
+        }
+        queue = {
+            "id": queue_id,
+            "importRunId": run_id,
+            "candidateIds": ["candidate-1"],
+            "targetStatus": "CANDIDATE",
+            "requestedBy": "reviewer-1",
+            "note": "private note",
+            "status": "QUEUED",
+            "requestedAt": "2026-10-14T08:00:00Z",
+            "startedAt": None,
+            "completedAt": None,
+            "result": {},
+        }
+        GeoHandler.store.data["importProcessingQueues"] = {queue_id: queue}
+
+        with patch.object(GeoHandler, "_authorize_import"):
+            queued = GeoHandler.get_import_processing_queue(
+                None, {"runId": run_id, "queueId": queue_id}
+            )
+            queue.update(
+                {"status": "PROCESSING", "startedAt": "2026-10-14T08:01:00Z"}
+            )
+            processing = GeoHandler.get_import_processing_queue(
+                None, {"runId": run_id, "queueId": queue_id}
+            )
+
+        self.assertEqual(queued["status"], "QUEUED")
+        self.assertEqual(processing["status"], "PROCESSING")
+        self.assertEqual(processing["startedAt"], "2026-10-14T08:01:00Z")
+        self.assertNotIn("requestedBy", processing)
+        self.assertNotIn("note", processing)
+
+    def test_mixed_promotion_outcome_preserves_success_and_reports_failure(
+        self,
+    ):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "TRAIL",
+                    "source": {"name": "mixed promotion import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Failing trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [[-5.99, 37.39], [-5.98, 37.4]],
+                            },
+                        },
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Successful trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [[-5.97, 37.39], [-5.96, 37.4]],
+                            },
+                        },
+                    ],
+                }
+            },
+        )
+        run_id = result["importRunId"]
+        failed_id, successful_id = result["preprocessed"]
+        materialize = GeoHandler._materialize_import_candidate
+
+        def fail_one(candidate, target_status, actor, note):
+            if candidate["id"] == failed_id:
+                raise ValueError("temporary promotion failure")
+            return materialize(candidate, target_status, actor, note)
+
+        with (
+            patch.object(
+                GeoHandler,
+                "_materialize_import_candidate",
+                side_effect=fail_one,
+            ),
+            patch.object(GeoHandler.store, "rollback_pending"),
+        ):
+            queue = GeoHandler.process_import_candidates(
+                None,
+                {
+                    "runId": run_id,
+                    "_body": {
+                        "candidateIds": [failed_id, successful_id],
+                        "targetStatus": "CANDIDATE",
+                        "processorId": "admin-1",
+                    },
+                },
+            )
+            outcome = GeoHandler.get_import_processing_queue(
+                None, {"runId": run_id, "queueId": queue["id"]}
+            )
+
+        self.assertEqual(outcome["status"], "FAILED")
+        self.assertEqual(
+            outcome["result"]["created"],
+            [
+                GeoHandler.store.data["importCandidates"][successful_id][
+                    "entity"
+                ]["id"]
+            ],
+        )
+        self.assertEqual(
+            outcome["result"]["errors"],
+            [
+                {
+                    "candidateId": failed_id,
+                    "message": "temporary promotion failure",
+                }
+            ],
+        )
+
+    def test_candidate_cannot_be_queued_twice_while_first_queue_is_active(
+        self,
+    ):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "TRAIL",
+                    "source": {"name": "duplicate promotion import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Single trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [[-5.99, 37.39], [-5.98, 37.4]],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        run_id = result["importRunId"]
+        candidate_id = result["preprocessed"][0]
+        params = {
+            "runId": run_id,
+            "_http": "1",
+            "_body": {
+                "candidateIds": [candidate_id],
+                "targetStatus": "CANDIDATE",
+                "processorId": "admin-1",
+            },
+        }
+        with (
+            patch.object(GeoHandler, "_authorize_import"),
+            patch.object(GeoHandler.import_executor, "submit"),
+        ):
+            first = GeoHandler.process_import_candidates(
+                None, {**params, "Idempotency-Key": "first-review-attempt"}
+            )
+            with self.assertRaisesRegex(
+                ValueError, "already promoted or queued"
+            ):
+                GeoHandler.process_import_candidates(
+                    None,
+                    {**params, "Idempotency-Key": "competing-review-attempt"},
+                )
+
+        self.assertEqual(first["status"], "QUEUED")
+        self.assertEqual(
+            len(GeoHandler.store.data["importProcessingQueues"]), 1
+        )
+
+    def test_failed_single_candidate_promotion_can_be_retried(self):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "TRAIL",
+                    "source": {"name": "promotion retry import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Retry trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [
+                                    [-5.99, 37.39],
+                                    [-5.98, 37.40],
+                                ],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        run_id = result["importRunId"]
+        candidate_id = result["preprocessed"][0]
+        materialize = GeoHandler._materialize_import_candidate
+        with (
+            patch.object(
+                GeoHandler,
+                "_materialize_import_candidate",
+                side_effect=[
+                    ValueError("temporary promotion error"),
+                    materialize,
+                ],
+            ),
+            patch.object(GeoHandler.store, "rollback_pending"),
+        ):
+            failed = GeoHandler.process_import_candidates(
+                None,
+                {
+                    "runId": run_id,
+                    "_body": {
+                        "candidateIds": [candidate_id],
+                        "targetStatus": "CANDIDATE",
+                        "processorId": "admin-1",
+                    },
+                },
+            )
+            failed_status = GeoHandler.get_import_processing_queue(
+                None, {"runId": run_id, "queueId": failed["id"]}
+            )
+            retry = GeoHandler.process_import_candidates(
+                None,
+                {
+                    "runId": run_id,
+                    "_body": {
+                        "candidateIds": [candidate_id],
+                        "targetStatus": "CANDIDATE",
+                        "processorId": "admin-1",
+                    },
+                },
+            )
+
+        self.assertEqual(failed_status["status"], "FAILED")
+        self.assertEqual(
+            failed_status["result"]["errors"][0]["candidateId"],
+            candidate_id,
+        )
+        self.assertEqual(retry["status"], "COMPLETED")
+        self.assertEqual(retry["result"]["errors"], [])
+        self.assertEqual(len(retry["result"]["created"]), 1)
+        candidate = GeoHandler.store.data["importCandidates"][candidate_id]
+        self.assertEqual(candidate["validationStatus"], "PROCESSED")
+        self.assertEqual(
+            candidate["processedEntityId"], retry["result"]["created"][0]
+        )
+
     def test_rejected_records_are_removed_from_the_import(self):
         result = GeoHandler.enqueue_import(
             None,

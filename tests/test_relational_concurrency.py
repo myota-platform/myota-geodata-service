@@ -495,6 +495,86 @@ class RelationalConcurrencyTests(unittest.TestCase):
                 (f"%promotion-{candidate_id}",),
             )
 
+    def test_second_geodata_instance_cannot_queue_active_candidate_again(self):
+        from geodata import GeoHandler
+
+        candidate_id = str(uuid.uuid4())
+        planned_id = str(uuid.uuid4())
+        self.extra_entity_ids.append(planned_id)
+        first_store, second_store = self.stores
+        with first_store.operation(write=True):
+            first_store.data["importRuns"][self.run_id] = {
+                "id": self.run_id,
+                "adapter": "MANUAL",
+                "status": "PREPROCESSED",
+                "queuedAt": now(),
+                "source": {},
+                "stats": {},
+            }
+            first_store.data["importCandidates"][candidate_id] = {
+                "id": candidate_id,
+                "importRunId": self.run_id,
+                "ordinal": 0,
+                "validationStatus": "PENDING",
+                "entity": {
+                    "id": planned_id,
+                    "name": "Single active review",
+                    "programmeSlug": None,
+                    "entityType": "TEST_PARK",
+                    "entityTypes": ["TEST_PARK"],
+                    "geometry": {"type": "Point", "coordinates": [-5.7, 37.4]},
+                    "provenance": {"adapter": "MANUAL"},
+                },
+            }
+        token = sign_token(
+            {
+                "sub": "test-admin",
+                "scp": ["*"],
+                "roles": [{"role": "GLOBAL_ADMIN"}],
+                "exp": int(time.time()) + 300,
+            }
+        )
+        common = {
+            "runId": self.run_id,
+            "_http": "1",
+            "Authorization": f"Bearer {token}",
+            "_body": {
+                "candidateIds": [candidate_id],
+                "targetStatus": "CANDIDATE",
+                "processorId": "test-admin",
+            },
+        }
+        with patch.object(GeoHandler, "store", first_store):
+            first = GeoHandler.process_import_candidates(
+                None,
+                {**common, "Idempotency-Key": f"active-review-{candidate_id}"},
+            )
+        with patch.object(GeoHandler, "store", second_store):
+            with self.assertRaisesRegex(
+                ValueError, "already promoted or queued"
+            ):
+                GeoHandler.process_import_candidates(
+                    None,
+                    {
+                        **common,
+                        "Idempotency-Key": f"competing-review-{candidate_id}",
+                    },
+                )
+        with second_store.operation():
+            current = second_store.data["importCandidates"][candidate_id]
+            self.assertEqual(current["processingQueueId"], first["id"])
+            self.assertEqual(
+                len(second_store.data["importProcessingQueues"]), 1
+            )
+        with self.psycopg.connect(self.dsn) as connection:
+            connection.execute(
+                "DELETE FROM idempotency_record WHERE key LIKE %s OR key LIKE %s",
+                (
+                    f"%active-review-{candidate_id}",
+                    f"%competing-review-{candidate_id}",
+                ),
+            )
+
     def test_finalizing_import_uses_one_processed_timestamp(self):
         from geodata import GeoHandler
 

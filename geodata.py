@@ -3247,6 +3247,33 @@ class GeoHandler(JsonHandler):
         return GeoHandler._import_run_view(run)
 
     @staticmethod
+    def get_import_processing_queue(
+        _: JsonHandler, p: dict[str, str]
+    ) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
+        queue_id = str(p["queueId"])
+        GeoHandler.store.refresh_import_queue(queue_id)
+        queue = GeoHandler.store.data.setdefault(
+            "importProcessingQueues", {}
+        ).get(queue_id)
+        if not queue or queue.get("importRunId") != p["runId"]:
+            raise KeyError("import processing queue not found")
+        return {
+            key: queue.get(key)
+            for key in (
+                "id",
+                "importRunId",
+                "candidateIds",
+                "targetStatus",
+                "status",
+                "requestedAt",
+                "startedAt",
+                "completedAt",
+                "result",
+            )
+        }
+
+    @staticmethod
     def cancel_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
         """Request cancellation of a pending or active preprocessing run."""
         GeoHandler._authorize_import(p)
@@ -4007,10 +4034,31 @@ class GeoHandler(JsonHandler):
                 )
             if target_status == "APPROVED":
                 GeoHandler._authorize_review(p, candidate.get("entity") or {})
-            if candidate.get(
-                "validationStatus"
-            ) == "PROCESSED" or candidate.get("processingQueueId"):
+            if candidate.get("validationStatus") == "PROCESSED":
                 raise ValueError("record is already promoted or queued")
+            previous_queue_id = candidate.get("processingQueueId")
+            if previous_queue_id:
+                GeoHandler.store.refresh_import_queue(str(previous_queue_id))
+                previous_queue = GeoHandler.store.data.setdefault(
+                    "importProcessingQueues", {}
+                ).get(str(previous_queue_id))
+                previous_errors = (
+                    previous_queue.get("result", {}).get("errors", [])
+                    if previous_queue
+                    else []
+                )
+                failed_candidate_ids = {
+                    str(item.get("candidateId"))
+                    for item in previous_errors
+                    if isinstance(item, dict) and item.get("candidateId")
+                }
+                if (
+                    candidate.get("validationStatus") != "CONFIRMED"
+                    or not previous_queue
+                    or previous_queue.get("status") != "FAILED"
+                    or str(candidate_id) not in failed_candidate_ids
+                ):
+                    raise ValueError("record is already promoted or queued")
             candidate.update(
                 {
                     "validationStatus": "CONFIRMED",

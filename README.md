@@ -604,7 +604,14 @@ Successful promotion deletes the staged record; rejection also removes it from
 the import detail. The promotion request emits
 `geodata.import.processing.queued.v1` to the
 `myota.geodata.import.process.v1` subject. The durable worker consumes the
-database-backed queue idempotently. The default whole-object limit is 1 GiB
+database-backed queue idempotently. Authorized reviewers can poll `GET
+/v1/geodata/imports/{runId}/processing-queues/{queueId}` for QUEUED, PROCESSING,
+COMPLETED, or FAILED state and per-candidate created, updated, and error
+results. The route returns not-found when the queue does not belong to the
+requested import. A failed candidate may be submitted in a new promotion
+attempt only when its previous queue is terminal and records that candidate as
+failed; successful or active queue assignments remain protected from duplicate
+promotion. The default whole-object limit is 1 GiB
 (`MYOTA_UPLOAD_MAX_BYTES`); deployments may set a lower limit. Each part is
 temporarily staged as a bounded file (16 MiB by default), not the entire source
 document.

@@ -54,6 +54,10 @@ def import_routes(handler: Any) -> dict[Route, Handler]:
         ): handler.get_import_upload,
         ("GET", "/v1/geodata/imports/{runId}"): handler.get_import,
         (
+            "GET",
+            "/v1/geodata/imports/{runId}/processing-queues/{queueId}",
+        ): handler.get_import_processing_queue,
+        (
             "PUT",
             "/v1/geodata/imports/{runId}/cancellation",
         ): handler.cancel_import,
