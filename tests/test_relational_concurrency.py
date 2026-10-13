@@ -394,12 +394,12 @@ class RelationalConcurrencyTests(unittest.TestCase):
                     + '"}}}}',
                 ),
             )
-            connection.execute(
-                (
-                    Path(__file__).parent.parent
-                    / "migrations/016_relational_authority.sql"
-                ).read_text()
-            )
+            baseline = (
+                Path(__file__).parent.parent
+                / "migrations/001_geodata_baseline.sql"
+            ).read_text()
+            self.assertNotIn("INSERT INTO public.service_state", baseline)
+            self.assertNotIn(resource_id, baseline)
             self.assertEqual(
                 connection.execute(
                     "SELECT count(*) FROM geodata_control_record WHERE id=%s",
