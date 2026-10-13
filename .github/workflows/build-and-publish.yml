@@ -167,9 +167,30 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare image tags
+        id: image-tags
+        env:
+          IMAGE_NAME: ghcr.io/myota-platform/myota-geodata-service
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "tags=${IMAGE_NAME}:latest" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF_NAME}" == "testing" ]]; then
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE_NAME}:testing"
+              echo "${IMAGE_NAME}:testing-${GITHUB_SHA}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE_NAME}:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build release or isolated testing image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'testing') }}
-          tags: ghcr.io/myota-platform/myota-geodata-service:${{ github.ref_name == 'main' && 'latest' || github.ref_name == 'testing' && format('testing-{0}', github.sha) || format('ci-{0}', github.sha) }}
+          tags: ${{ steps.image-tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
