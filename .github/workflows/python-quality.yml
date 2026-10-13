@@ -2,8 +2,9 @@ name: Python quality
 
 on:
   push:
-    branches: [main]
+    branches: [main, testing, 'feature/**', 'fix/**']
   pull_request:
+    branches: [main, testing]
 
 jobs:
   python-quality:
