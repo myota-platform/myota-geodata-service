@@ -424,12 +424,14 @@ never replace those values or their corresponding codes. Removing a field from
 `manualFields` returns it to provider-managed values and queues an `only
 missing` lookup.
 
-Enrichment runs after a candidate/approved entity is materialized when required
-location values are missing, and after a geometry or geometry-type change. A
-geometry change queues a refresh for the new coordinates; manual values remain
-protected. The request ID and geometry hash are rechecked after the provider
-call, so stale results cannot overwrite a later edit. Administrators can
-manually queue missing metadata from Entity Management; the endpoint is
+Enrichment runs when an entity is materialized as a candidate or approved, and
+when its lifecycle changes to candidate or approved, if required location
+values are missing. Geometry or geometry-type changes queue a refresh for the
+new coordinates; manual values remain protected. Lifecycle promotion queues
+only missing fields, and the promotion and enrichment request are committed in
+the same transaction. The request ID and geometry hash are rechecked after the
+provider call, so stale results cannot overwrite a later edit. Administrators
+can manually queue missing metadata from Entity Management; the endpoint is
 `POST /v1/geodata/entities/{entityId}/location-enrichment-requests`. It writes a
 transactional outbox event consumed by the durable
 `geodata-location-enrichment-v1` worker. A queued or failed lookup leaves the
