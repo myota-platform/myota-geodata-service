@@ -457,7 +457,7 @@ class RelationalConcurrencyTests(unittest.TestCase):
             "Idempotency-Key": f"promotion-{candidate_id}",
             "_body": {
                 "candidateIds": [candidate_id],
-                "targetStatus": "CANDIDATE",
+                "targetStatus": "APPROVED",
                 "processorId": "test-admin",
             },
         }
@@ -469,7 +469,7 @@ class RelationalConcurrencyTests(unittest.TestCase):
             self.assertTrue(GeoHandler._process_import_queue(job["id"]))
         with self.stores[1].operation():
             self.assertEqual(
-                self.stores[1].items[planned_id]["status"], "CANDIDATE"
+                self.stores[1].items[planned_id]["status"], "APPROVED"
             )
             self.assertEqual(
                 self.stores[1].data["importCandidates"][candidate_id][
@@ -489,6 +489,22 @@ class RelationalConcurrencyTests(unittest.TestCase):
                 ],
                 1,
             )
+        with self.psycopg.connect(self.dsn) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT lifecycle_status FROM geodata_entity WHERE id=%s",
+                    (planned_id,),
+                ).fetchone()[0],
+                "APPROVED",
+            )
+        catalogue = catalogue_page(
+            self.stores[1], {"status": ["APPROVED"], "pageSize": ["100"]}, None
+        )
+        self.assertIn(planned_id, {item["id"] for item in catalogue["items"]})
+        mapped = store.query_bbox(
+            (-5.8, 37.3, -5.6, 37.5), 100, status="APPROVED"
+        )
+        self.assertIn(planned_id, {item["id"] for item in mapped})
         with self.psycopg.connect(self.dsn) as connection:
             connection.execute(
                 "DELETE FROM idempotency_record WHERE key LIKE %s",

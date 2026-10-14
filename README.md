@@ -515,6 +515,20 @@ validated processing queue can create a `CANDIDATE` or, for an authorized
 administrator, an `APPROVED` entity. Community proposals use
 `COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
+Candidate review includes possible duplicate evidence for catalogue entities
+and earlier candidates in the same import within 50 metres. The evidence is
+saved with the durable candidate and includes the matched record, distance,
+and geometry match type, so it remains visible after API reloads. This is a
+review warning; it does not auto-reject or promote a record. Source-provided
+identifiers such as OSM `@id` are retained. When no stable source identifier
+exists, the generated reference is scoped to the import run. Entity names are
+not unique because distinct entities can share a name.
+
+Permanent database constraint conflicts during promotion produce a failed
+queue result with an actionable source-reference message. Transient database
+errors remain retryable by the worker. Administrators can retry after fixing
+the import identity; only explicitly confirmed candidates can be promoted.
+
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
 it submits GeoJSON through the `OSM` adapter so OSM tags are filtered,

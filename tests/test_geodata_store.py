@@ -5,10 +5,70 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from geodata_store import GeodataStore
+from relational_queries import page_query
 from relational_state import RowMap, RowRepository
 
 
 class GeodataStoreHydrationTests(unittest.TestCase):
+    def test_candidate_page_restores_durable_duplicate_review_metadata(self):
+        class Result:
+            def __init__(self, one=None, many=None):
+                self.one = one
+                self.many = many or []
+
+            def fetchone(self):
+                return self.one
+
+            def fetchall(self):
+                return self.many
+
+        class Connection:
+            def execute(self, sql, params):
+                if sql.startswith("SELECT count(*)"):
+                    return Result(one=(1,))
+                return Result(
+                    many=[
+                        (
+                            {
+                                "id": "candidate-1",
+                                "entity": {
+                                    "name": "Staged park",
+                                    "_importReview": {
+                                        "dedupeWarning": "POSSIBLE_DUPLICATE",
+                                        "possibleDuplicates": [
+                                            {
+                                                "name": "Nearby park",
+                                                "distanceMeters": 12.5,
+                                            }
+                                        ],
+                                    },
+                                },
+                            },
+                        )
+                    ]
+                )
+
+        store = GeodataStore()
+        connection = Connection()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        with patch.object(store, "transaction", transaction):
+            result = page_query(
+                store,
+                "importCandidates",
+                {"page": ["1"], "pageSize": ["10"]},
+            )
+
+        candidate = result["items"][0]
+        self.assertEqual(candidate["dedupeWarning"], "POSSIBLE_DUPLICATE")
+        self.assertEqual(
+            candidate["possibleDuplicates"][0]["name"], "Nearby park"
+        )
+        self.assertNotIn("_importReview", candidate["entity"])
+
     def test_run_candidate_lookup_is_scoped_and_primes_repository_baseline(
         self,
     ):
@@ -76,11 +136,17 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             yield connection
 
         repository.connection = transaction
-        result = repository.entity_by_source_ref("osm:1", "mpota")
+        result = repository.entity_by_source_ref("osm:1", "mpota", "OSM")
 
-        self.assertIn("public_properties->>'sourceRef'=%s", connection.sql)
-        self.assertIn("programme_slug=%s", connection.sql)
-        self.assertEqual(connection.params, ("osm:1", "mpota"))
+        self.assertIn("s.source_record_id=%s", connection.sql)
+        self.assertIn("s.adapter_code=%s", connection.sql)
+        self.assertIn("%s::text IS NOT NULL", connection.sql)
+        self.assertIn("%s::text IS NULL", connection.sql)
+        self.assertIn("e.programme_slug=%s", connection.sql)
+        self.assertEqual(
+            connection.params,
+            ("OSM", "osm:1", "OSM", "osm:1", "OSM", "OSM", "mpota"),
+        )
         self.assertEqual(result["id"], "entity-1")
 
     def test_nearby_lookup_uses_postgis_distance_and_radius_filter(self):
@@ -275,6 +341,63 @@ class GeodataStoreHydrationTests(unittest.TestCase):
             store._dirty_import_candidate_ids, {"active-candidate"}
         )
         self.assertEqual(store._dirty_import_queue_ids, {"active-queue"})
+
+    def test_candidate_flush_persists_duplicate_review_metadata(self):
+        import json
+
+        store = GeodataStore()
+        store.dsn = "test-dsn"
+        store.data = {
+            "importRuns": {},
+            "importCandidates": {
+                "33333333-3333-4333-8333-333333333333": {
+                    "id": "33333333-3333-4333-8333-333333333333",
+                    "importRunId": "44444444-4444-4444-8444-444444444444",
+                    "ordinal": 0,
+                    "validationStatus": "PENDING",
+                    "dedupeWarning": "POSSIBLE_DUPLICATE",
+                    "possibleDuplicates": [
+                        {
+                            "entityId": "55555555-5555-4555-8555-555555555555",
+                            "name": "Nearby park",
+                            "distanceMeters": 12.5,
+                        }
+                    ],
+                    "entity": {
+                        "id": "66666666-6666-4666-8666-666666666666",
+                        "name": "Staged park",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [-5.99, 37.39],
+                        },
+                    },
+                }
+            },
+        }
+        store._dirty_import_candidate_ids.add(
+            "33333333-3333-4333-8333-333333333333"
+        )
+        connection = Mock()
+
+        @contextmanager
+        def transaction():
+            yield connection
+
+        with patch.object(store, "transaction", transaction):
+            store._sync_relational(include_import_state=True)
+
+        sql, params = connection.execute.call_args.args
+        self.assertIn("INSERT INTO geodata_import_candidate", sql)
+        persisted = json.loads(params[12])
+        self.assertEqual(
+            persisted["_importReview"]["dedupeWarning"], "POSSIBLE_DUPLICATE"
+        )
+        self.assertEqual(
+            persisted["_importReview"]["possibleDuplicates"][0][
+                "distanceMeters"
+            ],
+            12.5,
+        )
 
 
 if __name__ == "__main__":

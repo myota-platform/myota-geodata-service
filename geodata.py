@@ -1505,8 +1505,12 @@ class GeoHandler(JsonHandler):
             }
 
     @staticmethod
-    def _possible_duplicates(entity: dict[str, Any]) -> list[dict[str, Any]]:
-        """Find existing entities whose geometry is identical or under 50 m away."""
+    def _possible_duplicates(
+        entity: dict[str, Any],
+        import_run_id: str | None = None,
+        before_ordinal: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find nearby catalogue entities and earlier candidates in this import."""
         geometry = entity.get("geometry")
         if not geometry:
             return []
@@ -1538,8 +1542,28 @@ class GeoHandler(JsonHandler):
                     else "WITHIN_50_METERS",
                 }
             )
+        if import_run_id is not None and before_ordinal is not None:
+            for candidate in GeoHandler.store.nearby_import_candidates(
+                import_run_id, geometry, before_ordinal, 50
+            ):
+                matches.append(
+                    {
+                        **candidate,
+                        "entityTypes": entity_categories(
+                            candidate.get("entity") or {}
+                        ),
+                        "matchType": "IDENTICAL_GEOMETRY"
+                        if candidate["distanceMeters"] == 0
+                        else "WITHIN_50_METERS",
+                    }
+                )
         return sorted(
-            matches, key=lambda match: (match["distanceMeters"], match["name"])
+            matches,
+            key=lambda match: (
+                match["distanceMeters"],
+                match["name"],
+                match.get("candidateId", ""),
+            ),
         )
 
     @staticmethod
@@ -1577,7 +1601,14 @@ class GeoHandler(JsonHandler):
                 source_ref = str(
                     props.get("sourceRef")
                     or props.get("id")
-                    or f"{source_key}:record-{index}"
+                    or props.get("@id")
+                    or feature.get("id")
+                    or raw_feature.get("id")
+                    # A row number is only stable inside this import. Reusing
+                    # it across manual uploads collides with the unique
+                    # (adapter_code, source_record_id) key and can strand a
+                    # promotion before it materializes an entity.
+                    or f"{source_key}:import-{run_id}:record-{index}"
                 )
                 if props.get("skipReason") == "FILTERED_TAG":
                     skipped.append(
@@ -1606,7 +1637,7 @@ class GeoHandler(JsonHandler):
                 )
                 existing = (
                     GeoHandler.store.entity_by_source_ref(
-                        source_ref, programme_slug
+                        source_ref, programme_slug, adapter
                     )
                     if source_ref
                     else None
@@ -1687,7 +1718,9 @@ class GeoHandler(JsonHandler):
                 GeoHandler._apply_import_location_metadata(entity, props)
                 GeoHandler._preserve_manual_location(existing, entity)
                 apply_maidenhead_fields(entity)
-                possible_duplicates = GeoHandler._possible_duplicates(entity)
+                possible_duplicates = GeoHandler._possible_duplicates(
+                    entity, run_id, index
+                )
                 candidate = {
                     "importRunId": run_id,
                     "ordinal": index,
@@ -3201,6 +3234,10 @@ class GeoHandler(JsonHandler):
                 candidate.get("validationStatus") == "REJECTED"
                 for candidate in candidates
             ),
+            "duplicates": sum(
+                bool(candidate.get("possibleDuplicates"))
+                for candidate in candidates
+            ),
         }
         public_run = {
             key: value
@@ -3909,10 +3946,21 @@ class GeoHandler(JsonHandler):
                         (updated if was_existing else created).append(
                             entity_id
                         )
-                except (TypeError, ValueError) as error:
+                except Exception as error:
+                    sqlstate = str(getattr(error, "sqlstate", "") or "")
+                    if not isinstance(error, (TypeError, ValueError)) and not (
+                        sqlstate.startswith("23")
+                    ):
+                        raise
                     GeoHandler.store.rollback_pending()
+                    message = (
+                        "The source record conflicts with an existing entity. "
+                        "Check the import source ID and retry."
+                        if sqlstate.startswith("23")
+                        else str(error)
+                    )
                     errors.append(
-                        {"candidateId": candidate_id, "message": str(error)}
+                        {"candidateId": candidate_id, "message": message}
                     )
             with GeoHandler.store.lock, GeoHandler.store.transaction():
                 queue = GeoHandler.store.data["importProcessingQueues"][

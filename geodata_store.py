@@ -353,7 +353,21 @@ class CompatibilityGeodataStore(Store):
                             entity.get("provenance") or {},
                             default=json_default,
                         ),
-                        json.dumps(entity, default=json_default),
+                        json.dumps(
+                            {
+                                **entity,
+                                "_importReview": {
+                                    "dedupeWarning": candidate.get(
+                                        "dedupeWarning"
+                                    ),
+                                    "possibleDuplicates": candidate.get(
+                                        "possibleDuplicates"
+                                    )
+                                    or [],
+                                },
+                            },
+                            default=json_default,
+                        ),
                         candidate.get("validationStatus", "PENDING"),
                         candidate.get("validationNote"),
                         candidate.get("validatedBy"),
@@ -468,8 +482,8 @@ class CompatibilityGeodataStore(Store):
                     "FROM geodata_entity "
                     "WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326) "
                     "AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326)) "
-                    "AND (%s IS NULL OR programme_slug = %s) "
-                    "AND (%s IS NULL OR lifecycle_status = %s) "
+                    "AND (%s::text IS NULL OR programme_slug = %s) "
+                    "AND (%s::text IS NULL OR lifecycle_status = %s) "
                     "ORDER BY name, id LIMIT %s",
                     (
                         *bounds,
@@ -675,12 +689,14 @@ class GeodataStore(CompatibilityGeodataStore):
             )
             self.mark_import_candidate_dirty(candidate_id)
 
-    def entity_by_source_ref(self, source_ref, programme_slug):
+    def entity_by_source_ref(
+        self, source_ref, programme_slug, adapter_code=None
+    ):
         """Look up an imported entity without materializing the full catalogue."""
         if self.durable:
             self.hydrate()
             return self._repository.entity_by_source_ref(
-                source_ref, programme_slug
+                source_ref, programme_slug, adapter_code
             )
         with self.lock:
             return next(
@@ -689,6 +705,11 @@ class GeodataStore(CompatibilityGeodataStore):
                     for item in self.items.values()
                     if item.get("sourceRef") == source_ref
                     and item.get("programmeSlug") == programme_slug
+                    and (
+                        not adapter_code
+                        or (item.get("provenance") or {}).get("adapter")
+                        in (None, adapter_code)
+                    )
                 ),
                 None,
             )
@@ -711,6 +732,56 @@ class GeodataStore(CompatibilityGeodataStore):
                 if distance < distance_meters:
                     matches.append((str(item["id"]), distance))
             return sorted(matches, key=lambda match: (match[1], match[0]))
+
+    def nearby_import_candidates(
+        self, run_id, geometry, before_ordinal, distance_meters
+    ):
+        """Find prior staged candidates near a geometry, capped by the repository."""
+        if self.durable:
+            self.hydrate()
+            return self._repository.nearby_import_candidates(
+                run_id, geometry, before_ordinal, distance_meters
+            )
+        from geodata_pipeline import geometry_distance_meters
+
+        matches = []
+        with self.lock:
+            candidates = list(
+                self.data.setdefault("importCandidates", {}).items()
+            )
+        for candidate_id, candidate in candidates:
+            if (
+                candidate.get("importRunId") != run_id
+                or int(candidate.get("ordinal", -1)) >= before_ordinal
+            ):
+                continue
+            entity = candidate.get("entity") or {}
+            candidate_geometry = entity.get("geometry")
+            if not candidate_geometry:
+                continue
+            distance = geometry_distance_meters(geometry, candidate_geometry)
+            if distance > distance_meters:
+                continue
+            matches.append(
+                {
+                    "candidateId": str(candidate_id),
+                    "entityId": str(entity.get("id") or candidate_id),
+                    "id": str(entity.get("id") or candidate_id),
+                    "name": entity.get("name") or "Unnamed candidate",
+                    "status": entity.get("status") or "CANDIDATE",
+                    "geometry": candidate_geometry,
+                    "centroid": entity.get("centroid"),
+                    "distanceMeters": round(distance, 2),
+                    "matchType": "IDENTICAL_GEOMETRY"
+                    if distance == 0
+                    else "WITHIN_50_METERS",
+                    "entity": entity,
+                }
+            )
+        matches.sort(
+            key=lambda match: (match["distanceMeters"], match["name"])
+        )
+        return matches[:10]
 
     def refresh_import_queue(self, queue_id):
         if self.durable:
