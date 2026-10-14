@@ -47,8 +47,19 @@ def page_query(
             f"ORDER BY {order} LIMIT %s OFFSET %s",
             (*params, size, (page - 1) * size),
         ).fetchall()
+    items = [canonical(row[0]) for row in rows]
+    if kind == "importCandidates":
+        for value in items:
+            entity = value.get("entity") or {}
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
     return {
-        "items": [canonical(row[0]) for row in rows],
+        "items": items,
         "page": page,
         "pageSize": size,
         "total": total,
@@ -117,9 +128,17 @@ def candidate_counts(store: Any, run_id: str) -> dict[str, int]:
             "WHERE import_run_id=%s GROUP BY validation_status",
             (run_id,),
         ).fetchall()
+        duplicate_row = connection.execute(
+            "SELECT count(*) FROM geodata_import_candidate "
+            "WHERE import_run_id=%s AND "
+            "jsonb_typeof(entity_payload->'_importReview'->'possibleDuplicates')='array' "
+            "AND jsonb_array_length(entity_payload->'_importReview'->'possibleDuplicates') > 0",
+            (run_id,),
+        ).fetchone()
     counts = {str(row[0]).lower(): row[1] for row in rows}
     return {
         "total": sum(counts.values()),
+        "duplicates": int(duplicate_row[0] if duplicate_row else 0),
         **{
             name: counts.get(name, 0)
             for name in ("pending", "confirmed", "processed", "rejected")

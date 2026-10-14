@@ -270,8 +270,13 @@ class RowRepository:
         value = canonical(row[0])
         if kind == "importCandidates":
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
         return value
 
     def keys(self, kind: str) -> set[str]:
@@ -324,8 +329,13 @@ class RowRepository:
         for row in rows:
             value = canonical(row[0])
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
             key = str(value["id"])
             identity = ("importCandidates", key)
             current = self.scope.loaded.get(identity)
@@ -352,8 +362,13 @@ class RowRepository:
         for row in rows:
             value = canonical(row[0])
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
             key = str(value["id"])
             identity = ("importCandidates", key)
             current = self.scope.loaded.get(identity)
@@ -389,25 +404,43 @@ class RowRepository:
         self.scope.loaded[identity] = candidate
 
     def entity_by_source_ref(
-        self, source_ref: str, programme_slug: str | None
+        self,
+        source_ref: str,
+        programme_slug: str | None,
+        adapter_code: str | None = None,
     ) -> dict[str, Any] | None:
-        """Fetch a matching imported entity using the source-reference index."""
-        programme_filter = (
-            "programme_slug IS NULL"
-            if programme_slug is None
-            else "programme_slug=%s"
-        )
-        params = (
-            (source_ref,)
-            if programme_slug is None
-            else (source_ref, programme_slug)
-        )
+        """Fetch a matching imported entity using normalized source identity."""
+        programme_filter = "e.programme_slug IS NULL"
+        params: tuple[Any, ...] = ()
+        if programme_slug is not None:
+            programme_filter = "e.programme_slug=%s"
+            params = (programme_slug,)
+        adapter_filter = ""
+        source_params: tuple[Any, ...] = (source_ref,)
+        if adapter_code:
+            adapter_filter = "AND s.adapter_code=%s"
+            source_params = (source_ref, adapter_code)
         with self.connection() as connection:
             row = connection.execute(
-                f"SELECT {PROJECTIONS['entities']} FROM geodata_entity "
-                "WHERE public_properties->>'sourceRef'=%s "
-                f"AND {programme_filter} LIMIT 1",
-                params,
+                f"SELECT {PROJECTIONS['entities']} FROM geodata_entity AS e "
+                "WHERE "
+                "((%s::text IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM source_reference AS s "
+                "WHERE s.entity_id=e.id AND s.source_record_id=%s "
+                f"{adapter_filter}"
+                ")) OR "
+                "(e.public_properties->>'sourceRef'=%s AND "
+                "(%s::text IS NULL OR "
+                "e.public_properties#>>'{provenance,adapter}'=%s))) "
+                f"AND {programme_filter} ORDER BY e.id LIMIT 1",
+                (
+                    adapter_code,
+                    *source_params,
+                    source_ref,
+                    adapter_code,
+                    adapter_code,
+                    *params,
+                ),
             ).fetchone()
         if not row:
             return None
@@ -443,6 +476,93 @@ class RowRepository:
             self.store._observe_postgis_query(
                 "candidate_duplicate_proximity", started
             )
+
+    def nearby_import_candidates(
+        self,
+        run_id: str,
+        geometry: dict[str, Any],
+        before_ordinal: int,
+        distance_meters: float,
+    ) -> list[dict[str, Any]]:
+        """Find earlier records in this import near the current geometry."""
+        geometry_json = json.dumps(geometry, separators=(",", ":"))
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id::text, ordinal, planned_entity_id::text, "
+                "entity_payload, ST_Distance(geom::geography, "
+                "ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)::geography) "
+                "FROM geodata_import_candidate WHERE import_run_id=%s "
+                "AND ordinal < %s AND ST_DWithin(geom::geography, "
+                "ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)::geography, %s) "
+                "ORDER BY 5, ordinal, id LIMIT 10",
+                (
+                    geometry_json,
+                    run_id,
+                    before_ordinal,
+                    geometry_json,
+                    distance_meters,
+                ),
+            ).fetchall()
+        matches_by_id = {}
+        for candidate_id, ordinal, entity_id, entity, distance in rows:
+            candidate = canonical(entity or {})
+            candidate.pop("_importReview", None)
+            matches_by_id[str(candidate_id)] = {
+                "candidateId": str(candidate_id),
+                "entityId": str(entity_id or candidate.get("id") or ""),
+                "id": str(entity_id or candidate.get("id") or candidate_id),
+                "name": candidate.get("name") or "Unnamed candidate",
+                "status": candidate.get("status") or "CANDIDATE",
+                "geometry": candidate.get("geometry"),
+                "centroid": candidate.get("centroid"),
+                "entity": candidate,
+                "ordinal": ordinal,
+                "distanceMeters": round(float(distance), 2),
+                "matchType": "EXACT_GEOMETRY"
+                if float(distance) == 0
+                else "WITHIN_50_METERS",
+            }
+        for (kind, candidate_id), candidate in self.scope.loaded.items():
+            if kind != "importCandidates":
+                continue
+            if (
+                candidate.get("importRunId") != run_id
+                or int(candidate.get("ordinal", -1)) >= before_ordinal
+            ):
+                continue
+            entity = candidate.get("entity") or {}
+            candidate_geometry = entity.get("geometry")
+            if not candidate_geometry:
+                continue
+            from geodata_pipeline import geometry_distance_meters
+
+            distance = geometry_distance_meters(geometry, candidate_geometry)
+            if distance > distance_meters:
+                continue
+            matches_by_id[str(candidate_id)] = {
+                "candidateId": str(candidate_id),
+                "entityId": str(entity.get("id") or candidate_id),
+                "id": str(entity.get("id") or candidate_id),
+                "name": entity.get("name") or "Unnamed candidate",
+                "status": entity.get("status") or "CANDIDATE",
+                "geometry": candidate_geometry,
+                "centroid": entity.get("centroid"),
+                "ordinal": candidate.get("ordinal"),
+                "distanceMeters": round(distance, 2),
+                "matchType": "EXACT_GEOMETRY"
+                if distance == 0
+                else "WITHIN_50_METERS",
+                "entity": entity,
+            }
+        matches = list(matches_by_id.values())
+        matches.sort(
+            key=lambda match: (
+                match["distanceMeters"],
+                match.get("ordinal", -1),
+                match["candidateId"],
+            )
+        )
+        return matches[:10]
 
     def discard_import_candidates(self, run_id: str) -> None:
         """Delete one run's staging rows without loading other imports."""

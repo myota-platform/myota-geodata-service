@@ -42,6 +42,93 @@ class ImportQueueTests(unittest.TestCase):
         GeoHandler.store.events = self.previous_events
         GeoHandler.store.idempotency = self.previous_idempotency
 
+    def test_import_source_identity_uses_stable_ids_or_run_scoped_fallbacks(
+        self,
+    ):
+        feature = {
+            "type": "Feature",
+            "id": "relation/7917223",
+            "properties": {
+                "@id": "relation/7917223",
+                "name": "Purísima Concepción park",
+            },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [-5.99, 37.39],
+            },
+        }
+        body = {
+            "adapter": "MANUAL",
+            "format": "GEOJSON",
+            "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "manual import"},
+            "features": [feature],
+        }
+
+        stable = GeoHandler._import_features(body, "run-stable-id")
+        stable_candidate = GeoHandler.store.data["importCandidates"][
+            stable["preprocessed"][0]
+        ]
+        self.assertEqual(
+            stable_candidate["entity"]["sourceRef"], "relation/7917223"
+        )
+
+        generated_feature = {
+            **feature,
+            "id": None,
+            "properties": {"name": "Manual park without a source ID"},
+        }
+        generated_body = {**body, "features": [generated_feature]}
+        first = GeoHandler._import_features(generated_body, "run-first")
+        second = GeoHandler._import_features(generated_body, "run-second")
+        first_ref = GeoHandler.store.data["importCandidates"][
+            first["preprocessed"][0]
+        ]["entity"]["sourceRef"]
+        second_ref = GeoHandler.store.data["importCandidates"][
+            second["preprocessed"][0]
+        ]["entity"]["sourceRef"]
+        self.assertEqual(first_ref, "manual import:import-run-first:record-0")
+        self.assertEqual(
+            second_ref, "manual import:import-run-second:record-0"
+        )
+        self.assertNotEqual(first_ref, second_ref)
+
+    def test_import_marks_nearby_candidates_from_the_same_run(self):
+        body = {
+            "adapter": "MANUAL",
+            "format": "GEOJSON",
+            "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "nearby records"},
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"name": "First park"},
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [-5.99, 37.39],
+                    },
+                },
+                {
+                    "type": "Feature",
+                    "properties": {"name": "Second park"},
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [-5.9901, 37.3901],
+                    },
+                },
+            ],
+        }
+        result = GeoHandler._import_features(body, "run-nearby-candidates")
+        candidates = GeoHandler.store.data["importCandidates"]
+        second = candidates[result["preprocessed"][1]]
+
+        self.assertEqual(second["dedupeWarning"], "POSSIBLE_DUPLICATE")
+        self.assertEqual(len(second["possibleDuplicates"]), 1)
+        self.assertEqual(second["possibleDuplicates"][0]["name"], "First park")
+        self.assertEqual(
+            second["possibleDuplicates"][0]["matchType"], "WITHIN_50_METERS"
+        )
+
     def test_imported_location_metadata_is_preserved_without_remote_lookup(
         self,
     ):
@@ -929,6 +1016,72 @@ class ImportQueueTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_integrity_conflict_fails_queue_instead_of_leaving_it_processing(
+        self,
+    ):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "TRAIL",
+                    "source": {"name": "conflicting source import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Conflicting trail"},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [[-5.99, 37.39], [-5.98, 37.4]],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        candidate_id = result["preprocessed"][0]
+
+        class UniqueConstraintError(Exception):
+            sqlstate = "23505"
+
+        with patch.object(
+            GeoHandler,
+            "_materialize_import_candidate",
+            side_effect=UniqueConstraintError("duplicate source reference"),
+        ):
+            queue = GeoHandler.process_import_candidates(
+                None,
+                {
+                    "runId": result["importRunId"],
+                    "_body": {
+                        "candidateIds": [candidate_id],
+                        "targetStatus": "APPROVED",
+                        "processorId": "admin-1",
+                    },
+                },
+            )
+
+        outcome = GeoHandler.get_import_processing_queue(
+            None,
+            {"runId": result["importRunId"], "queueId": queue["id"]},
+        )
+        candidate = GeoHandler.store.data["importCandidates"][candidate_id]
+        self.assertEqual(outcome["status"], "FAILED")
+        self.assertEqual(
+            outcome["result"]["errors"],
+            [
+                {
+                    "candidateId": candidate_id,
+                    "message": (
+                        "The source record conflicts with an existing entity. "
+                        "Check the import source ID and retry."
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(candidate["validationStatus"], "CONFIRMED")
 
     def test_candidate_cannot_be_queued_twice_while_first_queue_is_active(
         self,
