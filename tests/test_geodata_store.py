@@ -175,6 +175,9 @@ class GeodataStoreHydrationTests(unittest.TestCase):
         matches = repository.nearby_entity_ids(geometry, "entity-1", 50)
 
         self.assertIn("ST_DWithin(geom::geography", connection.sql)
+        self.assertIn(
+            "lifecycle_status IN ('CANDIDATE','APPROVED')", connection.sql
+        )
         self.assertEqual(connection.params[1], "entity-1")
         self.assertEqual(connection.params[3], 50)
         self.assertEqual(matches, [("entity-2", 17.5)])
