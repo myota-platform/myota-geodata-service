@@ -270,8 +270,13 @@ class RowRepository:
         value = canonical(row[0])
         if kind == "importCandidates":
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
         return value
 
     def keys(self, kind: str) -> set[str]:
@@ -324,8 +329,13 @@ class RowRepository:
         for row in rows:
             value = canonical(row[0])
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
             key = str(value["id"])
             identity = ("importCandidates", key)
             current = self.scope.loaded.get(identity)
@@ -352,8 +362,13 @@ class RowRepository:
         for row in rows:
             value = canonical(row[0])
             entity = value.get("entity") or {}
-            value["dedupeWarning"] = entity.get("dedupeWarning")
-            value["possibleDuplicates"] = entity.get("possibleDuplicates", [])
+            review = entity.pop("_importReview", {})
+            value["dedupeWarning"] = review.get(
+                "dedupeWarning", entity.get("dedupeWarning")
+            )
+            value["possibleDuplicates"] = review.get(
+                "possibleDuplicates", entity.get("possibleDuplicates", [])
+            )
             key = str(value["id"])
             identity = ("importCandidates", key)
             current = self.scope.loaded.get(identity)
@@ -389,25 +404,43 @@ class RowRepository:
         self.scope.loaded[identity] = candidate
 
     def entity_by_source_ref(
-        self, source_ref: str, programme_slug: str | None
+        self,
+        source_ref: str,
+        programme_slug: str | None,
+        adapter_code: str | None = None,
     ) -> dict[str, Any] | None:
-        """Fetch a matching imported entity using the source-reference index."""
-        programme_filter = (
-            "programme_slug IS NULL"
-            if programme_slug is None
-            else "programme_slug=%s"
-        )
-        params = (
-            (source_ref,)
-            if programme_slug is None
-            else (source_ref, programme_slug)
-        )
+        """Fetch a matching imported entity using normalized source identity."""
+        programme_filter = "e.programme_slug IS NULL"
+        params: tuple[Any, ...] = ()
+        if programme_slug is not None:
+            programme_filter = "e.programme_slug=%s"
+            params = (programme_slug,)
+        adapter_filter = ""
+        source_params: tuple[Any, ...] = (source_ref,)
+        if adapter_code:
+            adapter_filter = "AND s.adapter_code=%s"
+            source_params = (source_ref, adapter_code)
         with self.connection() as connection:
             row = connection.execute(
-                f"SELECT {PROJECTIONS['entities']} FROM geodata_entity "
-                "WHERE public_properties->>'sourceRef'=%s "
-                f"AND {programme_filter} LIMIT 1",
-                params,
+                f"SELECT {PROJECTIONS['entities']} FROM geodata_entity AS e "
+                "WHERE "
+                "((%s::text IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM source_reference AS s "
+                "WHERE s.entity_id=e.id AND s.source_record_id=%s "
+                f"{adapter_filter}"
+                ")) OR "
+                "(e.public_properties->>'sourceRef'=%s AND "
+                "(%s::text IS NULL OR "
+                "e.public_properties#>>'{provenance,adapter}'=%s))) "
+                f"AND {programme_filter} ORDER BY e.id LIMIT 1",
+                (
+                    adapter_code,
+                    *source_params,
+                    source_ref,
+                    adapter_code,
+                    adapter_code,
+                    *params,
+                ),
             ).fetchone()
         if not row:
             return None
@@ -424,7 +457,8 @@ class RowRepository:
                 rows = connection.execute(
                     "SELECT id::text, ST_Distance(geom::geography, "
                     "ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)::geography) "
-                    "FROM geodata_entity WHERE id<>%s AND ST_DWithin("
+                    "FROM geodata_entity WHERE id<>%s AND lifecycle_status "
+                    "IN ('CANDIDATE','APPROVED') AND ST_DWithin("
                     "geom::geography, "
                     "ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)::geography, %s) "
                     "ORDER BY 2, id",

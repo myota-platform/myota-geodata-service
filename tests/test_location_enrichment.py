@@ -135,6 +135,129 @@ class LocationEnrichmentTests(unittest.TestCase):
             request_event["payload"]["reason"], "GEOMETRY_CHANGED"
         )
 
+    def test_review_approval_queues_missing_location_metadata(self):
+        entity = GeoHandler.store.items["entity-1"]
+        entity["locationEnrichmentStatus"] = "FAILED"
+        with (
+            patch.object(GeoHandler, "_authorize_review"),
+            patch.object(GeoHandler.location_executor, "submit") as submit,
+        ):
+            result = GeoHandler.review(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {
+                        "decision": "APPROVED",
+                        "reviewerId": "admin-1",
+                    },
+                },
+            )
+
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["locationEnrichmentStatus"], "QUEUED")
+        self.assertTrue(result["locationEnrichmentOnlyMissing"])
+        request_event = next(
+            event
+            for event in GeoHandler.store.events
+            if event["eventType"]
+            == "geodata.entity.location-enrichment-requested.v1"
+        )
+        self.assertEqual(
+            request_event["payload"]["reason"], "LIFECYCLE_PROMOTED"
+        )
+        self.assertTrue(request_event["payload"]["onlyMissing"])
+        if GeoHandler.store.durable:
+            submit.assert_not_called()
+        else:
+            submit.assert_called_once()
+
+    def test_status_promotion_to_candidate_queues_missing_location_metadata(
+        self,
+    ):
+        entity = GeoHandler.store.items["entity-1"]
+        entity["status"] = "PENDING"
+        entity["locationEnrichmentStatus"] = "FAILED"
+        with (
+            patch.object(GeoHandler, "_authorize_review"),
+            patch.object(GeoHandler.location_executor, "submit") as submit,
+        ):
+            result = GeoHandler.set_status(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {
+                        "status": "CANDIDATE",
+                        "reviewerId": "admin-1",
+                    },
+                },
+            )
+
+        self.assertEqual(result["status"], "CANDIDATE")
+        self.assertEqual(result["locationEnrichmentStatus"], "QUEUED")
+        self.assertTrue(result["locationEnrichmentOnlyMissing"])
+        self.assertTrue(
+            any(
+                event["eventType"]
+                == "geodata.entity.location-enrichment-requested.v1"
+                for event in GeoHandler.store.events
+            )
+        )
+        if GeoHandler.store.durable:
+            submit.assert_not_called()
+        else:
+            submit.assert_called_once()
+
+    def test_rejection_does_not_queue_location_enrichment(self):
+        entity = GeoHandler.store.items["entity-1"]
+        entity["locationEnrichmentStatus"] = "FAILED"
+        with (
+            patch.object(GeoHandler, "_authorize_review"),
+            patch.object(GeoHandler.location_executor, "submit") as submit,
+        ):
+            result = GeoHandler.review(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {
+                        "decision": "REJECTED",
+                        "reviewerId": "admin-1",
+                    },
+                },
+            )
+
+        submit.assert_not_called()
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["locationEnrichmentStatus"], "FAILED")
+        self.assertFalse(
+            any(
+                event["eventType"]
+                == "geodata.entity.location-enrichment-requested.v1"
+                for event in GeoHandler.store.events
+            )
+        )
+
+    def test_promotion_does_not_duplicate_current_queued_request(self):
+        with patch.object(GeoHandler, "_authorize_review"):
+            result = GeoHandler.review(
+                None,
+                {
+                    "entityId": "entity-1",
+                    "_body": {
+                        "decision": "APPROVED",
+                        "reviewerId": "admin-1",
+                    },
+                },
+            )
+
+        requests = [
+            event
+            for event in GeoHandler.store.events
+            if event["eventType"]
+            == "geodata.entity.location-enrichment-requested.v1"
+        ]
+        self.assertEqual(requests, [])
+        self.assertEqual(result["locationEnrichmentRequestId"], "request-1")
+
     def test_lookup_never_overwrites_manual_parent_values_or_their_codes(self):
         from reverse_geocoder import apply_location_result
 

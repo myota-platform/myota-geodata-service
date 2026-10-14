@@ -1405,6 +1405,24 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def _queue_missing_location_metadata_on_promotion(
+        entity: dict[str, Any], *, requested_by: str | None = None
+    ) -> None:
+        """Queue provider enrichment when an entity enters an active lifecycle."""
+        if entity.get("status") not in {"APPROVED", "CANDIDATE"}:
+            return
+        if not GeoHandler._missing_location_fields(entity):
+            return
+        if not isinstance(entity.get("geometry"), dict):
+            return
+        GeoHandler._queue_location_enrichment(
+            entity,
+            reason="LIFECYCLE_PROMOTED",
+            requested_by=requested_by,
+            only_missing=True,
+        )
+
+    @staticmethod
     def _process_location_enrichment(
         entity_id: str,
         request_id: str,
@@ -1505,8 +1523,10 @@ class GeoHandler(JsonHandler):
             }
 
     @staticmethod
-    def _possible_duplicates(entity: dict[str, Any]) -> list[dict[str, Any]]:
-        """Find existing entities whose geometry is identical or under 50 m away."""
+    def _possible_duplicates(
+        entity: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Find nearby persisted catalogue candidates and approved entities."""
         geometry = entity.get("geometry")
         if not geometry:
             return []
@@ -1539,7 +1559,12 @@ class GeoHandler(JsonHandler):
                 }
             )
         return sorted(
-            matches, key=lambda match: (match["distanceMeters"], match["name"])
+            matches,
+            key=lambda match: (
+                match["distanceMeters"],
+                match["name"],
+                match.get("entityId", ""),
+            ),
         )
 
     @staticmethod
@@ -1577,7 +1602,22 @@ class GeoHandler(JsonHandler):
                 source_ref = str(
                     props.get("sourceRef")
                     or props.get("id")
-                    or f"{source_key}:record-{index}"
+                    or props.get("@id")
+                    or feature.get("id")
+                    or raw_feature.get("id")
+                    # A row number is only stable inside this import. Reusing
+                    # it across manual uploads collides with the unique
+                    # (adapter_code, source_record_id) key and can strand a
+                    # promotion before it materializes an entity.
+                    or f"{source_key}:import-{run_id}:record-{index}"
+                )
+                source_ref = GeoHandler._resolve_legacy_manual_source_ref(
+                    source_ref,
+                    raw_feature,
+                    run_id=run_id,
+                    ordinal=index,
+                    source_key=source_key,
+                    adapter=adapter,
                 )
                 if props.get("skipReason") == "FILTERED_TAG":
                     skipped.append(
@@ -1606,7 +1646,7 @@ class GeoHandler(JsonHandler):
                 )
                 existing = (
                     GeoHandler.store.entity_by_source_ref(
-                        source_ref, programme_slug
+                        source_ref, programme_slug, adapter
                     )
                     if source_ref
                     else None
@@ -1812,6 +1852,92 @@ class GeoHandler(JsonHandler):
                 field: entity.get(field) for field in LOCATION_FIELDS
             },
         }
+
+    @staticmethod
+    def _resolve_legacy_manual_source_ref(
+        source_ref: str,
+        source_feature: dict[str, Any] | None,
+        *,
+        run_id: str,
+        ordinal: int,
+        source_key: str = "MANUAL",
+        adapter: str = "MANUAL",
+    ) -> str:
+        """Replace old reusable manual row numbers with stable/scoped IDs.
+
+        Historical manual imports used ``MANUAL:record-N`` across every
+        import. Those values are placeholders, not globally stable source
+        identities, and can already belong to an unrelated entity. Prefer an
+        identifier captured in the source feature; when none exists, scope
+        the fallback to this import run.
+        """
+        if adapter != "MANUAL" or not re.fullmatch(
+            r"MANUAL:record-\d+", str(source_ref), flags=re.IGNORECASE
+        ):
+            return str(source_ref)
+
+        feature = source_feature or {}
+        properties = feature.get("properties") or {}
+        for stable_source_ref in (
+            properties.get("sourceRef"),
+            properties.get("@id"),
+            properties.get("id"),
+            feature.get("id"),
+        ):
+            if stable_source_ref:
+                stable_source_ref = str(stable_source_ref)
+            else:
+                continue
+            if not re.fullmatch(
+                r"MANUAL:record-\d+",
+                stable_source_ref,
+                flags=re.IGNORECASE,
+            ):
+                return stable_source_ref
+
+        return f"{source_key}:import-{run_id}:record-{ordinal}"
+
+    @staticmethod
+    def _repair_legacy_candidate_source_ref(
+        candidate: dict[str, Any],
+    ) -> bool:
+        """Repair a persisted legacy manual placeholder before promotion."""
+        entity = candidate.get("entity") or {}
+        source_ref = entity.get("sourceRef")
+        provenance = entity.get("provenance") or {}
+        adapter = provenance.get("adapter") or "MANUAL"
+        if (
+            not source_ref
+            or adapter != "MANUAL"
+            or candidate.get("existingEntityId")
+        ):
+            return False
+
+        candidate_source = candidate.get("candidateSource") or {}
+        source_key = (
+            provenance.get("sourceKey")
+            or candidate_source.get("sourceKey")
+            or "MANUAL"
+        )
+        resolved = GeoHandler._resolve_legacy_manual_source_ref(
+            str(source_ref),
+            provenance.get("sourceFeature"),
+            run_id=str(candidate.get("importRunId") or "legacy"),
+            ordinal=int(candidate.get("ordinal") or 0),
+            source_key=str(source_key),
+            adapter=adapter,
+        )
+        if resolved == source_ref:
+            return False
+
+        entity["sourceRef"] = resolved
+        entity_candidate_source = entity.get("candidateSource")
+        if isinstance(entity_candidate_source, dict):
+            entity_candidate_source["sourceRef"] = resolved
+        if isinstance(candidate_source, dict):
+            candidate_source["sourceRef"] = resolved
+            candidate["candidateSource"] = candidate_source
+        return True
 
     @staticmethod
     def _materialize_import_candidate(
@@ -3201,6 +3327,10 @@ class GeoHandler(JsonHandler):
                 candidate.get("validationStatus") == "REJECTED"
                 for candidate in candidates
             ),
+            "duplicates": sum(
+                bool(candidate.get("possibleDuplicates"))
+                for candidate in candidates
+            ),
         }
         public_run = {
             key: value
@@ -3245,6 +3375,33 @@ class GeoHandler(JsonHandler):
         GeoHandler.store.refresh_import_runs()
         run = GeoHandler.store.data.setdefault("importRuns", {})[p["runId"]]
         return GeoHandler._import_run_view(run)
+
+    @staticmethod
+    def get_import_processing_queue(
+        _: JsonHandler, p: dict[str, str]
+    ) -> dict[str, Any]:
+        GeoHandler._authorize_import(p)
+        queue_id = str(p["queueId"])
+        GeoHandler.store.refresh_import_queue(queue_id)
+        queue = GeoHandler.store.data.setdefault(
+            "importProcessingQueues", {}
+        ).get(queue_id)
+        if not queue or queue.get("importRunId") != p["runId"]:
+            raise KeyError("import processing queue not found")
+        return {
+            key: queue.get(key)
+            for key in (
+                "id",
+                "importRunId",
+                "candidateIds",
+                "targetStatus",
+                "status",
+                "requestedAt",
+                "startedAt",
+                "completedAt",
+                "result",
+            )
+        }
 
     @staticmethod
     def cancel_import(_: JsonHandler, p: dict[str, str]) -> dict[str, Any]:
@@ -3861,6 +4018,9 @@ class GeoHandler(JsonHandler):
                             )
                         entity_id = candidate.get("entity", {}).get("id")
                         was_existing = entity_id in GeoHandler.store.items
+                        GeoHandler._repair_legacy_candidate_source_ref(
+                            candidate
+                        )
                         GeoHandler._materialize_import_candidate(
                             candidate,
                             queue["targetStatus"],
@@ -3882,10 +4042,21 @@ class GeoHandler(JsonHandler):
                         (updated if was_existing else created).append(
                             entity_id
                         )
-                except (TypeError, ValueError) as error:
+                except Exception as error:
+                    sqlstate = str(getattr(error, "sqlstate", "") or "")
+                    if not isinstance(error, (TypeError, ValueError)) and not (
+                        sqlstate.startswith("23")
+                    ):
+                        raise
                     GeoHandler.store.rollback_pending()
+                    message = (
+                        "The source record conflicts with an existing entity. "
+                        "Check the import source ID and retry."
+                        if sqlstate.startswith("23")
+                        else str(error)
+                    )
                     errors.append(
-                        {"candidateId": candidate_id, "message": str(error)}
+                        {"candidateId": candidate_id, "message": message}
                     )
             with GeoHandler.store.lock, GeoHandler.store.transaction():
                 queue = GeoHandler.store.data["importProcessingQueues"][
@@ -4007,10 +4178,31 @@ class GeoHandler(JsonHandler):
                 )
             if target_status == "APPROVED":
                 GeoHandler._authorize_review(p, candidate.get("entity") or {})
-            if candidate.get(
-                "validationStatus"
-            ) == "PROCESSED" or candidate.get("processingQueueId"):
+            if candidate.get("validationStatus") == "PROCESSED":
                 raise ValueError("record is already promoted or queued")
+            previous_queue_id = candidate.get("processingQueueId")
+            if previous_queue_id:
+                GeoHandler.store.refresh_import_queue(str(previous_queue_id))
+                previous_queue = GeoHandler.store.data.setdefault(
+                    "importProcessingQueues", {}
+                ).get(str(previous_queue_id))
+                previous_errors = (
+                    previous_queue.get("result", {}).get("errors", [])
+                    if previous_queue
+                    else []
+                )
+                failed_candidate_ids = {
+                    str(item.get("candidateId"))
+                    for item in previous_errors
+                    if isinstance(item, dict) and item.get("candidateId")
+                }
+                if (
+                    candidate.get("validationStatus") != "CONFIRMED"
+                    or not previous_queue
+                    or previous_queue.get("status") != "FAILED"
+                    or str(candidate_id) not in failed_candidate_ids
+                ):
+                    raise ValueError("record is already promoted or queued")
             candidate.update(
                 {
                     "validationStatus": "CONFIRMED",
@@ -4464,6 +4656,10 @@ class GeoHandler(JsonHandler):
             }
         )
         entity["updatedAt"] = now()
+        if body["decision"] == "APPROVED":
+            GeoHandler._queue_missing_location_metadata_on_promotion(
+                entity, requested_by=body["reviewerId"]
+            )
         GeoHandler.store.event(
             "geodata.entity.reviewed.v1", "entity", entity["id"], entity
         )
@@ -4521,6 +4717,10 @@ class GeoHandler(JsonHandler):
             }
         )
         entity["updatedAt"] = changed_at
+        if target_status in {"APPROVED", "CANDIDATE"}:
+            GeoHandler._queue_missing_location_metadata_on_promotion(
+                entity, requested_by=body["reviewerId"]
+            )
         GeoHandler.store.event(
             "geodata.entity.status-changed.v1",
             "entity",

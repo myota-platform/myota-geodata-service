@@ -424,12 +424,14 @@ never replace those values or their corresponding codes. Removing a field from
 `manualFields` returns it to provider-managed values and queues an `only
 missing` lookup.
 
-Enrichment runs after a candidate/approved entity is materialized when required
-location values are missing, and after a geometry or geometry-type change. A
-geometry change queues a refresh for the new coordinates; manual values remain
-protected. The request ID and geometry hash are rechecked after the provider
-call, so stale results cannot overwrite a later edit. Administrators can
-manually queue missing metadata from Entity Management; the endpoint is
+Enrichment runs when an entity is materialized as a candidate or approved, and
+when its lifecycle changes to candidate or approved, if required location
+values are missing. Geometry or geometry-type changes queue a refresh for the
+new coordinates; manual values remain protected. Lifecycle promotion queues
+only missing fields, and the promotion and enrichment request are committed in
+the same transaction. The request ID and geometry hash are rechecked after the
+provider call, so stale results cannot overwrite a later edit. Administrators
+can manually queue missing metadata from Entity Management; the endpoint is
 `POST /v1/geodata/entities/{entityId}/location-enrichment-requests`. It writes a
 transactional outbox event consumed by the durable
 `geodata-location-enrichment-v1` worker. A queued or failed lookup leaves the
@@ -515,6 +517,27 @@ validated processing queue can create a `CANDIDATE` or, for an authorized
 administrator, an `APPROVED` entity. Community proposals use
 `COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
+Candidate review includes possible duplicate evidence for persisted catalogue
+entities whose lifecycle status is `CANDIDATE` or `APPROVED`, within 50 metres.
+Staged candidates from the same or another import run are not compared. The
+evidence is saved with the durable candidate and includes the matched record,
+distance, and geometry match type, so it remains visible after API reloads.
+This is a review warning; it does not auto-reject or promote a record.
+Source-provided identifiers such as OSM `@id` are retained. When no stable
+source identifier exists, the generated reference is scoped to the import run.
+Entity names are not unique because distinct entities can share a name.
+
+Older staged manual imports may contain reusable `MANUAL:record-N`
+placeholders. Promotion repairs these known placeholders using an ID captured
+in the original source feature, or falls back to an import-scoped ID. This
+does not adopt or modify the unrelated entity that previously owned the
+placeholder, and the existing administrator confirmation remains required.
+
+Permanent database constraint conflicts during promotion produce a failed
+queue result with an actionable source-reference message when the conflict
+cannot be repaired safely. Transient database errors remain retryable by the
+worker. Only explicitly confirmed candidates can be promoted.
+
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
 it submits GeoJSON through the `OSM` adapter so OSM tags are filtered,
@@ -573,10 +596,11 @@ The service does not
 create built-in geodata entities at startup; local catalogues must be populated
 through the import or community-proposal workflows.
 
-Each candidate is checked against existing entities; identical geometry or a
-centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
-and a list of comparison geometries. This is a review warning, not an automatic
-merge or rejection.
+Each imported feature is checked against persisted entities in `CANDIDATE` or
+`APPROVED` lifecycle status; staged import candidates are excluded. Identical
+geometry or a centroid distance under 50 metres returns
+`dedupeWarning=POSSIBLE_DUPLICATE` and a list of comparison geometries. This is
+a review warning, not an automatic merge or rejection.
 
 During normalization, preprocessing also derives the canonical candidate display
 name from common GIS property aliases. Explicit `name` values take precedence,
@@ -604,7 +628,14 @@ Successful promotion deletes the staged record; rejection also removes it from
 the import detail. The promotion request emits
 `geodata.import.processing.queued.v1` to the
 `myota.geodata.import.process.v1` subject. The durable worker consumes the
-database-backed queue idempotently. The default whole-object limit is 1 GiB
+database-backed queue idempotently. Authorized reviewers can poll `GET
+/v1/geodata/imports/{runId}/processing-queues/{queueId}` for QUEUED, PROCESSING,
+COMPLETED, or FAILED state and per-candidate created, updated, and error
+results. The route returns not-found when the queue does not belong to the
+requested import. A failed candidate may be submitted in a new promotion
+attempt only when its previous queue is terminal and records that candidate as
+failed; successful or active queue assignments remain protected from duplicate
+promotion. The default whole-object limit is 1 GiB
 (`MYOTA_UPLOAD_MAX_BYTES`); deployments may set a lower limit. Each part is
 temporarily staged as a bounded file (16 MiB by default), not the entire source
 document.

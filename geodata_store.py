@@ -353,7 +353,21 @@ class CompatibilityGeodataStore(Store):
                             entity.get("provenance") or {},
                             default=json_default,
                         ),
-                        json.dumps(entity, default=json_default),
+                        json.dumps(
+                            {
+                                **entity,
+                                "_importReview": {
+                                    "dedupeWarning": candidate.get(
+                                        "dedupeWarning"
+                                    ),
+                                    "possibleDuplicates": candidate.get(
+                                        "possibleDuplicates"
+                                    )
+                                    or [],
+                                },
+                            },
+                            default=json_default,
+                        ),
                         candidate.get("validationStatus", "PENDING"),
                         candidate.get("validationNote"),
                         candidate.get("validatedBy"),
@@ -468,8 +482,8 @@ class CompatibilityGeodataStore(Store):
                     "FROM geodata_entity "
                     "WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326) "
                     "AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326)) "
-                    "AND (%s IS NULL OR programme_slug = %s) "
-                    "AND (%s IS NULL OR lifecycle_status = %s) "
+                    "AND (%s::text IS NULL OR programme_slug = %s) "
+                    "AND (%s::text IS NULL OR lifecycle_status = %s) "
                     "ORDER BY name, id LIMIT %s",
                     (
                         *bounds,
@@ -675,12 +689,14 @@ class GeodataStore(CompatibilityGeodataStore):
             )
             self.mark_import_candidate_dirty(candidate_id)
 
-    def entity_by_source_ref(self, source_ref, programme_slug):
+    def entity_by_source_ref(
+        self, source_ref, programme_slug, adapter_code=None
+    ):
         """Look up an imported entity without materializing the full catalogue."""
         if self.durable:
             self.hydrate()
             return self._repository.entity_by_source_ref(
-                source_ref, programme_slug
+                source_ref, programme_slug, adapter_code
             )
         with self.lock:
             return next(
@@ -689,6 +705,11 @@ class GeodataStore(CompatibilityGeodataStore):
                     for item in self.items.values()
                     if item.get("sourceRef") == source_ref
                     and item.get("programmeSlug") == programme_slug
+                    and (
+                        not adapter_code
+                        or (item.get("provenance") or {}).get("adapter")
+                        in (None, adapter_code)
+                    )
                 ),
                 None,
             )
@@ -706,6 +727,8 @@ class GeodataStore(CompatibilityGeodataStore):
             matches = []
             for item in self.items.values():
                 if item.get("id") == exclude_id or not item.get("geometry"):
+                    continue
+                if item.get("status") not in {"CANDIDATE", "APPROVED"}:
                     continue
                 distance = geometry_distance_meters(geometry, item["geometry"])
                 if distance < distance_meters:
