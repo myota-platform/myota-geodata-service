@@ -1405,6 +1405,24 @@ class GeoHandler(JsonHandler):
         return entity
 
     @staticmethod
+    def _queue_missing_location_metadata_on_promotion(
+        entity: dict[str, Any], *, requested_by: str | None = None
+    ) -> None:
+        """Queue provider enrichment when an entity enters an active lifecycle."""
+        if entity.get("status") not in {"APPROVED", "CANDIDATE"}:
+            return
+        if not GeoHandler._missing_location_fields(entity):
+            return
+        if not isinstance(entity.get("geometry"), dict):
+            return
+        GeoHandler._queue_location_enrichment(
+            entity,
+            reason="LIFECYCLE_PROMOTED",
+            requested_by=requested_by,
+            only_missing=True,
+        )
+
+    @staticmethod
     def _process_location_enrichment(
         entity_id: str,
         request_id: str,
@@ -4638,6 +4656,10 @@ class GeoHandler(JsonHandler):
             }
         )
         entity["updatedAt"] = now()
+        if body["decision"] == "APPROVED":
+            GeoHandler._queue_missing_location_metadata_on_promotion(
+                entity, requested_by=body["reviewerId"]
+            )
         GeoHandler.store.event(
             "geodata.entity.reviewed.v1", "entity", entity["id"], entity
         )
@@ -4695,6 +4717,10 @@ class GeoHandler(JsonHandler):
             }
         )
         entity["updatedAt"] = changed_at
+        if target_status in {"APPROVED", "CANDIDATE"}:
+            GeoHandler._queue_missing_location_metadata_on_promotion(
+                entity, requested_by=body["reviewerId"]
+            )
         GeoHandler.store.event(
             "geodata.entity.status-changed.v1",
             "entity",
