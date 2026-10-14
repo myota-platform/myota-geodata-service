@@ -1610,6 +1610,14 @@ class GeoHandler(JsonHandler):
                     # promotion before it materializes an entity.
                     or f"{source_key}:import-{run_id}:record-{index}"
                 )
+                source_ref = GeoHandler._resolve_legacy_manual_source_ref(
+                    source_ref,
+                    raw_feature,
+                    run_id=run_id,
+                    ordinal=index,
+                    source_key=source_key,
+                    adapter=adapter,
+                )
                 if props.get("skipReason") == "FILTERED_TAG":
                     skipped.append(
                         {
@@ -1845,6 +1853,92 @@ class GeoHandler(JsonHandler):
                 field: entity.get(field) for field in LOCATION_FIELDS
             },
         }
+
+    @staticmethod
+    def _resolve_legacy_manual_source_ref(
+        source_ref: str,
+        source_feature: dict[str, Any] | None,
+        *,
+        run_id: str,
+        ordinal: int,
+        source_key: str = "MANUAL",
+        adapter: str = "MANUAL",
+    ) -> str:
+        """Replace old reusable manual row numbers with stable/scoped IDs.
+
+        Historical manual imports used ``MANUAL:record-N`` across every
+        import. Those values are placeholders, not globally stable source
+        identities, and can already belong to an unrelated entity. Prefer an
+        identifier captured in the source feature; when none exists, scope
+        the fallback to this import run.
+        """
+        if adapter != "MANUAL" or not re.fullmatch(
+            r"MANUAL:record-\d+", str(source_ref), flags=re.IGNORECASE
+        ):
+            return str(source_ref)
+
+        feature = source_feature or {}
+        properties = feature.get("properties") or {}
+        for stable_source_ref in (
+            properties.get("sourceRef"),
+            properties.get("@id"),
+            properties.get("id"),
+            feature.get("id"),
+        ):
+            if stable_source_ref:
+                stable_source_ref = str(stable_source_ref)
+            else:
+                continue
+            if not re.fullmatch(
+                r"MANUAL:record-\d+",
+                stable_source_ref,
+                flags=re.IGNORECASE,
+            ):
+                return stable_source_ref
+
+        return f"{source_key}:import-{run_id}:record-{ordinal}"
+
+    @staticmethod
+    def _repair_legacy_candidate_source_ref(
+        candidate: dict[str, Any],
+    ) -> bool:
+        """Repair a persisted legacy manual placeholder before promotion."""
+        entity = candidate.get("entity") or {}
+        source_ref = entity.get("sourceRef")
+        provenance = entity.get("provenance") or {}
+        adapter = provenance.get("adapter") or "MANUAL"
+        if (
+            not source_ref
+            or adapter != "MANUAL"
+            or candidate.get("existingEntityId")
+        ):
+            return False
+
+        candidate_source = candidate.get("candidateSource") or {}
+        source_key = (
+            provenance.get("sourceKey")
+            or candidate_source.get("sourceKey")
+            or "MANUAL"
+        )
+        resolved = GeoHandler._resolve_legacy_manual_source_ref(
+            str(source_ref),
+            provenance.get("sourceFeature"),
+            run_id=str(candidate.get("importRunId") or "legacy"),
+            ordinal=int(candidate.get("ordinal") or 0),
+            source_key=str(source_key),
+            adapter=adapter,
+        )
+        if resolved == source_ref:
+            return False
+
+        entity["sourceRef"] = resolved
+        entity_candidate_source = entity.get("candidateSource")
+        if isinstance(entity_candidate_source, dict):
+            entity_candidate_source["sourceRef"] = resolved
+        if isinstance(candidate_source, dict):
+            candidate_source["sourceRef"] = resolved
+            candidate["candidateSource"] = candidate_source
+        return True
 
     @staticmethod
     def _materialize_import_candidate(
@@ -3925,6 +4019,9 @@ class GeoHandler(JsonHandler):
                             )
                         entity_id = candidate.get("entity", {}).get("id")
                         was_existing = entity_id in GeoHandler.store.items
+                        GeoHandler._repair_legacy_candidate_source_ref(
+                            candidate
+                        )
                         GeoHandler._materialize_import_candidate(
                             candidate,
                             queue["targetStatus"],
