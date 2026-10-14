@@ -74,6 +74,27 @@ class ImportQueueTests(unittest.TestCase):
             stable_candidate["entity"]["sourceRef"], "relation/7917223"
         )
 
+        existing_entity = {
+            "id": "existing-source-reference",
+            "name": "Existing imported park",
+            "programmeSlug": None,
+            "status": "CANDIDATE",
+            "sourceRef": "relation/7917223",
+            "geometry": feature["geometry"],
+            "provenance": {"adapter": "MANUAL"},
+        }
+        GeoHandler.store.items[existing_entity["id"]] = existing_entity
+        reimport = GeoHandler._import_features(body, "run-stable-reimport")
+        reimport_candidate = GeoHandler.store.data["importCandidates"][
+            reimport["preprocessed"][0]
+        ]
+        self.assertEqual(
+            reimport_candidate["entity"]["sourceRef"], "relation/7917223"
+        )
+        self.assertEqual(
+            reimport_candidate["existingEntityId"], existing_entity["id"]
+        )
+
         generated_feature = {
             **feature,
             "id": None,
