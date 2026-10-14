@@ -1,4 +1,5 @@
 import os
+import copy
 import tempfile
 import threading
 from pathlib import Path
@@ -92,6 +93,146 @@ class ImportQueueTests(unittest.TestCase):
             second_ref, "manual import:import-run-second:record-0"
         )
         self.assertNotEqual(first_ref, second_ref)
+
+    def test_legacy_manual_record_refs_are_replaced_with_stable_or_scoped_ids(
+        self,
+    ):
+        body = {
+            "adapter": "MANUAL",
+            "format": "GEOJSON",
+            "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "legacy manual import"},
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": "relation/18321907",
+                    "properties": {
+                        "name": "Imported park",
+                        "sourceRef": "MANUAL:record-4",
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [-5.99, 37.39],
+                    },
+                }
+            ],
+        }
+
+        result = GeoHandler._import_features(body, "run-repair-id")
+        candidate = GeoHandler.store.data["importCandidates"][
+            result["preprocessed"][0]
+        ]
+        self.assertEqual(candidate["entity"]["sourceRef"], "relation/18321907")
+
+        no_id_body = {
+            **body,
+            "features": [
+                {
+                    **body["features"][0],
+                    "id": None,
+                    "properties": {
+                        "name": "Imported park without source ID",
+                        "sourceRef": "MANUAL:record-4",
+                    },
+                }
+            ],
+        }
+        first = GeoHandler._import_features(no_id_body, "run-no-id-first")
+        second = GeoHandler._import_features(no_id_body, "run-no-id-second")
+        first_candidate = GeoHandler.store.data["importCandidates"][
+            first["preprocessed"][0]
+        ]
+        second_candidate = GeoHandler.store.data["importCandidates"][
+            second["preprocessed"][0]
+        ]
+        self.assertEqual(
+            first_candidate["entity"]["sourceRef"],
+            "legacy manual import:import-run-no-id-first:record-0",
+        )
+        self.assertNotEqual(
+            first_candidate["entity"]["sourceRef"],
+            second_candidate["entity"]["sourceRef"],
+        )
+
+    def test_legacy_candidate_promotion_does_not_mutate_conflicting_entity(
+        self,
+    ):
+        result = GeoHandler.enqueue_import(
+            None,
+            {
+                "_body": {
+                    "adapter": "MANUAL",
+                    "format": "GEOJSON",
+                    "entityType": "MUNICIPAL_PARK",
+                    "source": {"name": "legacy staged import"},
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "id": "relation/18321907",
+                            "properties": {"name": "Imported park"},
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [-5.99, 37.39],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+        candidate_id = result["preprocessed"][0]
+        candidate = GeoHandler.store.data["importCandidates"][candidate_id]
+        candidate["entity"]["sourceRef"] = "MANUAL:record-0"
+        candidate["entity"]["candidateSource"]["sourceRef"] = "MANUAL:record-0"
+        candidate["candidateSource"]["sourceRef"] = "MANUAL:record-0"
+        conflicting_entity = {
+            "id": "existing-manual-record-zero",
+            "name": "Unrelated existing park",
+            "status": "APPROVED",
+            "sourceRef": "MANUAL:record-0",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [-5.8, 37.5],
+            },
+            "provenance": {"adapter": "MANUAL"},
+        }
+        GeoHandler.store.items[conflicting_entity["id"]] = copy.deepcopy(
+            conflicting_entity
+        )
+
+        with patch.object(GeoHandler, "_authorize_import"):
+            GeoHandler.validate_import_candidates(
+                None,
+                {
+                    "runId": result["importRunId"],
+                    "_body": {
+                        "candidateIds": [candidate_id],
+                        "reviewerId": "admin-1",
+                    },
+                },
+            )
+            queue = GeoHandler.process_import_candidates(
+                None,
+                {
+                    "runId": result["importRunId"],
+                    "_body": {
+                        "candidateIds": [candidate_id],
+                        "targetStatus": "APPROVED",
+                        "processorId": "admin-1",
+                    },
+                },
+            )
+
+        self.assertEqual(queue["status"], "COMPLETED")
+        self.assertEqual(queue["result"]["errors"], [])
+        created_id = queue["result"]["created"][0]
+        self.assertNotEqual(created_id, conflicting_entity["id"])
+        promoted = GeoHandler.store.items[created_id]
+        self.assertEqual(promoted["status"], "APPROVED")
+        self.assertEqual(promoted["sourceRef"], "relation/18321907")
+        self.assertEqual(
+            GeoHandler.store.items[conflicting_entity["id"]],
+            conflicting_entity,
+        )
 
     def test_import_marks_nearby_candidates_from_the_same_run(self):
         body = {

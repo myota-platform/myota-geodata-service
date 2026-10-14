@@ -524,10 +524,16 @@ identifiers such as OSM `@id` are retained. When no stable source identifier
 exists, the generated reference is scoped to the import run. Entity names are
 not unique because distinct entities can share a name.
 
+Older staged manual imports may contain reusable `MANUAL:record-N`
+placeholders. Promotion repairs these known placeholders using an ID captured
+in the original source feature, or falls back to an import-scoped ID. This
+does not adopt or modify the unrelated entity that previously owned the
+placeholder, and the existing administrator confirmation remains required.
+
 Permanent database constraint conflicts during promotion produce a failed
-queue result with an actionable source-reference message. Transient database
-errors remain retryable by the worker. Administrators can retry after fixing
-the import identity; only explicitly confirmed candidates can be promoted.
+queue result with an actionable source-reference message when the conflict
+cannot be repaired safely. Transient database errors remain retryable by the
+worker. Only explicitly confirmed candidates can be promoted.
 
 Text can be pasted through `POST /v1/geodata/imports` with `format` and
 `content`. The admin UI provides an explicit **OpenStreetMap GeoJSON** option;
