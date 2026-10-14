@@ -1507,10 +1507,8 @@ class GeoHandler(JsonHandler):
     @staticmethod
     def _possible_duplicates(
         entity: dict[str, Any],
-        import_run_id: str | None = None,
-        before_ordinal: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Find nearby catalogue entities and earlier candidates in this import."""
+        """Find nearby persisted catalogue candidates and approved entities."""
         geometry = entity.get("geometry")
         if not geometry:
             return []
@@ -1542,27 +1540,12 @@ class GeoHandler(JsonHandler):
                     else "WITHIN_50_METERS",
                 }
             )
-        if import_run_id is not None and before_ordinal is not None:
-            for candidate in GeoHandler.store.nearby_import_candidates(
-                import_run_id, geometry, before_ordinal, 50
-            ):
-                matches.append(
-                    {
-                        **candidate,
-                        "entityTypes": entity_categories(
-                            candidate.get("entity") or {}
-                        ),
-                        "matchType": "IDENTICAL_GEOMETRY"
-                        if candidate["distanceMeters"] == 0
-                        else "WITHIN_50_METERS",
-                    }
-                )
         return sorted(
             matches,
             key=lambda match: (
                 match["distanceMeters"],
                 match["name"],
-                match.get("candidateId", ""),
+                match.get("entityId", ""),
             ),
         )
 
@@ -1726,9 +1709,7 @@ class GeoHandler(JsonHandler):
                 GeoHandler._apply_import_location_metadata(entity, props)
                 GeoHandler._preserve_manual_location(existing, entity)
                 apply_maidenhead_fields(entity)
-                possible_duplicates = GeoHandler._possible_duplicates(
-                    entity, run_id, index
-                )
+                possible_duplicates = GeoHandler._possible_duplicates(entity)
                 candidate = {
                     "importRunId": run_id,
                     "ordinal": index,

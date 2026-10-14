@@ -515,14 +515,15 @@ validated processing queue can create a `CANDIDATE` or, for an authorized
 administrator, an `APPROVED` entity. Community proposals use
 `COMMUNITY_PROPOSAL` as their candidate source and follow the same review path.
 
-Candidate review includes possible duplicate evidence for catalogue entities
-and earlier candidates in the same import within 50 metres. The evidence is
-saved with the durable candidate and includes the matched record, distance,
-and geometry match type, so it remains visible after API reloads. This is a
-review warning; it does not auto-reject or promote a record. Source-provided
-identifiers such as OSM `@id` are retained. When no stable source identifier
-exists, the generated reference is scoped to the import run. Entity names are
-not unique because distinct entities can share a name.
+Candidate review includes possible duplicate evidence for persisted catalogue
+entities whose lifecycle status is `CANDIDATE` or `APPROVED`, within 50 metres.
+Staged candidates from the same or another import run are not compared. The
+evidence is saved with the durable candidate and includes the matched record,
+distance, and geometry match type, so it remains visible after API reloads.
+This is a review warning; it does not auto-reject or promote a record.
+Source-provided identifiers such as OSM `@id` are retained. When no stable
+source identifier exists, the generated reference is scoped to the import run.
+Entity names are not unique because distinct entities can share a name.
 
 Older staged manual imports may contain reusable `MANUAL:record-N`
 placeholders. Promotion repairs these known placeholders using an ID captured
@@ -593,10 +594,11 @@ The service does not
 create built-in geodata entities at startup; local catalogues must be populated
 through the import or community-proposal workflows.
 
-Each candidate is checked against existing entities; identical geometry or a
-centroid distance under 50 metres returns `dedupeWarning=POSSIBLE_DUPLICATE`
-and a list of comparison geometries. This is a review warning, not an automatic
-merge or rejection.
+Each imported feature is checked against persisted entities in `CANDIDATE` or
+`APPROVED` lifecycle status; staged import candidates are excluded. Identical
+geometry or a centroid distance under 50 metres returns
+`dedupeWarning=POSSIBLE_DUPLICATE` and a list of comparison geometries. This is
+a review warning, not an automatic merge or rejection.
 
 During normalization, preprocessing also derives the canonical candidate display
 name from common GIS property aliases. Explicit `name` values take precedence,

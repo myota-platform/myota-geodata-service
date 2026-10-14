@@ -255,7 +255,7 @@ class ImportQueueTests(unittest.TestCase):
             conflicting_entity,
         )
 
-    def test_import_marks_nearby_candidates_from_the_same_run(self):
+    def test_import_does_not_compare_staged_candidates_from_same_run(self):
         body = {
             "adapter": "MANUAL",
             "format": "GEOJSON",
@@ -282,14 +282,10 @@ class ImportQueueTests(unittest.TestCase):
         }
         result = GeoHandler._import_features(body, "run-nearby-candidates")
         candidates = GeoHandler.store.data["importCandidates"]
-        second = candidates[result["preprocessed"][1]]
-
-        self.assertEqual(second["dedupeWarning"], "POSSIBLE_DUPLICATE")
-        self.assertEqual(len(second["possibleDuplicates"]), 1)
-        self.assertEqual(second["possibleDuplicates"][0]["name"], "First park")
-        self.assertEqual(
-            second["possibleDuplicates"][0]["matchType"], "WITHIN_50_METERS"
-        )
+        for candidate_id in result["preprocessed"]:
+            candidate = candidates[candidate_id]
+            self.assertIsNone(candidate["dedupeWarning"])
+            self.assertEqual(candidate["possibleDuplicates"], [])
 
     def test_imported_location_metadata_is_preserved_without_remote_lookup(
         self,
@@ -1467,6 +1463,77 @@ class ImportQueueTests(unittest.TestCase):
         self.assertLess(
             candidate["possibleDuplicates"][0]["distanceMeters"], 50
         )
+
+    def test_import_duplicates_only_match_catalogue_candidates_and_approved(
+        self,
+    ):
+        geometry = {"type": "Point", "coordinates": [-5.99, 37.39]}
+        for entity_id, status in (
+            ("catalogue-candidate", "CANDIDATE"),
+            ("catalogue-approved", "APPROVED"),
+            ("catalogue-rejected", "REJECTED"),
+            ("catalogue-retired", "RETIRED"),
+        ):
+            GeoHandler.store.items[entity_id] = {
+                "id": entity_id,
+                "name": entity_id,
+                "status": status,
+                "entityType": "MUNICIPAL_PARK",
+                "entityTypes": ["MUNICIPAL_PARK"],
+                "geometry": geometry,
+            }
+
+        other_import_candidate_id = "staged-from-another-import"
+        GeoHandler.store.stage_import_candidate(
+            {
+                "id": other_import_candidate_id,
+                "importRunId": "unrelated-run",
+                "ordinal": 0,
+                "entity": {
+                    "id": "staged-other-entity",
+                    "name": "Staged from another import",
+                    "status": "CANDIDATE",
+                    "geometry": geometry,
+                },
+            },
+            is_new=True,
+        )
+
+        body = {
+            "adapter": "MANUAL",
+            "format": "GEOJSON",
+            "entityType": "MUNICIPAL_PARK",
+            "source": {"name": "same import"},
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"name": f"Imported park {index}"},
+                    "geometry": geometry,
+                }
+                for index in range(2)
+            ],
+        }
+        result = GeoHandler._import_features(body, "current-run")
+        candidates = [
+            GeoHandler.store.data["importCandidates"][candidate_id]
+            for candidate_id in result["preprocessed"]
+        ]
+
+        self.assertEqual(len(candidates), 2)
+        for candidate in candidates:
+            matches = candidate["possibleDuplicates"]
+            self.assertEqual(
+                {match["entityId"] for match in matches},
+                {"catalogue-candidate", "catalogue-approved"},
+            )
+            self.assertEqual(
+                {match["status"] for match in matches},
+                {"CANDIDATE", "APPROVED"},
+            )
+            self.assertNotIn(
+                other_import_candidate_id,
+                {match.get("candidateId") for match in matches},
+            )
 
     def test_mark_import_processed_discards_staged_records_and_keeps_summary(
         self,
