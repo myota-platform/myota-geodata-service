@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **Development has moved.** This repository was archived on 2026-11-27 and is
+> read-only. All MyOTA development continues in
+> [`myota-platform/myota-new`](https://github.com/myota-platform/myota-new).
+> Open new issues and pull requests there.
+
 # MyOTA geodata service
 
 MyOTA is a programme-agnostic platform for outdoor activation programmes. MPOTA is represented as a configured programme, not as the platform itself. No rules or charter text are copied from POTA or any other programme: every programme supplies its own configuration, policy, eligibility, awards and public charter.
